@@ -1,55 +1,106 @@
 'use strict';
 
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { StreamType } = require('@discordjs/voice');
+const { spawnYtdlp, getYtdlpCommandForLogs } = require('./ytdlp');
 
-/**
- * Получает аудиопоток через yt-dlp + ffmpeg для YouTube-видео.
- * yt-dlp загружает аудио, ffmpeg перекодирует в Opus для Discord.
- *
- * @param {string} url — YouTube URL
- * @returns {{ stream: import('stream').Readable, type: StreamType }}
- */
+let cachedFfmpegCommand = null;
+
+function resolveFfmpegCommand() {
+  if (cachedFfmpegCommand) return cachedFfmpegCommand;
+
+  const ffmpegStatic = require('ffmpeg-static');
+  const candidates = [
+    process.env.FFMPEG_PATH?.trim(),
+    ffmpegStatic,
+    'ffmpeg',
+  ].filter(Boolean);
+
+  for (const cmd of candidates) {
+    try {
+      const probe = spawnSync(cmd, ['-version'], { stdio: 'ignore', windowsHide: true });
+      if (probe.status === 0) {
+        cachedFfmpegCommand = cmd;
+        return cachedFfmpegCommand;
+      }
+    } catch (_) {}
+  }
+
+  cachedFfmpegCommand = candidates[0] || 'ffmpeg';
+  return cachedFfmpegCommand;
+}
+
 function createYtdlpStream(url) {
-  const ytdlp = spawn('yt-dlp', [
+  const ytdlp = spawnYtdlp([
     '-f', 'bestaudio[ext=webm]/bestaudio',
-    '-o', '-',          // output to stdout
+    '-o', '-',
     '--quiet',
     '--no-warnings',
     '--no-check-certificates',
     url,
   ], {
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
 
-  // ffmpeg конвертирует в формат Opus/OGG — нативный для Discord
-  const ffmpegPath = require('ffmpeg-static');
-  const ffmpeg = spawn(ffmpegPath, [
-    '-i', 'pipe:0',         // input from stdin
+  const ffmpegCommand = resolveFfmpegCommand();
+  const ffmpeg = spawn(ffmpegCommand, [
+    '-i', 'pipe:0',
     '-analyzeduration', '0',
     '-loglevel', '0',
-    '-f', 'opus',            // output format
+    '-f', 'ogg',
     '-acodec', 'libopus',
-    '-ar', '48000',          // Discord requires 48kHz
-    '-ac', '2',              // stereo
+    '-ar', '48000',
+    '-ac', '2',
     '-b:a', '128k',
-    'pipe:1',                // output to stdout
+    'pipe:1',
   ], {
-    stdio: ['pipe', 'pipe', 'ignore'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
 
-  // Корректно завершаем процессы при ошибках
-  ytdlp.on('error', () => { ffmpeg.kill(); });
-  ffmpeg.on('error', () => { ytdlp.kill(); });
-  ytdlp.on('exit', (code) => {
-    if (code !== 0) ffmpeg.stdin.end();
+  let failed = false;
+  let ytdlpStderr = '';
+  let ffmpegStderr = '';
+  const cap = 400;
+
+  ytdlp.stderr?.on('data', (chunk) => {
+    if (ytdlpStderr.length < cap) ytdlpStderr += String(chunk);
+  });
+  ffmpeg.stderr?.on('data', (chunk) => {
+    if (ffmpegStderr.length < cap) ffmpegStderr += String(chunk);
   });
 
-  // Прикрепляем ссылки для cleanup
+  const fail = (message) => {
+    if (failed) return;
+    failed = true;
+    try { ffmpeg.stdin.end(); } catch (_) {}
+    try { ytdlp.kill(); } catch (_) {}
+    try { ffmpeg.kill(); } catch (_) {}
+    ffmpeg.stdout.destroy(new Error(message));
+  };
+
+  ytdlp.on('error', (err) => {
+    fail(`yt-dlp start failed (${getYtdlpCommandForLogs()}): ${err.message}`);
+  });
+  ffmpeg.on('error', (err) => {
+    fail(`ffmpeg start failed (${ffmpegCommand}): ${err.message}`);
+  });
+  ytdlp.on('exit', (code) => {
+    if (code !== 0) {
+      fail(`yt-dlp exited with code ${code}: ${ytdlpStderr.trim() || 'no details'}`);
+      return;
+    }
+    try { ffmpeg.stdin.end(); } catch (_) {}
+  });
+  ffmpeg.on('exit', (code) => {
+    if (code !== 0) {
+      fail(`ffmpeg exited with code ${code}: ${ffmpegStderr.trim() || 'no details'}`);
+    }
+  });
+
   ffmpeg.stdout._ytdlpProc = ytdlp;
   ffmpeg.stdout._ffmpegProc = ffmpeg;
 
@@ -59,10 +110,6 @@ function createYtdlpStream(url) {
   };
 }
 
-/**
- * Уничтожает stream и процессы, созданные createYtdlpStream.
- * @param {import('stream').Readable} stream
- */
 function destroyStream(stream) {
   try { stream._ytdlpProc?.kill(); } catch (_) {}
   try { stream._ffmpegProc?.kill(); } catch (_) {}

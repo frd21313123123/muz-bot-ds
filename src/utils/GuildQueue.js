@@ -9,7 +9,7 @@ const {
   joinVoiceChannel,
   NoSubscriberBehavior,
 } = require('@discordjs/voice');
-const { execFile } = require('child_process');
+const { execYtdlp, getYtdlpCommandForLogs } = require('./ytdlp');
 const { createYtdlpStream, destroyStream } = require('./stream');
 
 /** Таймаут бездействия до авто-отключения (5 минут) */
@@ -157,7 +157,7 @@ class GuildQueue {
     const mixUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
 
     return new Promise((resolve) => {
-      execFile('yt-dlp', [
+      execYtdlp([
         '--flat-playlist',
         '--print', '%(id)s\t%(title)s\t%(duration_string)s',
         '--playlist-items', '2:6',  // пропускаем текущий (1), берём 2-6
@@ -166,7 +166,7 @@ class GuildQueue {
         mixUrl,
       ], { timeout: 15_000, windowsHide: true }, (err, stdout) => {
         if (err || !stdout.trim()) {
-          if (err) console.error('yt-dlp related error:', err.message);
+          if (err) console.error(`yt-dlp related error (${getYtdlpCommandForLogs()}): ${err.message}`);
           return resolve([]);
         }
 
