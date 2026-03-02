@@ -61,6 +61,9 @@ function createYtdlpStream(url) {
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
 
+  // Поглощаем ошибку "write after end" при уничтожении потока
+  ffmpeg.stdin.on('error', () => {});
+
   let failed = false;
   let ytdlpStderr = '';
   let ffmpegStderr = '';
@@ -111,7 +114,10 @@ function createYtdlpStream(url) {
 }
 
 function destroyStream(stream) {
+  // Отвязываем pipe yt-dlp → ffmpeg.stdin перед убийством процессов
+  try { stream._ytdlpProc?.stdout?.unpipe(); } catch (_) {}
   try { stream._ytdlpProc?.kill(); } catch (_) {}
+  try { stream._ffmpegProc?.stdin?.end(); } catch (_) {}
   try { stream._ffmpegProc?.kill(); } catch (_) {}
   try { stream.destroy(); } catch (_) {}
 }

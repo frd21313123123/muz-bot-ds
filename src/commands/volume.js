@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -17,11 +17,11 @@ module.exports = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
     if (!queue?.connection) {
-      return interaction.reply({ content: '❌ Бот не подключён.', ephemeral: true });
+      return interaction.reply({ content: '❌ Бот не подключён.', flags: MessageFlags.Ephemeral });
     }
 
     const level = interaction.options.getInteger('level', true);
     queue.setVolume(level);
-    await interaction.reply({ content: `🔊 Громкость: **${level}%**`, ephemeral: true });
+    await interaction.reply({ content: `🔊 Громкость: **${level}%**`, flags: MessageFlags.Ephemeral });
   },
 };

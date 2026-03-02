@@ -1,6 +1,7 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
+const { getVoiceConnection } = require('@discordjs/voice');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -9,11 +10,28 @@ module.exports = {
 
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
-    if (!queue?.connection) {
-      return interaction.reply({ content: '❌ Бот не подключён к голосовому каналу.', ephemeral: true });
+    const orphanedConnection = getVoiceConnection(interaction.guildId);
+
+    if (!queue && !orphanedConnection) {
+      return interaction.reply({ content: '❌ Бот не подключён к голосовому каналу.', flags: MessageFlags.Ephemeral });
     }
 
-    queue.stop();
-    await interaction.reply({ content: '⏹ Воспроизведение остановлено, очередь очищена.', ephemeral: true });
+    // Пытаемся остановить через queue
+    if (queue) {
+      try {
+        queue.stop();
+      } catch (err) {
+        console.error(`[stop] queue.stop() error: ${err.message}`);
+      }
+      client.queues.delete(interaction.guildId);
+    }
+
+    // Fallback: уничтожить orphaned connection, если осталось
+    const remainingConn = getVoiceConnection(interaction.guildId);
+    if (remainingConn) {
+      try { remainingConn.destroy(); } catch (_) {}
+    }
+
+    await interaction.reply({ content: '⏹ Воспроизведение остановлено, очередь очищена.', flags: MessageFlags.Ephemeral });
   },
 };
