@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -10,7 +10,7 @@ module.exports = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
     if (!queue?.connection) {
-      return interaction.reply({ content: '❌ Бот не подключён.', ephemeral: true });
+      return interaction.reply({ content: '❌ Бот не подключён.', flags: MessageFlags.Ephemeral });
     }
 
     const count = queue.tracks.length;
@@ -20,7 +20,7 @@ module.exports = {
       content: count > 0
         ? `🗑 Очередь очищена (удалено **${count}** треков).`
         : '📋 Очередь уже была пустой.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   },
 };

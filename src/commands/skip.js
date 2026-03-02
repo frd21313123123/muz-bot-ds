@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -10,11 +10,11 @@ module.exports = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
     if (!queue?.currentTrack) {
-      return interaction.reply({ content: '❌ Сейчас ничего не играет.', ephemeral: true });
+      return interaction.reply({ content: '❌ Сейчас ничего не играет.', flags: MessageFlags.Ephemeral });
     }
 
     const title = queue.currentTrack.title;
     queue.skip();
-    await interaction.reply({ content: `⏭ Пропущено: **${title}**`, ephemeral: true });
+    await interaction.reply({ content: `⏭ Пропущено: **${title}**`, flags: MessageFlags.Ephemeral });
   },
 };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -10,7 +10,7 @@ module.exports = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
     if (!queue?.connection) {
-      return interaction.reply({ content: '❌ Бот не подключён к голосовому каналу.', ephemeral: true });
+      return interaction.reply({ content: '❌ Бот не подключён к голосовому каналу.', flags: MessageFlags.Ephemeral });
     }
 
     const enabled = queue.toggleAutoplay();
@@ -18,7 +18,7 @@ module.exports = {
       content: enabled
         ? '🔁 Автовоспроизведение **включено** — бот будет ставить похожие треки из рекомендаций YouTube.'
         : '🔁 Автовоспроизведение **выключено**.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   },
 };

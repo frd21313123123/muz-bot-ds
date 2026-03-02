@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
+const { SlashCommandBuilder, PermissionsBitField, MessageFlags } = require('discord.js');
 const GuildQueue = require('../utils/GuildQueue');
 const { resolveQuery } = require('../utils/resolve');
 
@@ -14,11 +14,15 @@ module.exports = {
         .setRequired(true)
         .setMinLength(1)
         .setMaxLength(500),
+    )
+    .addBooleanOption(opt =>
+      opt.setName('autoplay')
+        .setDescription('Бесконечный подбор треков по рекомендациям'),
     ),
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     // ── Проверка: пользователь в голосовом канале ─────────────────────────
     const voiceChannel = interaction.member.voice.channel;
@@ -56,6 +60,12 @@ module.exports = {
       client.queues.set(interaction.guildId, queue);
     }
 
+    // ── Autoplay опция ────────────────────────────────────────────────────
+    const autoplayOpt = interaction.options.getBoolean('autoplay');
+    if (autoplayOpt !== null) {
+      queue.autoplay = autoplayOpt;
+    }
+
     // ── Подключиться к каналу (если нужно) ────────────────────────────────
     if (!queue.connection || queue.voiceChannel?.id !== voiceChannel.id) {
       try {
@@ -66,6 +76,19 @@ module.exports = {
       }
     }
 
+    // ── Заметка о смене autoplay ───────────────────────────────────────────
+    const autoplayNote = autoplayOpt === true
+      ? '\n🔁 Автовоспроизведение **включено**'
+      : autoplayOpt === false
+        ? '\n🔁 Автовоспроизведение **выключено**'
+        : '';
+
+    // ── Активировать плеер автоматически ────────────────────────────────
+    if (!queue._playerChannelId) {
+      queue.setPlayerChannel(interaction.channelId);
+      queue._startPlayerInterval();
+    }
+
     // ── Добавить треки ─────────────────────────────────────────────────────
     if (result.type === 'playlist') {
       const wasIdle = !queue.currentTrack && queue.tracks.length === 0;
@@ -73,7 +96,8 @@ module.exports = {
 
       return interaction.editReply(
         `✅ Добавлено **${result.tracks.length}** треков из плейлиста **${result.name}**` +
-        (wasIdle ? '\n▶ Воспроизведение началось!' : ''),
+        (wasIdle ? '\n▶ Воспроизведение началось!' : '') +
+        autoplayNote,
       );
     }
 
@@ -82,9 +106,10 @@ module.exports = {
     await queue.addTrack(result.track);
 
     return interaction.editReply(
-      wasIdle
+      (wasIdle
         ? `▶ Воспроизведение началось: **${result.track.title}**`
-        : `✅ Добавлено в очередь: **${result.track.title}** (${result.track.duration})`,
+        : `✅ Добавлено в очередь: **${result.track.title}** (${result.track.duration})`) +
+      autoplayNote,
     );
   },
 };
