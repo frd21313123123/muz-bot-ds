@@ -107,13 +107,13 @@ function formatSeconds(sec) {
  */
 function buildProgressBar(elapsed, total, length = 12) {
   if (!total || total <= 0) {
-    return `🔴 ${formatSeconds(elapsed)} / Прямой эфир`;
+    return '🔴 Прямой эфир';
   }
   const ratio = Math.min(elapsed / total, 1);
   const filled = Math.round(ratio * length);
   const empty = length - filled;
   const bar = '▰'.repeat(filled) + '▱'.repeat(empty);
-  return `${bar}  ${formatSeconds(elapsed)} / ${formatSeconds(total)}`;
+  return bar;
 }
 
 /**
