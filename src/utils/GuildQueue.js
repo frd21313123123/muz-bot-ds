@@ -22,6 +22,7 @@ const FADE_STEPS = 15;
 const PLAYER_UPDATE_INTERVAL_MS = 10_000;
 const EARLY_IDLE_TOLERANCE_SEC = 2;
 const EARLY_IDLE_MAX_WAIT_SEC = 15;
+const RADIO_BATCH_SIZE = 25;
 
 /**
  * @typedef {Object} Track
@@ -63,6 +64,7 @@ class GuildQueue {
     this._currentStream = null;
 
     this.autoplay = false;
+    this.loopCurrent = false;
     this.volume = 0.5;
 
     this._advancing = false;
@@ -133,7 +135,9 @@ class GuildQueue {
   }
 
   async _advanceQueue() {
-    if (this.tracks.length > 0) {
+    if (this.loopCurrent && this.currentTrack) {
+      await this._playTrack(this.currentTrack);
+    } else if (this.tracks.length > 0) {
       await this._playTrack(this.tracks.shift());
     } else if (this.autoplay && this.currentTrack) {
       await this._playAutoplay();
@@ -189,9 +193,9 @@ class GuildQueue {
 
   async _playAutoplay() {
     try {
-      const related = await this._fetchRelatedTracks(this.currentTrack.videoId);
+      const related = await this._fetchRelatedTracks(this.currentTrack.videoId, RADIO_BATCH_SIZE);
       if (!related || related.length === 0) {
-        console.log(`[Queue:${this.guildId}] Нет рекомендаций — остановка автовоспроизведения`);
+        console.log(`[Queue:${this.guildId}] Нет рекомендаций — остановка бесконечного воспроизведения`);
         this.currentTrack = null;
         this._trackStartedAt = null;
         this._updatePlayerMessage();
@@ -199,11 +203,13 @@ class GuildQueue {
         return;
       }
 
-      // Берём 2-й трек (1-й обычно текущий), если доступен
-      const next = related.length > 1 ? related[1] : related[0];
+      const [next, ...rest] = related;
+      if (rest.length > 0) {
+        this.tracks.push(...rest);
+      }
       await this._playTrack(next);
     } catch (err) {
-      console.error(`[Queue:${this.guildId}] Autoplay error:`, err.message);
+      console.error(`[Queue:${this.guildId}] Infinite mode error:`, err.message);
       this.currentTrack = null;
       this._trackStartedAt = null;
       this._startIdleTimer();
@@ -212,16 +218,19 @@ class GuildQueue {
 
   /**
    * Получает рекомендованные треки через yt-dlp Radio Mix (RD{videoId}).
+   * @param {number} [maxTracks]
    * @returns {Promise<Track[]>}
    */
-  async _fetchRelatedTracks(videoId) {
+  async _fetchRelatedTracks(videoId, maxTracks = RADIO_BATCH_SIZE) {
     const mixUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
+    const safeMax = Math.max(1, Math.min(maxTracks, 50));
+    const playlistItems = `2:${safeMax + 1}`;
 
     return new Promise((resolve) => {
       execYtdlp([
         '--flat-playlist',
         '--print', '%(id)s\t%(title)s\t%(duration_string)s',
-        '--playlist-items', '2:6',  // пропускаем текущий (1), берём 2-6
+        '--playlist-items', playlistItems, // пропускаем текущий (1), берём 2..N+1
         '--quiet',
         '--no-warnings',
         mixUrl,
@@ -239,7 +248,7 @@ class GuildQueue {
             title: title || 'Без названия',
             duration: duration || '?',
             thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`,
-            requestedBy: '🤖 Автовоспроизведение',
+            requestedBy: '🤖 Бесконечное',
             isAutoplay: true,
           };
         }).filter(t => t.videoId && t.videoId !== videoId);
@@ -521,6 +530,7 @@ class GuildQueue {
 
   skip() {
     if (!this.currentTrack) return false;
+    this.loopCurrent = false;
 
     this._cancelScheduledFade();
 
@@ -542,6 +552,7 @@ class GuildQueue {
   }
 
   stop() {
+    this.loopCurrent = false;
     this._cancelScheduledFade();
 
     if (this.player.state.status === AudioPlayerStatus.Playing && !this._isFading) {
@@ -581,10 +592,20 @@ class GuildQueue {
     this._updatePlayerMessage();
   }
 
-  toggleAutoplay() {
-    this.autoplay = !this.autoplay;
+  setAutoplay(enabled) {
+    this.autoplay = Boolean(enabled);
     this._updatePlayerMessage();
     return this.autoplay;
+  }
+
+  toggleAutoplay() {
+    return this.setAutoplay(!this.autoplay);
+  }
+
+  toggleLoop() {
+    this.loopCurrent = !this.loopCurrent;
+    this._updatePlayerMessage();
+    return this.loopCurrent;
   }
 
   clearQueue() {

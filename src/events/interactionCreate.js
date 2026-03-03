@@ -76,8 +76,19 @@ module.exports = {
             const enabled = queue.toggleAutoplay();
             await interaction.reply({
               content: enabled
-                ? '🔁 Автовоспроизведение **включено**'
-                : '🔁 Автовоспроизведение **выключено**',
+                ? '♾ Бесконечное воспроизведение **включено**'
+                : '♾ Бесконечное воспроизведение **выключено**',
+              flags: MessageFlags.Ephemeral,
+            });
+            break;
+          }
+
+          case 'player_loop': {
+            const enabled = queue.toggleLoop();
+            await interaction.reply({
+              content: enabled
+                ? '🔂 Повтор текущего трека **включён**'
+                : '🔂 Повтор текущего трека **выключен**',
               flags: MessageFlags.Ephemeral,
             });
             break;

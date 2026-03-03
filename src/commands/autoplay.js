@@ -5,7 +5,7 @@ const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('autoplay')
-    .setDescription('🔁 Вкл/выкл автовоспроизведение по рекомендациям YouTube'),
+    .setDescription('♾ Вкл/выкл бесконечное воспроизведение рекомендаций'),
 
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
@@ -16,8 +16,8 @@ module.exports = {
     const enabled = queue.toggleAutoplay();
     await interaction.reply({
       content: enabled
-        ? '🔁 Автовоспроизведение **включено** — бот будет ставить похожие треки из рекомендаций YouTube.'
-        : '🔁 Автовоспроизведение **выключено**.',
+        ? '♾ Бесконечное воспроизведение **включено** — после конца очереди бот добавляет ещё 25 рекомендаций.'
+        : '♾ Бесконечное воспроизведение **выключено**.',
       flags: MessageFlags.Ephemeral,
     });
   },

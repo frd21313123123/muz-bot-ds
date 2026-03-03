@@ -25,7 +25,7 @@ function nowPlayingEmbed(track, autoplay = false) {
     );
 
   if (autoplay && !track.isAutoplay) {
-    embed.addFields({ name: '🔁', value: 'Автовоспроизведение включено', inline: true });
+    embed.addFields({ name: '♾', value: 'Бесконечное воспроизведение включено', inline: true });
   }
 
   if (track.thumbnail) {
@@ -62,13 +62,16 @@ function queueEmbed(queue, page = 1) {
     const list = slice
       .map((t, i) => `\`${start + i + 1}.\` [${t.title}](${t.url}) — ${t.duration}`)
       .join('\n');
-    embed.addFields({ name: `📃 Следующие треки (${queue.tracks.length} в очереди)`, value: list });
+    const queueFieldName = queue.autoplay
+      ? '📃 Следующие треки'
+      : `📃 Следующие треки (${queue.tracks.length} в очереди)`;
+    embed.addFields({ name: queueFieldName, value: list });
   } else if (!queue.currentTrack) {
     embed.setDescription('Очередь пуста. Добавьте трек командой `/play`.');
   }
 
   embed.setFooter({
-    text: `Страница ${page}/${totalPages} • Автовоспроизведение: ${queue.autoplay ? '✅ вкл' : '❌ выкл'}`,
+    text: `Страница ${page}/${totalPages} • Бесконечное: ${queue.autoplay ? '✅ вкл' : '❌ выкл'}`,
   });
 
   return embed;
@@ -137,6 +140,7 @@ function playerEmbed(queue) {
 
   const statusIcon = isPaused ? '⏸' : (track.isAutoplay ? '🤖' : '▶');
   const statusText = isPaused ? 'На паузе' : (track.isAutoplay ? 'Автовоспроизведение' : 'Сейчас играет');
+  const queueCountValue = queue.autoplay ? '∞' : `${queue.tracks.length}`;
 
   const embed = new EmbedBuilder()
     .setColor(isPaused ? COLOR_IDLE : (track.isAutoplay ? 0x57F287 : COLOR_PLAYING))
@@ -144,8 +148,8 @@ function playerEmbed(queue) {
     .setDescription(`**[${track.title}](${track.url})**\n\n${buildProgressBar(elapsed, totalSec)}`)
     .addFields(
       { name: '🔊 Громкость', value: `${Math.round(queue.volume * 100)}%`, inline: true },
-      { name: '🔁 Авто', value: queue.autoplay ? 'Вкл' : 'Выкл', inline: true },
-      { name: '📋 В очереди', value: `${queue.tracks.length}`, inline: true },
+      { name: '♾ Бесконечное', value: queue.autoplay ? 'Вкл' : 'Выкл', inline: true },
+      { name: '📋 В очереди', value: queueCountValue, inline: true },
     );
 
   if (track.thumbnail) {
@@ -157,7 +161,7 @@ function playerEmbed(queue) {
     const next = queue.tracks[0];
     embed.setFooter({ text: `Далее: ${next.title} (${next.duration})` });
   } else if (queue.autoplay) {
-    embed.setFooter({ text: 'Далее: автоподбор по рекомендациям' });
+    embed.setFooter({ text: 'Далее: авто-радио (+25 рекомендаций)' });
   }
 
   return embed;
@@ -186,9 +190,14 @@ function playerActionRow(queue) {
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
       .setCustomId('player_autoplay')
-      .setEmoji('🔁')
-      .setLabel(queue.autoplay ? 'Вкл' : 'Выкл')
+      .setEmoji('♾️')
+      .setLabel(queue.autoplay ? 'Беск: Вкл' : 'Беск: Выкл')
       .setStyle(queue.autoplay ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('player_loop')
+      .setEmoji('🔂')
+      .setLabel(queue.loopCurrent ? '1 трек: Вкл' : '1 трек: Выкл')
+      .setStyle(queue.loopCurrent ? ButtonStyle.Success : ButtonStyle.Secondary),
   );
 }
 
