@@ -94,9 +94,7 @@ function createYtdlpStream(url) {
   ytdlp.on('exit', (code) => {
     if (code !== 0) {
       fail(`yt-dlp exited with code ${code}: ${ytdlpStderr.trim() || 'no details'}`);
-      return;
     }
-    try { ffmpeg.stdin.end(); } catch (_) {}
   });
   ffmpeg.on('exit', (code) => {
     if (code !== 0) {

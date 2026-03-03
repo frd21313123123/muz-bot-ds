@@ -19,7 +19,9 @@ const IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
 /** Параметры fade-out */
 const FADE_DURATION_MS = 1500;
 const FADE_STEPS = 15;
-const FADE_BEFORE_END_MS = 2000;
+const PLAYER_UPDATE_INTERVAL_MS = 10_000;
+const EARLY_IDLE_TOLERANCE_SEC = 2;
+const EARLY_IDLE_MAX_WAIT_SEC = 15;
 
 /**
  * @typedef {Object} Track
@@ -89,11 +91,34 @@ class GuildQueue {
 
   _setupPlayerListeners() {
     this.player.on(AudioPlayerStatus.Idle, async () => {
+      const idleTrack = this.currentTrack;
       this._destroyCurrentStream();
       if (this._advancing) return;
       this._advancing = true;
+
+      const earlyIdleWaitMs = this._getEarlyIdleWaitMs(idleTrack);
+      if (earlyIdleWaitMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, earlyIdleWaitMs));
+        if (idleTrack !== this.currentTrack) {
+          this._advancing = false;
+          return;
+        }
+        if (this.player.state.status !== AudioPlayerStatus.Idle) {
+          this._advancing = false;
+          return;
+        }
+      }
+
       await this._advanceQueue().catch(console.error);
       this._advancing = false;
+    });
+
+    this.player.on('stateChange', (_oldState, newState) => {
+      if (newState.status !== AudioPlayerStatus.Playing) return;
+      if (this._trackStartedAt || !this.currentTrack) return;
+
+      this._trackStartedAt = Date.now();
+      this._updatePlayerMessage();
     });
 
     this.player.on('error', async (err) => {
@@ -146,15 +171,12 @@ class GuildQueue {
       this._clearIdleTimer();
 
       // Сброс time tracking
-      this._trackStartedAt = Date.now();
+      this._trackStartedAt = null;
       this._totalPausedMs = 0;
       this._pauseStartedAt = null;
 
       this.player.play(resource);
       console.log(`[Queue:${this.guildId}] ▶ ${track.title}`);
-
-      // Запланировать fade перед концом трека
-      this._scheduleFadeOut(track.duration);
 
       // Обновить плеер
       this._updatePlayerMessage();
@@ -306,35 +328,30 @@ class GuildQueue {
     return null;
   }
 
-  /**
-   * Планирует fade-out за FADE_BEFORE_END_MS до конца трека.
-   */
-  _scheduleFadeOut(durationStr) {
-    this._cancelScheduledFade();
-    const totalSec = this._parseDuration(durationStr);
-    if (!totalSec || totalSec < 5) return; // слишком короткий или неизвестный — не планируем
-
-    const fadeStartMs = (totalSec * 1000) - FADE_BEFORE_END_MS;
-    if (fadeStartMs <= 0) return;
-
-    this._scheduledFadeTimer = setTimeout(() => {
-      this._scheduledFadeTimer = null;
-      // Проверяем, что ещё играет и не на паузе
-      if (this.player.state.status !== AudioPlayerStatus.Playing) return;
-      if (this._isFading) return;
-
-      this._fadeOutAndExecute(() => {
-        // Ничего не делаем — трек сам закончится и AudioPlayerStatus.Idle сработает
-        // Просто восстановим громкость для следующего трека
-      }, FADE_BEFORE_END_MS);
-    }, fadeStartMs);
-  }
-
   _cancelScheduledFade() {
     if (this._scheduledFadeTimer) {
       clearTimeout(this._scheduledFadeTimer);
       this._scheduledFadeTimer = null;
     }
+  }
+
+  /**
+   * Если плеер ушёл в Idle немного раньше длительности трека,
+   * ждём остаток, чтобы не перескакивать на следующий трек преждевременно.
+   * @param {Track|null} track
+   */
+  _getEarlyIdleWaitMs(track) {
+    if (!track) return 0;
+    const totalSec = this._parseDuration(track.duration);
+    if (!totalSec) return 0;
+
+    const elapsedSec = this.getElapsedSeconds();
+    const remainingSec = totalSec - elapsedSec;
+
+    if (remainingSec <= EARLY_IDLE_TOLERANCE_SEC) return 0;
+    if (remainingSec > EARLY_IDLE_MAX_WAIT_SEC) return 0;
+
+    return Math.ceil(remainingSec * 1000);
   }
 
   // ─── Player message ───────────────────────────────────────────────────────
@@ -396,7 +413,7 @@ class GuildQueue {
     this._stopPlayerInterval();
     this._playerInterval = setInterval(() => {
       this._updatePlayerMessage();
-    }, 1_000);
+    }, PLAYER_UPDATE_INTERVAL_MS);
   }
 
   _stopPlayerInterval() {
