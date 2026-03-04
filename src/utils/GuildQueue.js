@@ -23,6 +23,7 @@ const PLAYER_UPDATE_INTERVAL_MS = 10_000;
 const EARLY_IDLE_TOLERANCE_SEC = 2;
 const EARLY_IDLE_MAX_WAIT_SEC = 15;
 const RADIO_BATCH_SIZE = 25;
+const RADIO_FETCH_TIMEOUT_MS = 15_000;
 
 /**
  * @typedef {Object} Track
@@ -85,6 +86,7 @@ class GuildQueue {
     this._playerInterval = null;
     this._playerChannelId = null;
     this._playerUpdating = false;
+    this._playerUpdateQueued = false;
 
     this._setupPlayerListeners();
   }
@@ -193,7 +195,17 @@ class GuildQueue {
 
   async _playAutoplay() {
     try {
-      const related = await this._fetchRelatedTracks(this.currentTrack.videoId, RADIO_BATCH_SIZE);
+      const seedVideoId = this._resolveVideoId(this.currentTrack);
+      if (!seedVideoId) {
+        console.error(`[Queue:${this.guildId}] Infinite mode stopped: current track has no videoId`);
+        this.currentTrack = null;
+        this._trackStartedAt = null;
+        this._updatePlayerMessage();
+        this._startIdleTimer();
+        return;
+      }
+
+      const related = await this._fetchRelatedTracks(seedVideoId, RADIO_BATCH_SIZE);
       if (!related || related.length === 0) {
         console.log(`[Queue:${this.guildId}] Нет рекомендаций — остановка бесконечного воспроизведения`);
         this.currentTrack = null;
@@ -212,6 +224,7 @@ class GuildQueue {
       console.error(`[Queue:${this.guildId}] Infinite mode error:`, err.message);
       this.currentTrack = null;
       this._trackStartedAt = null;
+      this._updatePlayerMessage();
       this._startIdleTimer();
     }
   }
@@ -222,6 +235,8 @@ class GuildQueue {
    * @returns {Promise<Track[]>}
    */
   async _fetchRelatedTracks(videoId, maxTracks = RADIO_BATCH_SIZE) {
+    if (!videoId) return [];
+
     const mixUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
     const safeMax = Math.max(1, Math.min(maxTracks, 50));
     const playlistItems = `2:${safeMax + 1}`;
@@ -229,29 +244,55 @@ class GuildQueue {
     return new Promise((resolve) => {
       execYtdlp([
         '--flat-playlist',
-        '--print', '%(id)s\t%(title)s\t%(duration_string)s',
+        '-J',
         '--playlist-items', playlistItems, // пропускаем текущий (1), берём 2..N+1
         '--quiet',
         '--no-warnings',
         mixUrl,
-      ], { timeout: 15_000, windowsHide: true }, (err, stdout) => {
+      ], { timeout: RADIO_FETCH_TIMEOUT_MS, windowsHide: true }, (err, stdout) => {
         if (err || !stdout.trim()) {
           if (err) console.error(`yt-dlp related error (${getYtdlpCommandForLogs()}): ${err.message}`);
           return resolve([]);
         }
 
-        const tracks = stdout.trim().split('\n').map(line => {
-          const [id, title, duration] = line.split('\t');
-          return {
+        let payload;
+        try {
+          payload = JSON.parse(stdout);
+        } catch (parseErr) {
+          console.error(`[Queue:${this.guildId}] Failed to parse yt-dlp related JSON: ${parseErr.message}`);
+          return resolve([]);
+        }
+
+        const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+        const seen = new Set([videoId]);
+        const tracks = [];
+
+        for (const entry of entries) {
+          const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+
+          const title = (typeof entry?.title === 'string' && entry.title.trim())
+            ? entry.title.trim()
+            : 'Без названия';
+
+          let duration = (typeof entry?.duration_string === 'string' && entry.duration_string.trim())
+            ? entry.duration_string.trim()
+            : '?';
+          if (duration === '?' && Number.isFinite(entry?.duration) && entry.duration > 0) {
+            duration = this._formatDuration(Math.floor(entry.duration));
+          }
+
+          tracks.push({
             url: `https://www.youtube.com/watch?v=${id}`,
             videoId: id,
-            title: title || 'Без названия',
-            duration: duration || '?',
+            title,
+            duration,
             thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`,
             requestedBy: '🤖 Бесконечное',
             isAutoplay: true,
-          };
-        }).filter(t => t.videoId && t.videoId !== videoId);
+          });
+        }
 
         resolve(tracks);
       });
@@ -263,6 +304,16 @@ class GuildQueue {
       destroyStream(this._currentStream);
       this._currentStream = null;
     }
+  }
+
+  /**
+   * Returns index where manual tracks should be inserted:
+   * after existing manual items, before first autoplay item.
+   * @returns {number}
+   */
+  _getManualInsertIndex() {
+    const firstAutoplayIndex = this.tracks.findIndex((track) => track?.isAutoplay);
+    return firstAutoplayIndex === -1 ? this.tracks.length : firstAutoplayIndex;
   }
 
   _startIdleTimer() {
@@ -337,6 +388,41 @@ class GuildQueue {
     return null;
   }
 
+  /**
+   * Formats seconds into m:ss or h:mm:ss.
+   * @param {number} totalSeconds
+   * @returns {string}
+   */
+  _formatDuration(totalSeconds) {
+    if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return '?';
+
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  /**
+   * Tries to get a valid video id from track metadata.
+   * @param {Track|null} track
+   * @returns {string}
+   */
+  _resolveVideoId(track) {
+    const directId = typeof track?.videoId === 'string' ? track.videoId.trim() : '';
+    if (directId) return directId;
+
+    if (!track?.url) return '';
+    try {
+      return new URL(track.url).searchParams.get('v') || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   _cancelScheduledFade() {
     if (this._scheduledFadeTimer) {
       clearTimeout(this._scheduledFadeTimer);
@@ -389,8 +475,12 @@ class GuildQueue {
    */
   async _updatePlayerMessage() {
     if (!this._playerChannelId) return;
-    if (this._playerUpdating) return; // пропускаем, если предыдущее обновление ещё идёт
+    if (this._playerUpdating) {
+      this._playerUpdateQueued = true;
+      return;
+    }
     this._playerUpdating = true;
+    this._playerUpdateQueued = false;
 
     try {
       const { playerEmbed, playerActionRow } = require('./embeds');
@@ -415,6 +505,10 @@ class GuildQueue {
       console.error(`[Queue:${this.guildId}] Player message error: ${err.message}`);
     } finally {
       this._playerUpdating = false;
+      if (this._playerUpdateQueued) {
+        this._playerUpdateQueued = false;
+        setImmediate(() => this._updatePlayerMessage());
+      }
     }
   }
 
@@ -510,7 +604,12 @@ class GuildQueue {
 
   async addTrack(track) {
     const wasIdle = !this.currentTrack && this.tracks.length === 0;
-    this.tracks.push(track);
+    if (track?.isAutoplay) {
+      this.tracks.push(track);
+    } else {
+      const insertIndex = this._getManualInsertIndex();
+      this.tracks.splice(insertIndex, 0, track);
+    }
     if (wasIdle && !this._advancing) {
       this._advancing = true;
       await this._advanceQueue().catch(console.error);
@@ -520,7 +619,17 @@ class GuildQueue {
 
   async addTracks(tracks) {
     const wasIdle = !this.currentTrack && this.tracks.length === 0;
-    this.tracks.push(...tracks);
+    const manualTracks = tracks.filter((track) => !track?.isAutoplay);
+    const autoplayTracks = tracks.filter((track) => track?.isAutoplay);
+
+    if (manualTracks.length > 0) {
+      const insertIndex = this._getManualInsertIndex();
+      this.tracks.splice(insertIndex, 0, ...manualTracks);
+    }
+    if (autoplayTracks.length > 0) {
+      this.tracks.push(...autoplayTracks);
+    }
+
     if (wasIdle && !this._advancing) {
       this._advancing = true;
       await this._advanceQueue().catch(console.error);
