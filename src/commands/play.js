@@ -29,6 +29,7 @@ module.exports = {
     // ── Проверка прав бота ────────────────────────────────────────────────
     const perms = voiceChannel.permissionsFor(interaction.client.user);
     if (
+      !perms ||
       !perms.has(PermissionsBitField.Flags.Connect) ||
       !perms.has(PermissionsBitField.Flags.Speak)
     ) {

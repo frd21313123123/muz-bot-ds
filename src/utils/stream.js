@@ -60,6 +60,10 @@ function createYtdlpStream(url) {
   });
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
+  ffmpeg.stdin.on('error', () => {
+    // During stop/skip teardown ffmpeg stdin may emit EPIPE/write-after-end.
+    // Exit/error handlers below already control failure flow.
+  });
 
   let failed = false;
   let ytdlpStderr = '';
@@ -76,7 +80,8 @@ function createYtdlpStream(url) {
   const fail = (message) => {
     if (failed) return;
     failed = true;
-    try { ffmpeg.stdin.end(); } catch (_) {}
+    try { ytdlp.stdout.unpipe(ffmpeg.stdin); } catch (_) {}
+    try { ffmpeg.stdin.destroy(); } catch (_) {}
     try { ytdlp.kill(); } catch (_) {}
     try { ffmpeg.kill(); } catch (_) {}
     ffmpeg.stdout.destroy(new Error(message));
@@ -93,6 +98,7 @@ function createYtdlpStream(url) {
       fail(`yt-dlp exited with code ${code}: ${ytdlpStderr.trim() || 'no details'}`);
       return;
     }
+    try { ytdlp.stdout.unpipe(ffmpeg.stdin); } catch (_) {}
     try { ffmpeg.stdin.end(); } catch (_) {}
   });
   ffmpeg.on('exit', (code) => {
@@ -111,6 +117,8 @@ function createYtdlpStream(url) {
 }
 
 function destroyStream(stream) {
+  try { stream._ytdlpProc?.stdout?.unpipe(stream._ffmpegProc?.stdin); } catch (_) {}
+  try { stream._ffmpegProc?.stdin?.destroy(); } catch (_) {}
   try { stream._ytdlpProc?.kill(); } catch (_) {}
   try { stream._ffmpegProc?.kill(); } catch (_) {}
   try { stream.destroy(); } catch (_) {}

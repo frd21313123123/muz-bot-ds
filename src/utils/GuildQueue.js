@@ -139,8 +139,8 @@ class GuildQueue {
         return;
       }
 
-      // Берём 2-й трек (1-й обычно текущий), если доступен
-      const next = related.length > 1 ? related[1] : related[0];
+      // В _fetchRelatedTracks уже запрашиваем playlist-items 2:6, поэтому берём первый.
+      const next = related[0];
       await this._playTrack(next);
     } catch (err) {
       console.error(`[Queue:${this.guildId}] Autoplay error:`, err.message);
