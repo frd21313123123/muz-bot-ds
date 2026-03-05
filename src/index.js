@@ -3,6 +3,13 @@
 // Установить путь к ffmpeg-static до всех импортов
 const ffmpegPath = require('ffmpeg-static');
 process.env.FFMPEG_PATH = ffmpegPath;
+const dns = require('dns');
+
+// On some hosts IPv6 is present in DNS answers but unreachable.
+// Force IPv4-first resolution so Discord voice endpoints connect reliably.
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch (_) {}
 
 require('dotenv').config();
 

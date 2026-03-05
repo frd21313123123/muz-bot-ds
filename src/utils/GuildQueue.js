@@ -28,6 +28,7 @@ const RADIO_FETCH_TIMEOUT_MS = 15_000;
 const VOICE_READY_TIMEOUT_MS = 30_000;
 const VOICE_RECONNECT_TIMEOUT_MS = 5_000;
 const VOICE_JOIN_ATTEMPTS = 3;
+const VOICE_JOIN_RETRY_DELAY_MS = 1_000;
 
 /**
  * @typedef {Object} Track
@@ -74,6 +75,8 @@ class GuildQueue {
 
     this._advancing = false;
     this._idleTimer = null;
+    this._isJoining = false;
+    this._joinPromise = null;
 
     // ── Fade-out state ──────────────────────────────────────────────────
     this._fadeInterval = null;
@@ -556,6 +559,7 @@ class GuildQueue {
     this._destroyPlayerMessage();
     this._destroyCurrentStream();
     this._advancing = false;
+    this._isJoining = false;
     this.currentTrack = null;
     this._trackStartedAt = null;
     this.tracks = [];
@@ -578,62 +582,110 @@ class GuildQueue {
 
   // ─── Публичный API ────────────────────────────────────────────────────────
 
+  /**
+   * Bind connection lifecycle handlers once the connection is ready.
+   * @param {import('@discordjs/voice').VoiceConnection} connection
+   */
+  _bindConnectionHandlers(connection) {
+    if (!connection || connection.__muzHandlersBound) return;
+    connection.__muzHandlersBound = true;
+
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      if (this.connection !== connection) return;
+      debugLog(`[Queue:${this.guildId}] connection disconnected`);
+
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, VOICE_RECONNECT_TIMEOUT_MS),
+          entersState(connection, VoiceConnectionStatus.Connecting, VOICE_RECONNECT_TIMEOUT_MS),
+        ]);
+        debugLog(`[Queue:${this.guildId}] connection is reconnecting`);
+      } catch (err) {
+        if (this.connection !== connection) return;
+        debugLog(`[Queue:${this.guildId}] reconnect window missed: ${err?.message || err}`);
+
+        try {
+          connection.rejoin();
+          await entersState(connection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+          debugLog(`[Queue:${this.guildId}] connection rejoin success`);
+          return;
+        } catch (rejoinErr) {
+          debugLog(`[Queue:${this.guildId}] connection rejoin failed: ${rejoinErr?.message || rejoinErr}`);
+        }
+
+        if (this.connection === connection) {
+          this._cleanup();
+        }
+      }
+    });
+  }
+
   async join(voiceChannel) {
+    if (this._joinPromise) {
+      debugLog(`[Queue:${this.guildId}] join already in progress, waiting`);
+      return this._joinPromise;
+    }
+
     this.voiceChannel = voiceChannel;
     debugLog(
       `[Queue:${this.guildId}] join requested channel=${voiceChannel?.id} name="${voiceChannel?.name || ''}"`,
     );
 
-    if (this.connection) {
-      try { this.connection.destroy(); } catch (_) {}
-    }
-
-    for (let attempt = 1; attempt <= VOICE_JOIN_ATTEMPTS; attempt++) {
-      debugLog(`[Queue:${this.guildId}] join attempt ${attempt}/${VOICE_JOIN_ATTEMPTS}`);
-      this.connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: voiceChannel.guild.id,
-        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-        selfDeaf: true,
-      });
-
-      const activeConnection = this.connection;
-
-      activeConnection.on(VoiceConnectionStatus.Disconnected, async () => {
-        debugLog(`[Queue:${this.guildId}] connection disconnected`);
-        try {
-          await Promise.race([
-            entersState(activeConnection, VoiceConnectionStatus.Signalling, VOICE_RECONNECT_TIMEOUT_MS),
-            entersState(activeConnection, VoiceConnectionStatus.Connecting, VOICE_RECONNECT_TIMEOUT_MS),
-          ]);
-        } catch {
-          if (this.connection === activeConnection) {
-            this._cleanup();
-          }
-        }
-      });
+    this._joinPromise = (async () => {
+      this._isJoining = true;
 
       try {
-        await entersState(activeConnection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
-        debugLog(`[Queue:${this.guildId}] connection ready`);
-        this.connection = activeConnection;
-        this.connection.subscribe(this.player);
-        debugLog(`[Queue:${this.guildId}] connection subscribed to player`);
-        return;
-      } catch (err) {
-        debugLog(`[Queue:${this.guildId}] join attempt failed: ${err.message}`);
-        console.error(
-          `[Queue:${this.guildId}] Voice join attempt ${attempt}/${VOICE_JOIN_ATTEMPTS} failed: ${err.message}`,
-        );
-        try { activeConnection.destroy(); } catch (_) {}
-        if (this.connection === activeConnection) {
+        if (this.connection) {
+          try { this.connection.destroy(); } catch (_) {}
           this.connection = null;
         }
-      }
-    }
 
-    debugLog(`[Queue:${this.guildId}] join failed after retries`);
-    throw new Error('Не удалось подключиться к голосовому каналу. Проверьте права, регион канала и сеть хостинга (UDP).');
+        const orphaned = getVoiceConnection(this.guildId);
+        if (orphaned) {
+          try { orphaned.destroy(); } catch (_) {}
+        }
+
+        for (let attempt = 1; attempt <= VOICE_JOIN_ATTEMPTS; attempt++) {
+          debugLog(`[Queue:${this.guildId}] join attempt ${attempt}/${VOICE_JOIN_ATTEMPTS}`);
+          const activeConnection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: voiceChannel.guild.id,
+            adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+            selfDeaf: true,
+          });
+
+          try {
+            await entersState(activeConnection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+            debugLog(`[Queue:${this.guildId}] connection ready`);
+            this.connection = activeConnection;
+            this._bindConnectionHandlers(activeConnection);
+            this.connection.subscribe(this.player);
+            debugLog(`[Queue:${this.guildId}] connection subscribed to player`);
+            return;
+          } catch (err) {
+            debugLog(`[Queue:${this.guildId}] join attempt failed: ${err.message}`);
+            console.error(
+              `[Queue:${this.guildId}] Voice join attempt ${attempt}/${VOICE_JOIN_ATTEMPTS} failed: ${err.message}`,
+            );
+            try { activeConnection.destroy(); } catch (_) {}
+            if (attempt < VOICE_JOIN_ATTEMPTS) {
+              await new Promise((resolve) => setTimeout(resolve, VOICE_JOIN_RETRY_DELAY_MS));
+            }
+          }
+        }
+
+        debugLog(`[Queue:${this.guildId}] join failed after retries`);
+        throw new Error('Failed to connect to the voice channel. Check permissions, channel region, and host UDP networking.');
+      } finally {
+        this._isJoining = false;
+      }
+    })();
+
+    try {
+      await this._joinPromise;
+    } finally {
+      this._joinPromise = null;
+    }
   }
 
   async addTrack(track) {
