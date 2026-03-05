@@ -3,6 +3,7 @@
 const { SlashCommandBuilder, PermissionsBitField, MessageFlags } = require('discord.js');
 const GuildQueue = require('../utils/GuildQueue');
 const { resolveQuery } = require('../utils/resolve');
+const { debugLog } = require('../utils/debugLog');
 const INFINITE_START_BATCH = 25;
 
 module.exports = {
@@ -23,10 +24,12 @@ module.exports = {
 
   /** @param {import('discord.js').ChatInputCommandInteraction} interaction */
   async execute(interaction, client) {
+    debugLog(`[play] command from guild=${interaction.guildId} user=${interaction.user?.id} query="${interaction.options.getString('query', false) || ''}"`);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const voiceChannel = interaction.member.voice.channel;
     if (!voiceChannel) {
+      debugLog('[play] user not in voice channel');
       return interaction.editReply('❌ Вы должны находиться в голосовом канале!');
     }
 
@@ -35,6 +38,7 @@ module.exports = {
       !perms.has(PermissionsBitField.Flags.Connect) ||
       !perms.has(PermissionsBitField.Flags.Speak)
     ) {
+      debugLog('[play] bot lacks connect/speak permissions');
       return interaction.editReply('❌ У меня нет прав для подключения к вашему голосовому каналу!');
     }
 
@@ -43,13 +47,16 @@ module.exports = {
     try {
       result = await resolveQuery(query, interaction.member.displayName);
     } catch (err) {
+      debugLog(`[play] resolveQuery error: ${err.message}`);
       console.error('[play] resolveQuery:', err.message);
       return interaction.editReply(`❌ Не удалось получить трек: \`${err.message}\``);
     }
 
     if (!result) {
+      debugLog('[play] resolveQuery returned null');
       return interaction.editReply('❌ Ничего не найдено по вашему запросу.');
     }
+    debugLog(`[play] resolveQuery type=${result.type}`);
 
     let queue = client.queues.get(interaction.guildId);
     if (!queue) {
@@ -65,8 +72,11 @@ module.exports = {
 
     if (!queue.connection || queue.voiceChannel?.id !== voiceChannel.id) {
       try {
+        debugLog('[play] queue.join start');
         await queue.join(voiceChannel);
+        debugLog('[play] queue.join success');
       } catch (err) {
+        debugLog(`[play] queue.join error: ${err.message}`);
         client.queues.delete(interaction.guildId);
         return interaction.editReply(`❌ ${err.message}`);
       }
@@ -102,6 +112,7 @@ module.exports = {
       }
 
       const firstTrack = result.tracks[0];
+      debugLog(`[play] addTrack from playlist title="${firstTrack?.title}"`);
       await queue.addTrack(firstTrack);
       return interaction.editReply(
         `✅ По умолчанию добавлен только 1 трек из плейлиста **${result.name}**: **${firstTrack.title}**` +
@@ -112,6 +123,7 @@ module.exports = {
     }
 
     const wasIdle = !queue.currentTrack && queue.tracks.length === 0;
+    debugLog(`[play] addTrack single title="${result.track?.title}" wasIdle=${wasIdle}`);
     await queue.addTrack(result.track);
 
     return interaction.editReply(

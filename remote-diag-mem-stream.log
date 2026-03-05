@@ -1,0 +1,43 @@
+[2026-03-05T08:10:19.583Z] diag_mem_stream start
+[2026-03-05T08:10:19.585Z] node=v21.7.3 pid=37 cwd=/home/container
+[2026-03-05T08:10:20.450Z] resolved type=single title="ABBA - Money, Money, Money (Official Music Video)" url=https://www.youtube.com/watch?v=ETxmCCsMoD0
+[2026-03-05T08:10:22.573Z] tick rss=52.87MiB heap=10.74MiB bytes=0.0KB delta=0.0KB ended=false
+[2026-03-05T08:10:23.572Z] tick rss=52.87MiB heap=10.74MiB bytes=0.0KB delta=0.0KB ended=false
+[2026-03-05T08:10:24.573Z] tick rss=53.16MiB heap=10.76MiB bytes=50.7KB delta=50.7KB ended=false
+[2026-03-05T08:10:25.573Z] tick rss=53.91MiB heap=10.78MiB bytes=240.0KB delta=189.3KB ended=false
+[2026-03-05T08:10:26.575Z] tick rss=54.41MiB heap=10.81MiB bytes=460.0KB delta=220.0KB ended=false
+[2026-03-05T08:10:27.574Z] tick rss=54.41MiB heap=10.82MiB bytes=631.5KB delta=171.5KB ended=false
+[2026-03-05T08:10:28.574Z] tick rss=54.91MiB heap=10.84MiB bytes=837.1KB delta=205.6KB ended=false
+[2026-03-05T08:10:29.574Z] tick rss=55.42MiB heap=10.86MiB bytes=1056.7KB delta=219.6KB ended=false
+[2026-03-05T08:10:30.574Z] tick rss=53.86MiB heap=6.01MiB bytes=1259.9KB delta=203.3KB ended=false
+[2026-03-05T08:10:31.574Z] tick rss=53.86MiB heap=6.03MiB bytes=1475.6KB delta=215.6KB ended=false
+[2026-03-05T08:10:32.575Z] tick rss=53.86MiB heap=6.11MiB bytes=1707.8KB delta=232.2KB ended=false
+[2026-03-05T08:10:33.575Z] tick rss=54.01MiB heap=6.14MiB bytes=1941.5KB delta=233.7KB ended=false
+[2026-03-05T08:10:34.575Z] tick rss=54.01MiB heap=6.16MiB bytes=2161.4KB delta=219.9KB ended=false
+[2026-03-05T08:10:35.575Z] tick rss=54.52MiB heap=6.19MiB bytes=2379.4KB delta=218.0KB ended=false
+[2026-03-05T08:10:36.575Z] tick rss=54.77MiB heap=6.20MiB bytes=2521.4KB delta=141.9KB ended=false
+[2026-03-05T08:10:37.575Z] tick rss=55.02MiB heap=6.23MiB bytes=2743.4KB delta=222.0KB ended=false
+[2026-03-05T08:10:38.280Z] stream end event
+[2026-03-05T08:10:38.574Z] tick rss=55.02MiB heap=6.26MiB bytes=2905.5KB delta=162.1KB ended=true
+[2026-03-05T08:10:39.575Z] tick rss=55.02MiB heap=6.26MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:40.576Z] tick rss=55.02MiB heap=6.26MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:41.576Z] tick rss=55.02MiB heap=6.26MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:42.576Z] tick rss=55.02MiB heap=6.26MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:43.577Z] tick rss=55.02MiB heap=6.27MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:44.578Z] tick rss=55.02MiB heap=6.27MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:45.579Z] tick rss=55.02MiB heap=6.27MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:46.579Z] tick rss=55.02MiB heap=6.27MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:47.581Z] tick rss=51.90MiB heap=5.89MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:48.582Z] tick rss=51.90MiB heap=6.08MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:49.582Z] tick rss=51.90MiB heap=6.08MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:50.583Z] tick rss=51.90MiB heap=6.08MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:51.583Z] tick rss=51.90MiB heap=6.08MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:52.585Z] tick rss=51.90MiB heap=6.09MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:53.585Z] tick rss=51.90MiB heap=6.09MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:54.586Z] tick rss=51.90MiB heap=6.09MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:55.586Z] tick rss=51.90MiB heap=6.09MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:56.585Z] tick rss=51.90MiB heap=6.10MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:57.586Z] tick rss=51.90MiB heap=6.10MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:58.587Z] tick rss=51.90MiB heap=6.10MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:10:59.587Z] tick rss=51.90MiB heap=6.10MiB bytes=2905.5KB delta=0.0KB ended=true
+[2026-03-05T08:11:00.588Z] tick rss=51.90MiB heap=6.11MiB bytes=2905.5KB delta=0.0KB ended=true

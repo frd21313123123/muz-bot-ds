@@ -47,6 +47,10 @@ function videoToTrack(v, requestedBy) {
 async function resolveQuery(query, requestedBy) {
   const normalized = normalizeUrl(query.trim());
   const validated  = play.yt_validate(normalized);
+  let urlObj = null;
+  try { urlObj = new URL(normalized); } catch (_) {}
+  const listId = urlObj?.searchParams.get('list') || '';
+  const videoIdFromUrl = urlObj?.searchParams.get('v') || '';
 
   // ── Одно видео ────────────────────────────────────────────────────────────
   if (validated === 'video') {
@@ -56,6 +60,14 @@ async function resolveQuery(query, requestedBy) {
 
   // ── Плейлист или ссылка с параметром list= ───────────────────────────────
   if (validated === 'playlist') {
+    // YouTube Music auto-mix (RD/RDAMVM) надёжнее воспроизводить как одиночное видео по ?v=
+    if (listId.startsWith('RD') && videoIdFromUrl) {
+      const { video_details } = await play.video_basic_info(
+        `https://www.youtube.com/watch?v=${videoIdFromUrl}`,
+      );
+      return { type: 'single', track: videoToTrack(video_details, requestedBy) };
+    }
+
     // Попытка загрузить плейлист
     try {
       const playlist = await play.playlist_info(normalized, { incomplete: true });
@@ -74,8 +86,7 @@ async function resolveQuery(query, requestedBy) {
 
     // Попытка вытащить одиночное видео (параметр v=)
     try {
-      const urlObj  = new URL(normalized);
-      const videoId = urlObj.searchParams.get('v');
+      const videoId = videoIdFromUrl;
       if (videoId) {
         const { video_details } = await play.video_basic_info(
           `https://www.youtube.com/watch?v=${videoId}`,

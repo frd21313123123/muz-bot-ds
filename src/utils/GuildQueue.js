@@ -12,6 +12,7 @@ const {
 } = require('@discordjs/voice');
 const { execYtdlp, getYtdlpCommandForLogs } = require('./ytdlp');
 const { createYtdlpStream, destroyStream } = require('./stream');
+const { debugLog } = require('./debugLog');
 
 /** Таймаут бездействия до авто-отключения (5 минут) */
 const IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
@@ -24,6 +25,9 @@ const EARLY_IDLE_TOLERANCE_SEC = 2;
 const EARLY_IDLE_MAX_WAIT_SEC = 15;
 const RADIO_BATCH_SIZE = 25;
 const RADIO_FETCH_TIMEOUT_MS = 15_000;
+const VOICE_READY_TIMEOUT_MS = 30_000;
+const VOICE_RECONNECT_TIMEOUT_MS = 5_000;
+const VOICE_JOIN_ATTEMPTS = 3;
 
 /**
  * @typedef {Object} Track
@@ -95,6 +99,7 @@ class GuildQueue {
 
   _setupPlayerListeners() {
     this.player.on(AudioPlayerStatus.Idle, async () => {
+      debugLog(`[Queue:${this.guildId}] player idle (current=${this.currentTrack?.title || 'none'})`);
       const idleTrack = this.currentTrack;
       this._destroyCurrentStream();
       if (this._advancing) return;
@@ -118,6 +123,7 @@ class GuildQueue {
     });
 
     this.player.on('stateChange', (_oldState, newState) => {
+      debugLog(`[Queue:${this.guildId}] player state -> ${newState.status}`);
       if (newState.status !== AudioPlayerStatus.Playing) return;
       if (this._trackStartedAt || !this.currentTrack) return;
 
@@ -126,6 +132,7 @@ class GuildQueue {
     });
 
     this.player.on('error', async (err) => {
+      debugLog(`[Queue:${this.guildId}] player error: ${err.message}`);
       console.error(`[Queue:${this.guildId}] Player error: ${err.message}`);
       this._destroyCurrentStream();
 
@@ -154,11 +161,13 @@ class GuildQueue {
   /** @param {Track} track */
   async _playTrack(track) {
     this.currentTrack = track;
+    debugLog(`[Queue:${this.guildId}] _playTrack start title="${track?.title}" url="${track?.url}"`);
 
     const streamUrl = (track.url || '')
       .replace('music.youtube.com', 'www.youtube.com');
 
     if (!streamUrl || !streamUrl.startsWith('http')) {
+      debugLog(`[Queue:${this.guildId}] bad stream url: "${streamUrl}"`);
       console.error(`[Queue:${this.guildId}] Bad URL for "${track.title}": "${streamUrl}"`);
       await this._advanceQueue();
       return;
@@ -166,6 +175,7 @@ class GuildQueue {
 
     try {
       const { stream, type } = createYtdlpStream(streamUrl);
+      debugLog(`[Queue:${this.guildId}] stream created type=${type}`);
       this._currentStream = stream;
 
       const resource = createAudioResource(stream, {
@@ -182,11 +192,13 @@ class GuildQueue {
       this._pauseStartedAt = null;
 
       this.player.play(resource);
+      debugLog(`[Queue:${this.guildId}] player.play called`);
       console.log(`[Queue:${this.guildId}] ▶ ${track.title}`);
 
       // Обновить плеер
       this._updatePlayerMessage();
     } catch (err) {
+      debugLog(`[Queue:${this.guildId}] stream setup error: ${err.message}`);
       console.error(`[Queue:${this.guildId}] Stream error:`, err.message);
       this._destroyCurrentStream();
       await this._advanceQueue();
@@ -568,38 +580,60 @@ class GuildQueue {
 
   async join(voiceChannel) {
     this.voiceChannel = voiceChannel;
+    debugLog(
+      `[Queue:${this.guildId}] join requested channel=${voiceChannel?.id} name="${voiceChannel?.name || ''}"`,
+    );
 
     if (this.connection) {
       try { this.connection.destroy(); } catch (_) {}
     }
 
-    this.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: voiceChannel.guild.id,
-      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf: true,
-    });
+    for (let attempt = 1; attempt <= VOICE_JOIN_ATTEMPTS; attempt++) {
+      debugLog(`[Queue:${this.guildId}] join attempt ${attempt}/${VOICE_JOIN_ATTEMPTS}`);
+      this.connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: voiceChannel.guild.id,
+        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+        selfDeaf: true,
+      });
 
-    this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      const activeConnection = this.connection;
+
+      activeConnection.on(VoiceConnectionStatus.Disconnected, async () => {
+        debugLog(`[Queue:${this.guildId}] connection disconnected`);
+        try {
+          await Promise.race([
+            entersState(activeConnection, VoiceConnectionStatus.Signalling, VOICE_RECONNECT_TIMEOUT_MS),
+            entersState(activeConnection, VoiceConnectionStatus.Connecting, VOICE_RECONNECT_TIMEOUT_MS),
+          ]);
+        } catch {
+          if (this.connection === activeConnection) {
+            this._cleanup();
+          }
+        }
+      });
+
       try {
-        await Promise.race([
-          entersState(this.connection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(this.connection, VoiceConnectionStatus.Connecting, 5_000),
-        ]);
-      } catch {
-        this._cleanup();
+        await entersState(activeConnection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+        debugLog(`[Queue:${this.guildId}] connection ready`);
+        this.connection = activeConnection;
+        this.connection.subscribe(this.player);
+        debugLog(`[Queue:${this.guildId}] connection subscribed to player`);
+        return;
+      } catch (err) {
+        debugLog(`[Queue:${this.guildId}] join attempt failed: ${err.message}`);
+        console.error(
+          `[Queue:${this.guildId}] Voice join attempt ${attempt}/${VOICE_JOIN_ATTEMPTS} failed: ${err.message}`,
+        );
+        try { activeConnection.destroy(); } catch (_) {}
+        if (this.connection === activeConnection) {
+          this.connection = null;
+        }
       }
-    });
-
-    try {
-      await entersState(this.connection, VoiceConnectionStatus.Ready, 30_000);
-    } catch {
-      this.connection.destroy();
-      this.connection = null;
-      throw new Error('Не удалось подключиться к голосовому каналу в течение 30 секунд.');
     }
 
-    this.connection.subscribe(this.player);
+    debugLog(`[Queue:${this.guildId}] join failed after retries`);
+    throw new Error('Не удалось подключиться к голосовому каналу. Проверьте права, регион канала и сеть хостинга (UDP).');
   }
 
   async addTrack(track) {

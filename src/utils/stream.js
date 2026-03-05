@@ -34,6 +34,7 @@ function createYtdlpStream(url) {
   const ytdlp = spawnYtdlp([
     '-f', 'bestaudio[ext=webm]/bestaudio',
     '-o', '-',
+    '--no-playlist',
     '--quiet',
     '--no-warnings',
     '--no-check-certificates',
