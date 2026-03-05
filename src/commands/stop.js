@@ -13,7 +13,7 @@ module.exports = {
     const orphanedConnection = getVoiceConnection(interaction.guildId);
 
     if (!queue && !orphanedConnection) {
-      return interaction.reply({ content: '❌ Бот не подключён к голосовому каналу.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '⏹ Бот уже остановлен.', flags: MessageFlags.Ephemeral });
     }
 
     // Пытаемся остановить через queue

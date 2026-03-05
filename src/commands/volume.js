@@ -17,7 +17,7 @@ module.exports = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
     if (!queue?.connection) {
-      return interaction.reply({ content: '❌ Бот не подключён.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: 'ℹ️ Громкость сейчас менять нельзя: бот не в голосовом канале.', flags: MessageFlags.Ephemeral });
     }
 
     const level = interaction.options.getInteger('level', true);

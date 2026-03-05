@@ -556,6 +556,8 @@ class GuildQueue {
     if (this._cleanupPromise) return this._cleanupPromise;
 
     this._cleanupPromise = (async () => {
+      const destroyPlayerMessagePromise = this._destroyPlayerMessage();
+
       this._clearIdleTimer();
       this._cancelFade();
       this._cancelScheduledFade();
@@ -568,7 +570,6 @@ class GuildQueue {
       this.tracks = [];
       this.voiceChannel = null;
 
-      await this._destroyPlayerMessage();
       this._playerChannelId = null;
       this._playerUpdating = false;
       this._playerUpdateQueued = false;
@@ -588,6 +589,12 @@ class GuildQueue {
       }
 
       this.client.queues.delete(this.guildId);
+
+      // Удаляем player-сообщение в фоне, но не блокируем выход из voice надолго.
+      await Promise.race([
+        destroyPlayerMessagePromise,
+        new Promise((resolve) => setTimeout(resolve, 700)),
+      ]);
     })().catch((err) => {
       console.error(`[Queue:${this.guildId}] Cleanup error: ${err.message}`);
     });
@@ -764,16 +771,7 @@ class GuildQueue {
   async stop() {
     this.loopCurrent = false;
     this._cancelScheduledFade();
-
-    if (this.player.state.status === AudioPlayerStatus.Playing && !this._isFading) {
-      await new Promise((resolve) => {
-        this._fadeOutAndExecute(() => {
-          void this._cleanup().finally(resolve);
-        });
-      });
-      return;
-    }
-
+    // stop должен быть мгновенным: без fade-out и без ожидания долгих I/O операций.
     this._cancelFade();
     await this._cleanup();
   }

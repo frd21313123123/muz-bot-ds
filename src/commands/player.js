@@ -11,7 +11,7 @@ module.exports = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
     if (!queue?.connection) {
-      return interaction.reply({ content: '❌ Бот не подключён к голосовому каналу.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: 'ℹ️ Бот сейчас не в голосовом канале. Сначала запустите /play.', flags: MessageFlags.Ephemeral });
     }
 
     // Удалить старое сообщение плеера, если было

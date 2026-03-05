@@ -1,7 +1,18 @@
-'use strict';
+﻿'use strict';
 
 const { MessageFlags } = require('discord.js');
 const { AudioPlayerStatus } = require('@discordjs/voice');
+
+async function safeDeferUpdate(interaction) {
+  if (interaction.deferred || interaction.replied) return;
+  try {
+    await interaction.deferUpdate();
+  } catch (err) {
+    // 40060: interaction already acknowledged, 10062: interaction expired.
+    if (err?.code === 40060 || err?.code === 10062) return;
+    throw err;
+  }
+}
 
 module.exports = {
   name: 'interactionCreate',
@@ -33,7 +44,7 @@ module.exports = {
 
       const queue = client.queues.get(interaction.guildId);
       if (!queue) {
-        return interaction.reply({ content: '❌ Бот не подключён.', flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: '⏹ Бот уже остановлен.', flags: MessageFlags.Ephemeral }).catch(() => {});
       }
 
       // Проверка: пользователь должен быть в том же голосовом канале
@@ -42,7 +53,7 @@ module.exports = {
         return interaction.reply({
           content: '❌ Вы должны быть в том же голосовом канале, что и бот.',
           flags: MessageFlags.Ephemeral,
-        });
+        }).catch(() => {});
       }
 
       try {
@@ -54,7 +65,7 @@ module.exports = {
             } else if (status === AudioPlayerStatus.Paused) {
               queue.resume();
             }
-            await interaction.deferUpdate();
+            await safeDeferUpdate(interaction);
             break;
           }
 
@@ -62,13 +73,13 @@ module.exports = {
             if (queue.currentTrack) {
               queue.skip();
             }
-            await interaction.deferUpdate();
+            await safeDeferUpdate(interaction);
             break;
           }
 
           case 'player_stop': {
+            await safeDeferUpdate(interaction);
             await queue.stop();
-            await interaction.deferUpdate();
             break;
           }
 
@@ -79,7 +90,7 @@ module.exports = {
                 ? '♾ Бесконечное воспроизведение **включено**'
                 : '♾ Бесконечное воспроизведение **выключено**',
               flags: MessageFlags.Ephemeral,
-            });
+            }).catch(() => {});
             break;
           }
 
@@ -90,14 +101,17 @@ module.exports = {
                 ? '🔂 Повтор текущего трека **включён**'
                 : '🔂 Повтор текущего трека **выключен**',
               flags: MessageFlags.Ephemeral,
-            });
+            }).catch(() => {});
             break;
           }
 
           default:
-            await interaction.deferUpdate();
+            await safeDeferUpdate(interaction);
         }
       } catch (err) {
+        // Ignore duplicate/expired interaction ack races to keep logs clean.
+        if (err?.code === 40060 || err?.code === 10062) return;
+
         console.error(`[Button:${customId}]`, err);
         if (!interaction.replied && !interaction.deferred) {
           await interaction.reply({ content: '❌ Ошибка.', flags: MessageFlags.Ephemeral }).catch(() => {});

@@ -10,7 +10,7 @@ module.exports = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId);
     if (!queue?.connection) {
-      return interaction.reply({ content: '❌ Бот не подключён.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: 'ℹ️ Очищать нечего: бот сейчас не в голосовом канале.', flags: MessageFlags.Ephemeral });
     }
 
     const count = queue.tracks.length;
