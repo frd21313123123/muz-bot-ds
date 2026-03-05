@@ -19,7 +19,7 @@ module.exports = {
     // Пытаемся остановить через queue
     if (queue) {
       try {
-        queue.stop();
+        await queue.stop();
       } catch (err) {
         console.error(`[stop] queue.stop() error: ${err.message}`);
       }

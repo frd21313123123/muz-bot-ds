@@ -11,6 +11,67 @@ function normalizeUrl(url) {
 }
 
 /**
+ * Нормализует лимит треков из плейлиста.
+ * @param {number|undefined} limit
+ * @returns {number}
+ */
+function normalizePlaylistLimit(limit) {
+  if (limit == null) return Infinity;
+  if (!Number.isFinite(limit)) return Infinity;
+  return Math.max(1, Math.floor(limit));
+}
+
+/**
+ * Возвращает не более limit видео из плейлиста, не загружая его целиком.
+ * @param {import('play-dl').YouTubePlayList} playlist
+ * @param {number} limit
+ * @returns {Promise<object[]>}
+ */
+async function takePlaylistVideos(playlist, limit) {
+  const safeLimit = normalizePlaylistLimit(limit);
+  if (safeLimit === Infinity) {
+    return playlist.all_videos();
+  }
+
+  const result = [];
+  const seen = new Set();
+  const pushUnique = (video) => {
+    const id = typeof video?.id === 'string' ? video.id : '';
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    result.push(video);
+  };
+
+  if (Array.isArray(playlist.videos)) {
+    for (const video of playlist.videos) {
+      pushUnique(video);
+      if (result.length >= safeLimit) return result;
+    }
+  }
+
+  const needed = safeLimit - result.length;
+  if (needed <= 0) return result;
+
+  await playlist.fetch(needed);
+  for (let page = 1; page <= playlist.total_pages && result.length < safeLimit; page++) {
+    let videos = [];
+    try {
+      videos = playlist.page(page);
+    } catch (_) {
+      break;
+    }
+    if (!Array.isArray(videos) || videos.length === 0) continue;
+
+    for (const video of videos) {
+      pushUnique(video);
+      if (result.length >= safeLimit) break;
+    }
+  }
+
+  return result;
+}
+
+/**
  * Конвертирует объект YouTubeVideo в Track.
  * @param {object} v — video_details из play-dl
  * @param {string} requestedBy
@@ -38,15 +99,17 @@ function videoToTrack(v, requestedBy) {
  *
  * @param {string} query
  * @param {string} requestedBy
+ * @param {{ playlistLimit?: number }} [options]
  * @returns {Promise<
  *   { type: 'single'; track: Track } |
  *   { type: 'playlist'; name: string; tracks: Track[] } |
  *   null
  * >}
  */
-async function resolveQuery(query, requestedBy) {
+async function resolveQuery(query, requestedBy, options = {}) {
   const normalized = normalizeUrl(query.trim());
   const validated  = play.yt_validate(normalized);
+  const playlistLimit = normalizePlaylistLimit(options.playlistLimit);
   let urlObj = null;
   try { urlObj = new URL(normalized); } catch (_) {}
   const listId = urlObj?.searchParams.get('list') || '';
@@ -71,7 +134,7 @@ async function resolveQuery(query, requestedBy) {
     // Попытка загрузить плейлист
     try {
       const playlist = await play.playlist_info(normalized, { incomplete: true });
-      const videos   = await playlist.all_videos();
+      const videos = await takePlaylistVideos(playlist, playlistLimit);
 
       if (videos.length > 0) {
         return {

@@ -43,9 +43,14 @@ module.exports = {
     }
 
     const query = interaction.options.getString('query', true);
+    let queue = client.queues.get(interaction.guildId);
+    const infiniteOpt = interaction.options.getBoolean('infinite');
+    const effectiveAutoplay = infiniteOpt !== null ? infiniteOpt : Boolean(queue?.autoplay);
+    const playlistLimit = effectiveAutoplay ? INFINITE_START_BATCH : 1;
+
     let result;
     try {
-      result = await resolveQuery(query, interaction.member.displayName);
+      result = await resolveQuery(query, interaction.member.displayName, { playlistLimit });
     } catch (err) {
       debugLog(`[play] resolveQuery error: ${err.message}`);
       console.error('[play] resolveQuery:', err.message);
@@ -58,14 +63,12 @@ module.exports = {
     }
     debugLog(`[play] resolveQuery type=${result.type}`);
 
-    let queue = client.queues.get(interaction.guildId);
     if (!queue) {
       queue = new GuildQueue(interaction.guildId, client);
       client.queues.set(interaction.guildId, queue);
     }
 
     // Параметр бесконечного воспроизведения.
-    const infiniteOpt = interaction.options.getBoolean('infinite');
     if (infiniteOpt !== null) {
       queue.setAutoplay(infiniteOpt);
     }

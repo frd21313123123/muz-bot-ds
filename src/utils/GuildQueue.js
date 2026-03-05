@@ -77,6 +77,7 @@ class GuildQueue {
     this._idleTimer = null;
     this._isJoining = false;
     this._joinPromise = null;
+    this._cleanupPromise = null;
 
     // ── Fade-out state ──────────────────────────────────────────────────
     this._fadeInterval = null;
@@ -335,7 +336,7 @@ class GuildQueue {
     this._clearIdleTimer();
     this._idleTimer = setTimeout(() => {
       if (!this.currentTrack) {
-        this._cleanup();
+        void this._cleanup();
       }
     }, IDLE_TIMEOUT_MS);
   }
@@ -543,41 +544,55 @@ class GuildQueue {
 
   async _destroyPlayerMessage() {
     this._stopPlayerInterval();
-    if (this._playerMessage) {
-      try { await this._playerMessage.delete(); } catch (_) {}
-      this._playerMessage = null;
-    }
+    const message = this._playerMessage;
+    this._playerMessage = null;
+    if (!message) return;
+    try { await message.delete(); } catch (_) {}
   }
 
   // ─── Cleanup ──────────────────────────────────────────────────────────────
 
-  _cleanup() {
-    this._clearIdleTimer();
-    this._cancelFade();
-    this._cancelScheduledFade();
-    this._stopPlayerInterval();
-    this._destroyPlayerMessage();
-    this._destroyCurrentStream();
-    this._advancing = false;
-    this._isJoining = false;
-    this.currentTrack = null;
-    this._trackStartedAt = null;
-    this.tracks = [];
+  async _cleanup() {
+    if (this._cleanupPromise) return this._cleanupPromise;
 
-    try { this.player.stop(true); } catch (_) {}
+    this._cleanupPromise = (async () => {
+      this._clearIdleTimer();
+      this._cancelFade();
+      this._cancelScheduledFade();
+      this._destroyCurrentStream();
+      this._advancing = false;
+      this._isJoining = false;
+      this._joinPromise = null;
+      this.currentTrack = null;
+      this._trackStartedAt = null;
+      this.tracks = [];
+      this.voiceChannel = null;
 
-    if (this.connection) {
-      try { this.connection.destroy(); } catch (_) {}
-      this.connection = null;
-    }
+      await this._destroyPlayerMessage();
+      this._playerChannelId = null;
+      this._playerUpdating = false;
+      this._playerUpdateQueued = false;
 
-    // Fallback: уничтожить orphaned connection через getVoiceConnection
-    const orphaned = getVoiceConnection(this.guildId);
-    if (orphaned) {
-      try { orphaned.destroy(); } catch (_) {}
-    }
+      try { this.player.stop(true); } catch (_) {}
+      this.player.removeAllListeners();
 
-    this.client.queues.delete(this.guildId);
+      if (this.connection) {
+        try { this.connection.destroy(); } catch (_) {}
+        this.connection = null;
+      }
+
+      // Fallback: уничтожить orphaned connection через getVoiceConnection
+      const orphaned = getVoiceConnection(this.guildId);
+      if (orphaned) {
+        try { orphaned.destroy(); } catch (_) {}
+      }
+
+      this.client.queues.delete(this.guildId);
+    })().catch((err) => {
+      console.error(`[Queue:${this.guildId}] Cleanup error: ${err.message}`);
+    });
+
+    return this._cleanupPromise;
   }
 
   // ─── Публичный API ────────────────────────────────────────────────────────
@@ -614,7 +629,7 @@ class GuildQueue {
         }
 
         if (this.connection === connection) {
-          this._cleanup();
+          await this._cleanup();
         }
       }
     });
@@ -746,18 +761,21 @@ class GuildQueue {
     return true;
   }
 
-  stop() {
+  async stop() {
     this.loopCurrent = false;
     this._cancelScheduledFade();
 
     if (this.player.state.status === AudioPlayerStatus.Playing && !this._isFading) {
-      this._fadeOutAndExecute(() => {
-        this._cleanup();
+      await new Promise((resolve) => {
+        this._fadeOutAndExecute(() => {
+          void this._cleanup().finally(resolve);
+        });
       });
-    } else {
-      this._cancelFade();
-      this._cleanup();
+      return;
     }
+
+    this._cancelFade();
+    await this._cleanup();
   }
 
   pause() {

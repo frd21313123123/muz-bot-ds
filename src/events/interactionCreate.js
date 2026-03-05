@@ -67,7 +67,7 @@ module.exports = {
           }
 
           case 'player_stop': {
-            queue.stop();
+            await queue.stop();
             await interaction.deferUpdate();
             break;
           }
