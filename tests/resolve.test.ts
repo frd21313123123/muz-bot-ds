@@ -23,6 +23,21 @@ test('YouTube Music and radio mix resolve to canonical video', async () => {
   if (result?.type === 'single') assert.equal(result.track.url, 'https://www.youtube.com/watch?v=abcdefghijk');
 });
 
+test('liked music track link resolves as an ordinary video', async () => {
+  seen.length = 0;
+  assert.deepEqual(classifyQuery('https://music.youtube.com/watch?v=abcdefghijk&list=LM'), {
+    kind: 'video', value: 'https://www.youtube.com/watch?v=abcdefghijk',
+  });
+  const result = await resolveQuery('https://music.youtube.com/watch?v=abcdefghijk&list=LM', 'Alice', metadata);
+  assert.equal(result?.type, 'single');
+  assert.deepEqual(seen, ['video:https://www.youtube.com/watch?v=abcdefghijk']);
+});
+
+test('liked music playlist without a video gives a useful error', () => {
+  assert.throws(() => classifyQuery('https://www.youtube.com/playlist?list=LM'),
+    /не содержит конкретного трека.*v=/);
+});
+
 test('playlist limit is passed to yt-dlp and result is capped', async () => {
   seen.length = 0;
   const result = await resolveQuery('https://www.youtube.com/playlist?list=PLxyz', 'Alice', metadata, 1);

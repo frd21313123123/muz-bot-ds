@@ -23,6 +23,13 @@ export function classifyQuery(query: string): { kind: 'video' | 'playlist' | 'se
     ? url.pathname.slice(1).split('/')[0]
     : url.searchParams.get('v');
   const list = url.searchParams.get('list');
+  if (list === 'LM') {
+    if (!id) {
+      throw new Error('«Понравившаяся музыка» не содержит конкретного трека. Отправьте ссылку на песню с параметром v= или её название.');
+    }
+    if (!/^[\w-]{11}$/.test(id)) throw new Error('Некорректный ID видео.');
+    return { kind: 'video', value: `https://www.youtube.com/watch?v=${id}` };
+  }
   if (list?.startsWith('RD') && id) {
     if (!/^[\w-]{11}$/.test(id)) throw new Error('Некорректный ID видео.');
     return { kind: 'video', value: `https://www.youtube.com/watch?v=${id}` };
