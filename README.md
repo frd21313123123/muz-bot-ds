@@ -1,115 +1,56 @@
-# 🎵 muz-bot-ds — Discord Music Bot
+# muz-bot-ds
 
-Быстрый музыкальный бот для Discord с поддержкой YouTube и YouTube Music.
+Discord-бот для воспроизведения YouTube и YouTube Music. Поиск, метаданные и аудио обрабатывает `yt-dlp`; звук кодируется FFmpeg и передаётся через `@discordjs/voice` с поддержкой DAVE.
 
-## Возможности
+## Требования
 
-| Команда | Описание |
-|---|---|
-| `/play <запрос>` | Воспроизвести трек / плейлист. Принимает ссылки YouTube, YouTube Music, текстовый поиск |
-| `/skip` | Пропустить текущий трек |
-| `/stop` | Остановить воспроизведение и покинуть канал |
-| `/pause` | Пауза |
-| `/resume` | Продолжить |
-| `/queue [page]` | Показать очередь |
-| `/nowplaying` | Показать текущий трек |
-| `/volume <1-150>` | Установить громкость |
-| `/autoplay` | Вкл/выкл авто-рекомендации YouTube |
-| `/clear` | Очистить очередь |
+- Node.js 24.17+ и npm.
+- Python 3.11+ с `venv` и `pip` на Windows или Linux.
+- Доступ к PyPI при первом запуске: бот создаёт `.runtime/yt-dlp` и устанавливает `yt-dlp[default]` вместе с EJS. Последующие запуски не обновляют пакет автоматически.
+- FFmpeg с `libopus`. `ffmpeg-static` устанавливает его через npm; при необходимости задайте `FFMPEG_PATH`.
 
-## Поддерживаемые форматы ссылок
+Для Windows не нужны Visual Studio или нативный `@discordjs/opus`: используется `opusscript`.
 
-```
-https://www.youtube.com/watch?v=VIDEO_ID
-https://youtu.be/VIDEO_ID
-https://music.youtube.com/watch?v=VIDEO_ID
-https://music.youtube.com/watch?v=VIDEO_ID&list=RDAMVM...
-https://www.youtube.com/playlist?list=PLAYLIST_ID
-```
-
-## Установка
-
-### 1. Требования
-
-- **Node.js ≥ 18** — https://nodejs.org/
-- **FFmpeg** — устанавливается автоматически через пакет `ffmpeg-static`
-
-### 2. Клонировать / скопировать проект
+## Установка и запуск
 
 ```bash
-cd muz-bot-ds
 npm install
-```
-
-> **Windows:** если `@discordjs/opus` не устанавливается, добавьте в package.json и выполните:
-> ```bash
-> npm install opusscript
-> ```
-
-### 3. Настройить .env
-
-```bash
 cp .env.example .env
-```
-
-Откройте `.env` и вставьте:
-
-```
-DISCORD_TOKEN=токен_бота
-CLIENT_ID=id_приложения
-# GUILD_ID=id_сервера  # только для быстрой отладки
-```
-
-Получить токен: https://discord.com/developers/applications → ваше приложение → **Bot → Reset Token**
-
-### 4. Зарегистрировать команды
-
-```bash
+npm run build
 npm run deploy
-```
-
-> С `GUILD_ID` команды появятся мгновенно.
-> Без `GUILD_ID` — глобально, до 1 часа.
-
-### 5. Запустить бота
-
-```bash
 npm start
-# или для разработки с авто-перезапуском:
-npm run dev
 ```
 
-## Разрешения бота в Discord
+На Windows вместо `cp` используйте `Copy-Item .env.example .env`. Укажите в `.env` `DISCORD_TOKEN` и `CLIENT_ID`. Необязательный `GUILD_ID` регистрирует команды сразу на тестовом сервере; без него команды регистрируются глобально. После изменения описания слэш-команд снова запустите `npm run deploy`.
 
-Необходимые привилегии OAuth2:
-- `bot` + `applications.commands`
+`npm run dev` запускает исходники TypeScript в режиме наблюдения. `npm run update:ytdlp` обновляет управляемую установку `yt-dlp`. При использовании `YT_DLP_PATH` бот проверяет внешний исполняемый файл, но его обновление остаётся за администратором.
 
-Bot permissions:
-- Connect
-- Speak
-- Send Messages
-- Embed Links
+## Команды
 
-Gateway Intents (в панели разработчика → Bot):
-- `GUILDS`
-- `GUILD_VOICE_STATES`
+| Команда | Действие |
+| --- | --- |
+| `/play <query> [infinite]` | Добавить видео, поиск или плейлист. Без `infinite` из плейлиста берётся первый трек; с ним — до 25. |
+| `/skip`, `/stop`, `/pause`, `/resume` | Управлять воспроизведением. |
+| `/clear`, `/volume <1-150>`, `/autoplay` | Управлять очередью, громкостью и рекомендациями. |
+| `/queue [page]`, `/nowplaying` | Посмотреть состояние. |
+| `/player` | Показать публичный плеер с кнопками. |
+| `/watch` | Создать приглашение в Watch Together. |
 
-## Автовоспроизведение
+Команды и кнопки, меняющие воспроизведение, доступны участникам того же голосового канала, что и бот. Ответы команд приватные, кроме публичного сообщения `/player` и его автоматического обновления. Бот выходит из голосового канала через пять минут после окончания очереди.
 
-После включения `/autoplay` бот, когда очередь закончится, автоматически подбирает следующий трек из рекомендаций YouTube (на основе текущего трека).
+## Проверка
 
-## Архитектура
+`npm test` запускает автономные тесты и сборку. `npm run test:integration` отдельно проверяет YouTube, получение аудио и рекомендации; для него нужны сеть, Python, yt-dlp и FFmpeg. Для окончательной проверки запустите бота на тестовом сервере и проверьте `/play`, `/player`, кнопки, пропуск и повторное подключение.
 
-```
-src/
-├── index.js               — точка входа, загрузка команд/событий
-├── deploy-commands.js     — регистрация слэш-команд в Discord API
-├── commands/              — по одному файлу на каждую команду
-├── events/
-│   ├── ready.js
-│   └── interactionCreate.js
-└── utils/
-    ├── GuildQueue.js      — управление очередью на сервер
-    ├── embeds.js          — билдеры Embed
-    └── resolve.js         — разрешение URL / поискового запроса в треки
-```
+## Настройки
+
+| Переменная | Назначение |
+| --- | --- |
+| `DISCORD_TOKEN` | Токен бота. |
+| `CLIENT_ID` | ID приложения. |
+| `GUILD_ID` | Сервер для мгновенной регистрации команд. |
+| `YT_DLP_PATH` | Внешний yt-dlp вместо управляемого Python-окружения. |
+| `FFMPEG_PATH` | Внешний FFmpeg вместо `ffmpeg-static`. |
+| `WATCH_TOGETHER_APP_ID` | ID активности Watch Together. |
+
+Боту нужны Gateway Intents `Guilds` и `GuildVoiceStates`, а также права `Connect`, `Speak`, `Send Messages` и `Embed Links`. Для `/watch` дополнительно нужны `Create Invite` и `Use Activities`.

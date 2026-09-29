@@ -1,0 +1,215 @@
+import {
+  InviteTargetType, MessageFlags, PermissionsBitField, SlashCommandBuilder, escapeMarkdown,
+  type ChatInputCommandInteraction,
+} from 'discord.js';
+import type { Command, MusicClient } from './types.js';
+import { GuildQueue } from './utils/GuildQueue.js';
+import { nowPlayingEmbed, playerActionRow, playerEmbed, queueEmbed } from './utils/embeds.js';
+import { resolveQuery } from './utils/resolve.js';
+import { canControl, memberVoiceChannel } from './utils/voiceAccess.js';
+
+const privateReply = (interaction: ChatInputCommandInteraction, content: string): Promise<unknown> =>
+  interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+
+async function requireController(interaction: ChatInputCommandInteraction, queue: GuildQueue | undefined): Promise<boolean> {
+  if (!queue?.voiceChannel) {
+    await privateReply(interaction, 'ℹ️ Бот сейчас не в голосовом канале.');
+    return false;
+  }
+  if (!canControl(interaction, queue.voiceChannel.id)) {
+    await privateReply(interaction, '❌ Войдите в тот же голосовой канал, что и бот.');
+    return false;
+  }
+  return true;
+}
+
+const play: Command = {
+  data: new SlashCommandBuilder().setName('play').setDescription('▶ Воспроизвести трек')
+    .addStringOption((option) => option.setName('query').setDescription('Ссылка YouTube или название')
+      .setRequired(true).setMinLength(1).setMaxLength(500))
+    .addBooleanOption((option) => option.setName('infinite').setDescription('Добавлять рекомендации после очереди')),
+  async execute(interaction, client) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
+    const channel = memberVoiceChannel(interaction);
+    if (!channel) return interaction.editReply('❌ Войдите в голосовой канал.');
+    const me = interaction.guild?.members.me ?? await interaction.guild?.members.fetchMe().catch(() => null);
+    const permissions = me && channel.permissionsFor(me);
+    if (!permissions?.has(PermissionsBitField.Flags.Connect) || !permissions.has(PermissionsBitField.Flags.Speak)) {
+      return interaction.editReply('❌ Нет прав на подключение и речь в этом канале.');
+    }
+    let queue = client.queues.get(interaction.guildId);
+    if (queue?.voiceChannel && queue.voiceChannel.id !== channel.id) {
+      return interaction.editReply('❌ Бот уже работает в другом голосовом канале.');
+    }
+    const created = !queue;
+    if (!queue) {
+      queue = new GuildQueue(interaction.guildId, client);
+      client.queues.set(interaction.guildId, queue);
+    }
+    try {
+      await queue.join(channel);
+      const infinite = interaction.options.getBoolean('infinite');
+      const result = await resolveQuery(interaction.options.getString('query', true),
+        interaction.member && 'displayName' in interaction.member ? interaction.member.displayName : interaction.user.username,
+        client.ytdlp, (infinite ?? queue.autoplay) ? 25 : 1);
+      if (!result) {
+        if (created) await queue.stop();
+        return interaction.editReply('❌ Ничего не найдено.');
+      }
+      if (infinite !== null) queue.setAutoplay(infinite);
+      queue.setPlayerChannel(interaction.channelId);
+      const wasIdle = !queue.currentTrack && queue.tracks.length === 0;
+      if (result.type === 'playlist') {
+        await queue.addTracks(result.tracks);
+        return interaction.editReply({
+          content: `✅ Добавлено ${result.tracks.length} треков из **${escapeMarkdown(result.name)}**${wasIdle ? ' — воспроизведение началось.' : '.'}`,
+          allowedMentions: { parse: [] },
+        });
+      }
+      await queue.addTrack(result.track);
+      return interaction.editReply({
+        content: `${wasIdle ? '▶ Воспроизведение началось' : '✅ Добавлено в очередь'}: **${escapeMarkdown(result.track.title)}**`,
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      if (created) await queue.stop().catch(() => {});
+      console.error('[play]', error);
+      return interaction.editReply(`❌ Не удалось запустить трек: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  },
+};
+
+const skip: Command = {
+  data: new SlashCommandBuilder().setName('skip').setDescription('⏭ Пропустить текущий трек'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    if (!queue?.currentTrack) return privateReply(interaction, '❌ Сейчас ничего не играет.');
+    const title = queue.currentTrack.title;
+    queue.skip();
+    return privateReply(interaction, `⏭ Пропущено: **${escapeMarkdown(title)}**`);
+  },
+};
+
+const stop: Command = {
+  data: new SlashCommandBuilder().setName('stop').setDescription('⏹ Остановить воспроизведение и выйти'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    await queue!.stop();
+    return privateReply(interaction, '⏹ Воспроизведение остановлено.');
+  },
+};
+
+const pause: Command = {
+  data: new SlashCommandBuilder().setName('pause').setDescription('⏸ Пауза'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    return privateReply(interaction, queue!.pause() ? '⏸ Пауза.' : '❌ Воспроизведение уже на паузе.');
+  },
+};
+
+const resume: Command = {
+  data: new SlashCommandBuilder().setName('resume').setDescription('▶ Продолжить воспроизведение'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    return privateReply(interaction, queue!.resume() ? '▶ Воспроизведение продолжено.' : '❌ Бот не на паузе.');
+  },
+};
+
+const clear: Command = {
+  data: new SlashCommandBuilder().setName('clear').setDescription('🗑 Очистить очередь'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    return privateReply(interaction, `🗑 Удалено треков: ${queue!.clearQueue()}.`);
+  },
+};
+
+const volume: Command = {
+  data: new SlashCommandBuilder().setName('volume').setDescription('🔊 Установить громкость')
+    .addIntegerOption((option) => option.setName('level').setDescription('От 1 до 150%')
+      .setRequired(true).setMinValue(1).setMaxValue(150)),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    const level = interaction.options.getInteger('level', true);
+    queue!.setVolume(level);
+    return privateReply(interaction, `🔊 Громкость: ${level}%`);
+  },
+};
+
+const autoplay: Command = {
+  data: new SlashCommandBuilder().setName('autoplay').setDescription('♾ Переключить рекомендации'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    return privateReply(interaction, `♾ Бесконечное воспроизведение ${queue!.toggleAutoplay() ? 'включено' : 'выключено'}.`);
+  },
+};
+
+const nowplaying: Command = {
+  data: new SlashCommandBuilder().setName('nowplaying').setDescription('🎵 Текущий трек'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!queue?.currentTrack) return privateReply(interaction, '❌ Сейчас ничего не играет.');
+    return interaction.reply({ embeds: [nowPlayingEmbed(queue.currentTrack, queue.autoplay)], flags: MessageFlags.Ephemeral });
+  },
+};
+
+const queueCommand: Command = {
+  data: new SlashCommandBuilder().setName('queue').setDescription('📋 Показать очередь')
+    .addIntegerOption((option) => option.setName('page').setDescription('Номер страницы').setMinValue(1)),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!queue?.currentTrack && !queue?.tracks.length) return privateReply(interaction, '📋 Очередь пуста.');
+    return interaction.reply({ embeds: [queueEmbed(queue, interaction.options.getInteger('page') ?? 1)], flags: MessageFlags.Ephemeral });
+  },
+};
+
+const player: Command = {
+  data: new SlashCommandBuilder().setName('player').setDescription('🎛 Публичный плеер с кнопками'),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!queue?.connection) return privateReply(interaction, 'ℹ️ Бот не в голосовом канале.');
+    await interaction.deferReply();
+    const message = await interaction.editReply({ embeds: [playerEmbed(queue)], components: [playerActionRow(queue)] });
+    await queue.showPlayer(message, interaction.channelId);
+  },
+};
+
+const watch: Command = {
+  data: new SlashCommandBuilder().setName('watch').setDescription('📺 Запустить Watch Together'),
+  async execute(interaction, client) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const channel = memberVoiceChannel(interaction);
+    if (!channel || !interaction.guild) return interaction.editReply('❌ Войдите в голосовой канал.');
+    const me = interaction.guild.members.me ?? await interaction.guild.members.fetchMe();
+    const permissions = channel.permissionsFor(me);
+    if (!permissions?.has(PermissionsBitField.Flags.ViewChannel)
+      || !permissions.has(PermissionsBitField.Flags.CreateInstantInvite)
+      || !permissions.has(PermissionsBitField.Flags.UseEmbeddedActivities)) {
+      return interaction.editReply('❌ Нужны права на просмотр канала, приглашения и активности.');
+    }
+    try {
+      const invite = await channel.createInvite({
+        maxAge: 0, maxUses: 0, targetType: InviteTargetType.EmbeddedApplication,
+        targetApplication: process.env.WATCH_TOGETHER_APP_ID || '880218394199220334',
+        reason: `Watch Together requested by ${interaction.user.tag}`,
+      });
+      const queue = client.queues.get(interaction.guildId!);
+      const track = queue?.voiceChannel?.id === channel.id ? queue.currentTrack : null;
+      return interaction.editReply(`📺 Совместный просмотр: ${invite.url}${track ? `\n🎵 Текущий трек: ${track.url}` : ''}`);
+    } catch (error) {
+      console.error('[watch]', error);
+      return interaction.editReply('❌ Не удалось запустить Watch Together.');
+    }
+  },
+};
+
+export const commands: Command[] = [
+  play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch,
+];

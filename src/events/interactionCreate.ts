@@ -1,0 +1,64 @@
+import { AudioPlayerStatus } from '@discordjs/voice';
+import { MessageFlags, type Interaction } from 'discord.js';
+import type { MusicClient } from '../types.js';
+import { commands } from '../commands.js';
+import { canControl } from '../utils/voiceAccess.js';
+
+const byName = new Map(commands.map((command) => [command.data.name, command]));
+
+export async function onInteraction(interaction: Interaction, client: MusicClient): Promise<void> {
+  if (interaction.isChatInputCommand()) {
+    const command = byName.get(interaction.commandName);
+    if (!command) return;
+    try {
+      await command.execute(interaction, client);
+    } catch (error) {
+      console.error(`[Command:${interaction.commandName}]`, error);
+      const payload = { content: '❌ Ошибка выполнения команды.', flags: MessageFlags.Ephemeral as const };
+      if (interaction.deferred || interaction.replied) await interaction.followUp(payload).catch(() => {});
+      else await interaction.reply(payload).catch(() => {});
+    }
+    return;
+  }
+
+  if (!interaction.isButton() || !interaction.customId.startsWith('player_')) return;
+  const queue = client.queues.get(interaction.guildId ?? '');
+  if (!queue?.voiceChannel) {
+    await interaction.reply({ content: '⏹ Бот уже остановлен.', flags: MessageFlags.Ephemeral }).catch(() => {});
+    return;
+  }
+  if (!canControl(interaction, queue.voiceChannel.id)) {
+    await interaction.reply({ content: '❌ Войдите в тот же голосовой канал, что и бот.', flags: MessageFlags.Ephemeral }).catch(() => {});
+    return;
+  }
+  try {
+    switch (interaction.customId) {
+      case 'player_playpause':
+        await interaction.deferUpdate();
+        if (queue.player.state.status === AudioPlayerStatus.Playing) queue.pause();
+        else queue.resume();
+        break;
+      case 'player_skip':
+        await interaction.deferUpdate();
+        queue.skip();
+        break;
+      case 'player_stop':
+        await interaction.deferUpdate();
+        await queue.stop();
+        break;
+      case 'player_autoplay':
+        await interaction.reply({ content: `♾ Бесконечное воспроизведение ${queue.toggleAutoplay() ? 'включено' : 'выключено'}.`, flags: MessageFlags.Ephemeral });
+        break;
+      case 'player_loop':
+        await interaction.reply({ content: `🔂 Повтор трека ${queue.toggleLoop() ? 'включён' : 'выключен'}.`, flags: MessageFlags.Ephemeral });
+        break;
+      default:
+        await interaction.deferUpdate();
+    }
+  } catch (error) {
+    console.error(`[Button:${interaction.customId}]`, error);
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.reply({ content: '❌ Ошибка управления плеером.', flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+  }
+}

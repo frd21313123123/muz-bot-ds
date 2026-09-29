@@ -1,0 +1,76 @@
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from 'discord.js';
+import { AudioPlayerStatus } from '@discordjs/voice';
+import type { Track } from '../types.js';
+import type { GuildQueue } from './GuildQueue.js';
+
+const cut = (value: string, max: number): string => value.length > max ? `${value.slice(0, max - 1)}…` : value;
+
+export function nowPlayingEmbed(track: Track, autoplay = false): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(track.isAutoplay ? 0x57f287 : 0x1db954)
+    .setTitle(track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
+    .setDescription(`**[${escapeMarkdown(cut(track.title, 200))}](${track.url})**`)
+    .addFields(
+      { name: '⏱ Длительность', value: track.duration, inline: true },
+      { name: '👤 Запросил', value: escapeMarkdown(cut(track.requestedBy, 100)), inline: true },
+    );
+  if (autoplay) embed.addFields({ name: '♾', value: 'Бесконечное воспроизведение включено' });
+  if (track.thumbnail) embed.setThumbnail(track.thumbnail);
+  return embed;
+}
+
+export function queueEmbed(queue: GuildQueue, page = 1): EmbedBuilder {
+  const totalPages = Math.max(1, Math.ceil(queue.tracks.length / 10));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const start = (safePage - 1) * 10;
+  const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📋 Очередь воспроизведения');
+  if (queue.currentTrack) {
+    embed.addFields({ name: '▶ Сейчас играет', value: `[${escapeMarkdown(cut(queue.currentTrack.title, 160))}](${queue.currentTrack.url})` });
+  }
+  const lines = queue.tracks.slice(start, start + 10)
+    .map((track, i) => `\`${start + i + 1}.\` [${escapeMarkdown(cut(track.title, 100))}](${track.url}) — ${track.duration}`);
+  if (lines.length) embed.addFields({ name: '📃 Следующие треки', value: cut(lines.join('\n'), 1024) });
+  if (!lines.length && !queue.currentTrack) embed.setDescription('Очередь пуста. Добавьте трек командой `/play`.');
+  return embed.setFooter({ text: `Страница ${safePage}/${totalPages} • Бесконечное: ${queue.autoplay ? 'вкл' : 'выкл'}` });
+}
+
+function durationSeconds(value: string): number | null {
+  if (!/^\d+(?::\d{1,2}){1,2}$/.test(value)) return null;
+  return value.split(':').reduce((acc, part) => acc * 60 + Number(part), 0);
+}
+
+export function playerEmbed(queue: GuildQueue): EmbedBuilder {
+  const track = queue.currentTrack;
+  if (!track) return new EmbedBuilder().setColor(0x99aab5).setTitle('⏹ Ничего не играет');
+  const paused = queue.player.state.status === AudioPlayerStatus.Paused;
+  const duration = durationSeconds(track.duration);
+  const progress = duration
+    ? '▰'.repeat(Math.min(12, Math.round(queue.getElapsedSeconds() / duration * 12)))
+      + '▱'.repeat(Math.max(0, 12 - Math.round(queue.getElapsedSeconds() / duration * 12)))
+    : '🔴 Прямой эфир / длительность неизвестна';
+  const embed = new EmbedBuilder()
+    .setColor(paused ? 0x99aab5 : 0x1db954)
+    .setTitle(paused ? '⏸ На паузе' : track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
+    .setDescription(`**[${escapeMarkdown(cut(track.title, 200))}](${track.url})**\n\n${progress}`)
+    .addFields(
+      { name: '🔊 Громкость', value: `${Math.round(queue.volume * 100)}%`, inline: true },
+      { name: '♾ Бесконечное', value: queue.autoplay ? 'Вкл' : 'Выкл', inline: true },
+      { name: '📋 В очереди', value: `${queue.tracks.length}`, inline: true },
+    );
+  if (track.thumbnail) embed.setThumbnail(track.thumbnail);
+  if (queue.tracks[0]) embed.setFooter({ text: cut(`Далее: ${queue.tracks[0].title}`, 200) });
+  return embed;
+}
+
+export function playerActionRow(queue: GuildQueue): ActionRowBuilder<ButtonBuilder> {
+  const paused = queue.player.state.status === AudioPlayerStatus.Paused;
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('player_playpause').setEmoji(paused ? '▶' : '⏸').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('player_skip').setEmoji('⏭').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('player_stop').setEmoji('⏹').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('player_autoplay').setEmoji('♾️')
+      .setLabel(queue.autoplay ? 'Беск: Вкл' : 'Беск: Выкл').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('player_loop').setEmoji('🔂')
+      .setLabel(queue.loopCurrent ? '1 трек: Вкл' : '1 трек: Выкл').setStyle(ButtonStyle.Secondary),
+  );
+}
