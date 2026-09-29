@@ -3,3 +3,4 @@ import './queue.test.js';
 import './guildQueue.test.js';
 import './voiceAccess.test.js';
 import './stream.test.js';
+import './ytdlp.test.js';
