@@ -1,0 +1,25 @@
+name: Package Laya dataset
+
+on:
+  push:
+    branches:
+      - tmp/laya-dataset-artifact-20260930
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package dataset
+        run: |
+          zip -r laya_muz_bot_dataset.zip laya_dataset
+      - name: Upload dataset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: laya-muz-bot-dataset
+          path: laya_muz_bot_dataset.zip
+          if-no-files-found: error
+          retention-days: 1
