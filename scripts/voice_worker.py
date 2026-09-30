@@ -11,7 +11,7 @@ RUNTIME = ROOT / ".runtime" / "voice"
 os.environ.setdefault("HF_HOME", str(RUNTIME / "cache"))
 os.environ.setdefault("USE_TF", "0")
 
-COMMAND_PROMPT = "Музыкальные команды: включи, включи музыку, продолжи музыку, на паузу, следующий трек, громче, тише, громкость."
+COMMAND_PROMPT = "Музыкальные команды: включи, включи музыку, продолжай, продолжи музыку, на паузу, следующий трек, громче, тише, громкость."
 
 QUESTIONS = {"action": {
     "type": "choice",

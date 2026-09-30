@@ -24,7 +24,11 @@ export function isWakePhrase(text: string, name: string): boolean {
 // Generic "turn it on" means resume only when an existing track is paused.
 // Keep song titles and any extra words outside this closed set.
 export function contextualCommand(text: string, paused: boolean): string {
-  if (paused && !text.includes('?') && /^(включи|включить|включай)( музыку| воспроизведение)?( снова| обратно| дальше)?$/.test(normalizeSpeech(text))) {
+  const words = normalizeSpeech(text);
+  if (paused && !text.includes('?') && (
+    /^(включи|включить|включай)( музыку| воспроизведение)?( снова| обратно| дальше)?$/.test(words)
+    || /^(продолжай|продолжи|продолжить|возобнови|возобновить)( музыку| воспроизведение| играть)?$/.test(words)
+  )) {
     return 'Продолжи музыку';
   }
   return text;

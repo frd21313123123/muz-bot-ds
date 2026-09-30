@@ -1,4 +1,19 @@
-import { contextualCommand, isWakePhrase, unsupportedSpeech, validateIntent, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { contextualCommand, isWakePhrase, normalizeSpeech, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
+
+export interface VoiceDiagnostic {
+  stage: 'recognition' | 'rejected' | 'decision' | 'execution' | 'error' | 'timeout';
+  kind?: 'wake' | 'command';
+  ms?: number;
+  words?: number;
+  matched?: boolean;
+  paused?: boolean;
+  canonicalized?: boolean;
+  modelAction?: VoiceAction;
+  confidence?: number;
+  action?: VoiceAction;
+  changed?: boolean;
+  reason?: 'empty' | 'unsupported' | 'stale' | 'command' | 'wait' | 'pipeline';
+}
 
 export interface VoiceBackend {
   transcribe(pcm: Buffer, signal: AbortSignal, command: boolean, wakeName?: string): Promise<string>;
@@ -10,7 +25,8 @@ export interface VoiceHost {
   paused?(): boolean;
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
-  execute(intent: VoiceIntent): Promise<void>;
+  execute(intent: VoiceIntent): Promise<void | boolean>;
+  diagnostic?(event: VoiceDiagnostic): void;
 }
 export interface SpeechCapture {
   signal: AbortSignal;
@@ -72,7 +88,7 @@ export class VoiceSession {
     if (command) {
       this.clearTimer();
       this.phase = 'capturing';
-      this.timer = setTimeout(cancel, this.timings.commandMs);
+      this.timer = setTimeout(() => { this.host.diagnostic?.({ stage: 'timeout', reason: 'command' }); cancel(); }, this.timings.commandMs);
     }
     return {
       signal: controller.signal,
@@ -86,13 +102,27 @@ export class VoiceSession {
         try {
           if (command) { this.clearTimer(); this.phase = 'processing'; }
           if (!pcm.length || !valid()) return;
+          const asrStart = performance.now();
           const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName());
-          const text = command ? contextualCommand(transcript, this.host.paused?.() ?? false) : transcript;
+          const paused = this.host.paused?.() ?? false;
+          const text = command ? contextualCommand(transcript, paused) : transcript;
           if (!valid()) return;
+          this.host.diagnostic?.({ stage: 'recognition', kind: command ? 'command' : 'wake',
+            ms: Math.round(performance.now() - asrStart), words: normalizeSpeech(transcript).split(' ').filter(Boolean).length,
+            paused, canonicalized: text !== transcript, matched: !command && isWakePhrase(text, this.host.wakeName()) });
           if (command) {
-            if (unsupportedSpeech(text)) return;
+            if (unsupportedSpeech(text)) { this.host.diagnostic?.({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' }); return; }
+            const decisionStart = performance.now();
             const decision = await this.backend.classify(text, controller.signal);
-            if (valid()) await this.host.execute(validateIntent(text, decision));
+            if (!valid()) { this.host.diagnostic?.({ stage: 'rejected', reason: 'stale' }); return; }
+            const intent = validateIntent(text, decision);
+            const safeAction = ['skip', 'pause', 'resume', 'stop', 'volume_set', 'volume_up', 'volume_down', 'unknown'].includes(decision.action) ? decision.action : 'unknown';
+            this.host.diagnostic?.({ stage: 'decision', modelAction: safeAction, confidence: Number.isFinite(decision.confidence) ? decision.confidence : 0,
+              action: intent.action, ms: Math.round(performance.now() - decisionStart) });
+            if (intent.action !== 'unknown') {
+              const changed = await this.host.execute(intent);
+              this.host.diagnostic?.({ stage: 'execution', action: intent.action, changed: changed !== false });
+            }
           } else if (this.phase === 'idle' && isWakePhrase(text, this.host.wakeName())) {
             this.owner = userId;
             this.phase = 'signalling';
@@ -104,10 +134,11 @@ export class VoiceSession {
             if (!valid() || activation.signal.aborted) { if (epoch === this.epoch) this.cancel(); return; }
             this.host.duck(true);
             this.phase = 'awaiting';
-            this.timer = setTimeout(() => this.cancel(), this.timings.waitMs);
+            this.timer = setTimeout(() => { this.host.diagnostic?.({ stage: 'timeout', reason: 'wait' }); this.cancel(); }, this.timings.waitMs);
           }
         } catch {
           // Audio/text and model error payloads must never reach ordinary logs.
+          if (!controller.signal.aborted) this.host.diagnostic?.({ stage: 'error', reason: 'pipeline' });
           if (epoch === this.epoch && (command || this.owner === userId)) this.cancel();
         } finally {
           if (this.tasks.get(userId) === controller) this.tasks.delete(userId);

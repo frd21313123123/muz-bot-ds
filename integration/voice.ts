@@ -31,6 +31,10 @@ const cases: [string, VoiceAction, boolean?][] = [
   ['Не включай музыку', 'unknown', true], ['Включи и следующий трек', 'unknown', true],
   ['сделай громче.', 'volume_up'], ['сделай тише.', 'volume_down'],
   ['на паузу', 'pause'], ['включи.', 'resume', true],
+  ['Продолжай', 'resume', true], ['Продолжай музыку', 'resume', true],
+  ['Возобнови', 'resume', true], ['Продолжай играть', 'resume', true],
+  ['Не продолжай музыку', 'unknown', true], ['Продолжай и следующий трек', 'unknown', true],
+  ['Продолжай читать', 'unknown', true], ['Продолжай рассказ', 'unknown', true],
 ];
 
 async function decode(file: string): Promise<Buffer> {

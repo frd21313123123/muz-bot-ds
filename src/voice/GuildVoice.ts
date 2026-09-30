@@ -27,16 +27,20 @@ export class GuildVoice {
         && !this.queue.client.users.cache.get(userId)?.bot),
       cue: (signal) => this.queue.playVoiceCue(signal),
       duck: (enabled) => this.queue.setVoiceDucking(enabled),
+      diagnostic: (event) => {
+        if (process.env.VOICE_DEBUG === '1') console.log(`[Voice:${this.queue.guildId}] ${JSON.stringify({ ...event,
+          player: this.queue.player.state.status, track: Boolean(this.queue.currentTrack) })}`);
+      },
       execute: async (intent) => {
         switch (intent.action) {
-          case 'skip': this.queue.skip(); break;
-          case 'pause': this.queue.pause(); break;
-          case 'resume': this.queue.resume(); break;
-          case 'stop': await this.queue.stop(); break;
-          case 'volume_set': this.queue.setVolume(intent.level); break;
-          case 'volume_up': this.queue.setVolume(Math.round(this.queue.volume * 100) + 10); break;
-          case 'volume_down': this.queue.setVolume(Math.round(this.queue.volume * 100) - 10); break;
-          case 'unknown': break;
+          case 'skip': return this.queue.skip();
+          case 'pause': return this.queue.pause();
+          case 'resume': return this.queue.resume();
+          case 'stop': await this.queue.stop(); return true;
+          case 'volume_set': this.queue.setVolume(intent.level); return true;
+          case 'volume_up': this.queue.setVolume(Math.round(this.queue.volume * 100) + 10); return true;
+          case 'volume_down': this.queue.setVolume(Math.round(this.queue.volume * 100) - 10); return true;
+          case 'unknown': return false;
         }
       },
     });

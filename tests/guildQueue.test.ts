@@ -177,11 +177,11 @@ test('voice cue keeps the current resource and queue; cancellation restores subs
   } finally { await queue.stop(); }
 });
 
-test('audible cue resumes the original track and preserves a concurrent pause request', async () => {
-  for (const userPauses of [false, true]) {
+test('audible cue preserves playing and paused resources, which can subsequently resume', async () => {
+  for (const mode of ['playing', 'pause-during-cue', 'already-paused']) {
     const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
     const raw = new PassThrough();
-    const queue = new GuildQueue(`guild-cue-${userPauses}`, client, () => ({ stream: raw,
+    const queue = new GuildQueue(`guild-cue-${mode}`, client, () => ({ stream: raw,
       type: StreamType.Raw, destroy: () => raw.destroy() }));
     // Simulate the network side, while using the real AudioPlayer and Opus encoder.
     let subscription: { unsubscribe(): void } | undefined;
@@ -202,17 +202,23 @@ test('audible cue resumes the original track and preserves a concurrent pause re
       await queue.addTrack(track('aaaaaaaaaaa'));
       raw.write(Buffer.alloc(48_000 * 4 * 3));
       await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing);
+      if (mode === 'already-paused') assert.equal(queue.pause(), true);
       const before = queue.player.state;
+      assert.ok(before.status !== AudioPlayerStatus.Idle);
       const startPackets = packets;
       const cue = queue.playVoiceCue(new AbortController().signal);
-      if (userPauses) assert.equal(queue.pause(), true);
+      if (mode === 'pause-during-cue') assert.equal(queue.pause(), true);
       await cue;
       assert.ok(packets > startPackets, 'cue produced actual Opus packets');
-      assert.equal(queue.player.state.status, userPauses ? AudioPlayerStatus.Paused : AudioPlayerStatus.Playing);
-      if (before.status !== AudioPlayerStatus.Idle) {
+      assert.equal(queue.player.state.status, mode !== 'playing' ? AudioPlayerStatus.Paused : AudioPlayerStatus.Playing);
+      assert.equal(queue.player.state.resource, before.resource);
+      assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+      if (mode !== 'playing') {
+        const resumePackets = packets;
+        assert.equal(queue.resume(), true);
+        await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing && packets > resumePackets);
         assert.equal(queue.player.state.resource, before.resource);
       }
-      assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
     } finally { await queue.stop(); }
   }
 });

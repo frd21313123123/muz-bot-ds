@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { contextualCommand, isWakePhrase, parseVolume, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
 import { VoiceSettings } from '../src/voice/settings.js';
-import { VoiceSession, type VoiceBackend, type VoiceHost } from '../src/voice/session.js';
+import { VoiceSession, type VoiceBackend, type VoiceDiagnostic, type VoiceHost } from '../src/voice/session.js';
 
 const audio = Buffer.from([0, 0]);
 function harness(override: Partial<VoiceBackend> = {}, hostOverride: Partial<VoiceHost> = {}) {
@@ -89,7 +89,7 @@ test('generic turn-on requests resume only a paused track, while song requests r
     return { action: 'resume', confidence: 0.99 };
   } }, { paused: () => paused });
   try {
-    for (const text of ['Включи', 'Включи музыку', 'Включи обратно', 'Включи музыку снова']) {
+    for (const text of ['Включи', 'Включи музыку', 'Включи обратно', 'Включи музыку снова', 'Продолжай', 'Продолжай музыку', 'Возобнови']) {
       assert.equal(contextualCommand(text, true), 'Продолжи музыку');
       assert.equal(contextualCommand(text, false), text);
     }
@@ -97,7 +97,7 @@ test('generic turn-on requests resume only a paused track, while song requests r
       assert.equal(contextualCommand(text, true), text);
     }
     await h.session.begin('alice')!.complete(audio);
-    h.setText('Включи музыку');
+    h.setText('Продолжай');
     await h.session.begin('alice')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'resume' }]);
     paused = false;
@@ -106,6 +106,33 @@ test('generic turn-on requests resume only a paused track, while song requests r
     assert.equal(h.actions.length, 1);
     assert.equal(h.ducked, false);
   } finally { h.session.disable(); }
+});
+
+test('diagnostics distinguish model rejection and playback no-op without retaining speech', async () => {
+  const events: VoiceDiagnostic[] = [];
+  const h = harness({ classify: async () => ({ action: 'resume', confidence: 0.99 }) }, {
+    paused: () => true, diagnostic: (event) => events.push(event), execute: async () => false,
+  });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    h.setText('Продолжай'); await h.session.begin('alice')!.complete(audio);
+    assert.ok(events.some((event) => event.stage === 'recognition' && event.canonicalized));
+    assert.ok(events.some((event) => event.stage === 'decision' && event.action === 'resume'));
+    assert.ok(events.some((event) => event.stage === 'execution' && event.changed === false));
+    assert.equal(JSON.stringify(events).includes('Продолжай'), false);
+    assert.equal(JSON.stringify(events).includes('alice'), false);
+  } finally { h.session.disable(); }
+
+  const rejectedEvents: VoiceDiagnostic[] = [];
+  const rejected = harness({ classify: async () => ({ action: 'private-content', confidence: 0.9 } as unknown as { action: 'skip'; confidence: number }) },
+    { diagnostic: (event) => rejectedEvents.push(event) });
+  try {
+    await rejected.session.begin('alice')!.complete(audio);
+    rejected.setText('Следующий'); await rejected.session.begin('alice')!.complete(audio);
+    assert.equal(rejected.actions.length, 0);
+    assert.ok(rejectedEvents.some((event) => event.stage === 'decision' && event.action === 'unknown'));
+    assert.equal(JSON.stringify(rejectedEvents).includes('private-content'), false);
+  } finally { rejected.session.disable(); }
 });
 
 test('ten second timeout and maximum command duration release the session', async (context) => {
