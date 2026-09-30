@@ -23,6 +23,7 @@ async function main(): Promise<void> {
   console.log(voiceReady ? '[Voice] Whisper + Laya готовы.' : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; повторное включение через /voice on.'));
   client.once(Events.ClientReady, () => {
+    console.log('[Bot] Ready');
     console.log(`✅ Бот запущен как ${client.user?.tag}`);
     client.user?.setActivity('/play');
   });
