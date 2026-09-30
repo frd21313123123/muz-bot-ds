@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { isWakePhrase, parseVolume, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
+import { contextualCommand, isWakePhrase, parseVolume, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
 import { VoiceSettings } from '../src/voice/settings.js';
 import { VoiceSession, type VoiceBackend, type VoiceHost } from '../src/voice/session.js';
 
@@ -68,14 +68,43 @@ test('music requests, compound commands, negations and low confidence cannot con
 test('activation ducks only after cue, binds the speaker, executes once and restores gain', async () => {
   const h = harness();
   try {
-    await h.session.begin('alice')!.complete(audio);
+    const wake = h.session.begin('alice')!;
+    assert.equal(wake.silenceMs, 400);
+    await wake.complete(audio);
     assert.equal(h.cues, 1); assert.equal(h.ducked, true); assert.equal(h.session.phase, 'awaiting');
     assert.equal(h.session.begin('bob'), null);
     h.setText('Следующий');
     const command = h.session.begin('alice')!;
+    assert.equal(command.silenceMs, 800);
     await command.complete(audio); await command.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
     assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle');
+  } finally { h.session.disable(); }
+});
+
+test('generic turn-on requests resume only a paused track, while song requests remain unsupported', async () => {
+  let paused = true;
+  const h = harness({ classify: async (text) => {
+    assert.equal(text, 'Продолжи музыку');
+    return { action: 'resume', confidence: 0.99 };
+  } }, { paused: () => paused });
+  try {
+    for (const text of ['Включи', 'Включи музыку', 'Включи обратно', 'Включи музыку снова']) {
+      assert.equal(contextualCommand(text, true), 'Продолжи музыку');
+      assert.equal(contextualCommand(text, false), text);
+    }
+    for (const text of ['Включи песню', 'Включи Metallica', 'Включи следующую музыку', 'Не включи', 'Включи и пауза', 'Включи музыку?']) {
+      assert.equal(contextualCommand(text, true), text);
+    }
+    await h.session.begin('alice')!.complete(audio);
+    h.setText('Включи музыку');
+    await h.session.begin('alice')!.complete(audio);
+    assert.deepEqual(h.actions, [{ action: 'resume' }]);
+    paused = false;
+    h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
+    h.setText('Включи музыку'); await h.session.begin('alice')!.complete(audio);
+    assert.equal(h.actions.length, 1);
+    assert.equal(h.ducked, false);
   } finally { h.session.disable(); }
 });
 

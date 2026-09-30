@@ -1,4 +1,4 @@
-import { isWakePhrase, unsupportedSpeech, validateIntent, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { contextualCommand, isWakePhrase, unsupportedSpeech, validateIntent, type VoiceDecision, type VoiceIntent } from './intents.js';
 
 export interface VoiceBackend {
   transcribe(pcm: Buffer, signal: AbortSignal, command: boolean, wakeName?: string): Promise<string>;
@@ -7,6 +7,7 @@ export interface VoiceBackend {
 export interface VoiceHost {
   wakeName(): string;
   present(userId: string): boolean;
+  paused?(): boolean;
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
   execute(intent: VoiceIntent): Promise<void>;
@@ -14,6 +15,7 @@ export interface VoiceHost {
 export interface SpeechCapture {
   signal: AbortSignal;
   maxMs: number;
+  silenceMs: number;
   complete(pcm: Buffer): Promise<void>;
   cancel(): void;
 }
@@ -75,6 +77,7 @@ export class VoiceSession {
     return {
       signal: controller.signal,
       maxMs: command ? this.timings.commandMs : this.timings.wakeMs,
+      silenceMs: command ? 800 : 400,
       cancel,
       complete: async (pcm) => {
         if (finished || controller.signal.aborted) return;
@@ -83,7 +86,8 @@ export class VoiceSession {
         try {
           if (command) { this.clearTimer(); this.phase = 'processing'; }
           if (!pcm.length || !valid()) return;
-          const text = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName());
+          const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName());
+          const text = command ? contextualCommand(transcript, this.host.paused?.() ?? false) : transcript;
           if (!valid()) return;
           if (command) {
             if (unsupportedSpeech(text)) return;

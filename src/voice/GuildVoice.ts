@@ -1,4 +1,4 @@
-import { EndBehaviorType, VoiceConnectionStatus, type VoiceConnection } from '@discordjs/voice';
+import { AudioPlayerStatus, EndBehaviorType, VoiceConnectionStatus, type VoiceConnection } from '@discordjs/voice';
 import OpusScript from 'opusscript';
 import type { GuildQueue } from '../utils/GuildQueue.js';
 import { VoiceSession, type SpeechCapture } from './session.js';
@@ -20,6 +20,7 @@ export class GuildVoice {
   private newSession(): VoiceSession {
     return new VoiceSession(this.runtime, {
       wakeName: () => this.queue.wakeName,
+      paused: () => this.queue.player.state.status === AudioPlayerStatus.Paused,
       present: (userId) => Boolean(!this.queue.closed && this.queue.voiceChannel
         && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(this.queue.client.user?.id ?? '')?.channelId === this.queue.voiceChannel.id
         && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(userId)?.channelId === this.queue.voiceChannel.id
@@ -87,7 +88,7 @@ export class GuildVoice {
     let stream;
     try {
       stream = this.connection!.receiver.subscribe(userId, {
-        end: { behavior: EndBehaviorType.AfterSilence, duration: 800 },
+        end: { behavior: EndBehaviorType.AfterSilence, duration: capture.silenceMs },
       });
     } catch (error) { decoder.delete(); throw error; }
     const chunks: Buffer[] = [];

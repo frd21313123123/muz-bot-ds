@@ -21,6 +21,15 @@ export function isWakePhrase(text: string, name: string): boolean {
   return key.length >= 2 && normalizeSpeech(text) === key;
 }
 
+// Generic "turn it on" means resume only when an existing track is paused.
+// Keep song titles and any extra words outside this closed set.
+export function contextualCommand(text: string, paused: boolean): string {
+  if (paused && !text.includes('?') && /^(включи|включить|включай)( музыку| воспроизведение)?( снова| обратно| дальше)?$/.test(normalizeSpeech(text))) {
+    return 'Продолжи музыку';
+  }
+  return text;
+}
+
 // A closed decision model cannot supply arbitrary arguments. Parse numbers in code.
 const ONES: Record<string, number> = {
   ноль: 0, один: 1, одна: 1, два: 2, две: 2, три: 3, четыре: 4, пять: 5,
