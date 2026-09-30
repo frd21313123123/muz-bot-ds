@@ -10,6 +10,7 @@ import { TrackQueue } from './TrackQueue.js';
 import { PlayerMessage } from './PlayerMessage.js';
 import { Readable } from 'node:stream';
 import { GuildVoice } from '../voice/GuildVoice.js';
+import { configureMusicEncoder } from './audio.js';
 
 const IDLE_MS = 5 * 60_000;
 
@@ -95,6 +96,7 @@ export class GuildQueue {
       pcm.writeInt16LE(value, i * 4); pcm.writeInt16LE(value, i * 4 + 2);
     }
     const resource = createAudioResource(Readable.from([pcm]), { inputType: StreamType.Raw });
+    configureMusicEncoder(resource);
     const wasPlaying = this.player.state.status === AudioPlayerStatus.Playing;
     if (wasPlaying) { this.pausedAt = Date.now(); this.player.pause(); }
     await new Promise<void>((resolve, reject) => {
@@ -153,6 +155,7 @@ export class GuildQueue {
     let resource;
     try {
       resource = createAudioResource(media.stream, { inputType: media.type, inlineVolume: true });
+      configureMusicEncoder(resource);
     } catch (error) {
       media.destroy();
       throw error;

@@ -4,6 +4,7 @@ import './guildQueue.test.js';
 import './voiceAccess.test.js';
 import './join.test.js';
 import './stream.test.js';
+import './audio.test.js';
 import './ytdlp.test.js';
 import './voice.test.js';
 import './voiceRuntime.test.js';

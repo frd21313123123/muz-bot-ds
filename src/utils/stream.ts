@@ -3,6 +3,7 @@ import type { Readable } from 'node:stream';
 import { createRequire } from 'node:module';
 import { StreamType } from '@discordjs/voice';
 import type { YtdlpClient } from './ytdlp.js';
+import { musicPcmArguments } from './audio.js';
 
 let ffmpegCommand: string | null = null;
 const require = createRequire(import.meta.url);
@@ -16,11 +17,15 @@ export function requireFfmpeg(): string {
       encoding: 'utf8', timeout: 10_000, windowsHide: true,
     });
     if (check.status === 0 && check.stdout.includes('libopus')) {
+      const filters = spawnSync(candidate, ['-hide_banner', '-filters'], {
+        encoding: 'utf8', timeout: 10_000, windowsHide: true,
+      });
+      if (filters.status !== 0 || !['loudnorm', 'aresample', 'aeval'].every(filter => filters.stdout.includes(filter))) continue;
       ffmpegCommand = candidate;
       return candidate;
     }
   }
-  throw new Error('Не найден FFmpeg с кодеком libopus. Установите ffmpeg-static или задайте FFMPEG_PATH.');
+  throw new Error('Не найден FFmpeg с libopus, loudnorm, aresample и aeval. Установите ffmpeg-static или задайте FFMPEG_PATH.');
 }
 
 export interface ManagedAudioStream {
@@ -30,19 +35,19 @@ export interface ManagedAudioStream {
 }
 
 export function createYtdlpStream(ytdlp: YtdlpClient, url: string): ManagedAudioStream {
+  const ffmpeg = requireFfmpeg();
   const downloader = ytdlp.spawn([
-    '-f', 'bestaudio[ext=webm]/bestaudio', '-o', '-', '--no-playlist', url,
+    '-f', 'bestaudio/best', '-o', '-', '--no-playlist', url,
   ]);
-  const transcoder = spawn(requireFfmpeg(), [
+  const transcoder = spawn(ffmpeg, [
     '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
-    '-vn', '-c:a', 'libopus', '-ar', '48000', '-ac', '2', '-b:a', '128k',
-    '-f', 'ogg', 'pipe:1',
+    ...musicPcmArguments(),
   ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 
-  return createProcessStream(downloader, transcoder);
+  return createProcessStream(downloader, transcoder, StreamType.Raw);
 }
 
-export function createProcessStream(downloader: ChildProcess, transcoder: ChildProcess): ManagedAudioStream {
+export function createProcessStream(downloader: ChildProcess, transcoder: ChildProcess, type = StreamType.OggOpus): ManagedAudioStream {
   const output = transcoder.stdout;
   if (!downloader.stdout || !downloader.stderr || !transcoder.stdin || !output || !transcoder.stderr) {
     downloader.kill();
@@ -88,5 +93,5 @@ export function createProcessStream(downloader: ChildProcess, transcoder: ChildP
     if (code !== 0) fail(`FFmpeg завершился с кодом ${code}: ${ffError.trim()}`);
   });
 
-  return { stream: output, type: StreamType.OggOpus, destroy };
+  return { stream: output, type, destroy };
 }
