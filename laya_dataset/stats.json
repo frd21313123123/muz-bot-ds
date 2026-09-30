@@ -1,0 +1,26 @@
+{
+  "train": {
+    "rows": 408,
+    "typed_questions": 1128,
+    "intent_rows": 312,
+    "search_rerank_rows": 96
+  },
+  "calibration": {
+    "rows": 136,
+    "typed_questions": 376,
+    "intent_rows": 104,
+    "search_rerank_rows": 32
+  },
+  "eval": {
+    "rows": 136,
+    "typed_questions": 376,
+    "intent_rows": 104,
+    "search_rerank_rows": 32
+  },
+  "total": {
+    "rows": 680,
+    "typed_questions": 1880,
+    "intent_rows": 520,
+    "search_rerank_rows": 160
+  }
+}
