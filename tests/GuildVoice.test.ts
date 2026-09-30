@@ -9,7 +9,7 @@ import { GuildVoice } from '../src/voice/GuildVoice.js';
 import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { VoiceRuntime } from '../src/voice/runtime.js';
 import type { MusicClient } from '../src/types.js';
-import type { MusicDecision } from '../src/voice/music.js';
+import type { MusicDecision, MusicResultPolicy } from '../src/voice/music.js';
 import { toTrack } from '../src/utils/ytdlp.js';
 
 const waitFor = async (condition: () => boolean): Promise<void> => {
@@ -38,7 +38,7 @@ function musicHarness() {
     classify: async () => { throw new Error('Music must not reach player classifier'); },
     decideMusic: async (): Promise<MusicDecision> => ({ next_tool: 'youtube_music_search', query_source: 'message', search_result_policy: 'rerank_results', confidence: 1 }),
     rerankMusic: async () => ({ best_track: 1, confidence: 1 }),
-    decideMusicResults: async () => ({ search_result_policy: 'rerank_results' as const, confidence: 1 }),
+    decideMusicResults: async (): Promise<MusicResultPolicy> => ({ search_result_policy: 'rerank_results', confidence: 1 }),
   });
   const connection = { state: { status: VoiceConnectionStatus.Ready }, joinConfig: {},
     receiver: { speaking: new EventEmitter() }, rejoin: () => true,
@@ -52,9 +52,9 @@ function musicHarness() {
   client.queues.set('music', queue);
   const voice = new GuildVoice(queue, runtime as unknown as VoiceRuntime); queue.voice = voice;
   voice.attach(connection);
-  return { queue, voice, runtime, metadata, states, async command() {
+  return { queue, voice, runtime, metadata, states, async command(message = 'включи Numb live') {
     text = 'Муза'; await voice.session.begin('alice')!.complete(Buffer.from([0, 0]));
-    text = 'включи Numb live'; const capture = voice.session.begin('alice')!;
+    text = message; const capture = voice.session.begin('alice')!;
     return { capture, processing: capture.complete(Buffer.from([0, 0])) };
   } };
 }
@@ -71,6 +71,29 @@ test('voice music starts an empty queue, attributes the speaker, and preserves b
       assert.equal(requested?.requestedBy, 'Alice');
       assert.equal(h.queue.tracks.length, busy ? 1 : 0);
       assert.equal(h.voice.session.phase, 'idle');
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('a plain Moscow request starts or queues once despite a model that would reject the search results', async () => {
+  for (const busy of [false, true]) {
+    const h = musicHarness();
+    let policies = 0;
+    h.runtime.decideMusic = async () => ({ next_tool: 'youtube_music_search', query_source: 'message',
+      search_result_policy: 'play_first_result', defer_result_policy: true, confidence: 1 });
+    h.runtime.decideMusicResults = async () => { policies++; return { search_result_policy: 'no_result', confidence: 0.9966 }; };
+    h.metadata.searchCandidates = async () => [{ id: 'aaaaaaaaaaa', title: 'DJ SMASH — MOSCOW NEVER SLEEPS' }];
+    try {
+      if (busy) await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
+      const { capture, processing } = await h.command('Включи Moscow never sleep');
+      await processing; await capture.complete(Buffer.from([0, 0]));
+      const requested = busy ? h.queue.tracks[0] : h.queue.currentTrack;
+      assert.equal(requested?.title, 'DJ SMASH — MOSCOW NEVER SLEEPS');
+      assert.equal(requested?.requestedBy, 'Alice');
+      assert.equal(h.queue.tracks.length, busy ? 1 : 0);
+      assert.equal(policies, 0);
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
     } finally { await h.queue.stop(); }
   }
 });

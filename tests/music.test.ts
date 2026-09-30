@@ -76,7 +76,7 @@ test('v3 state contains the parsed original query and canonical video URL', () =
   assert.equal(musicVariant('Numb акустическая версия'), 'acoustic');
 });
 
-test('v3 policy receives real candidates after search; plain titles still take the first', async () => {
+test('v3 policy receives real candidates only for an explicit version; plain titles take the first', async () => {
   for (const query of ['Numb', 'Numb live']) {
     let policyCalls = 0;
     const h = harness({ decideMusic: deferredRoute,
@@ -86,10 +86,31 @@ test('v3 policy receives real candidates after search; plain titles still take t
         return { search_result_policy: 'rerank_results', confidence: 0.99 };
       } });
     assert.equal((await h.resolve(`включи ${query}`))?.videoId, query === 'Numb' ? 'aaaaaaaaaaa' : 'bbbbbbbbbbb');
-    assert.equal(policyCalls, 1);
+    assert.equal(policyCalls, query === 'Numb' ? 0 : 1);
     assert.equal(h.calls.includes('rerank'), query !== 'Numb');
-    assert.deepEqual(h.events.filter((event) => ['search', 'policy'].includes(event.stage)).map((event) => event.stage), ['search', 'policy']);
+    assert.deepEqual(h.events.filter((event) => ['search', 'policy'].includes(event.stage)).map((event) => event.stage),
+      query === 'Numb' ? ['search'] : ['search', 'policy']);
   }
+});
+
+test('Moscow never sleep and speech spelling variants cannot be vetoed by a second plain-title decision', async () => {
+  for (const query of ['Moscow never sleep', 'Moscow Never Sleeps', 'москоу невер слип', 'Moscow never slip.']) {
+    let policyCalls = 0;
+    const h = harness({ decideMusic: deferredRoute,
+      decideMusicResults: async () => { policyCalls++; return { search_result_policy: 'no_result', confidence: 0.9966 }; },
+      rerankMusic: async () => { assert.fail('Plain titles must bypass reranking'); } },
+    { searchCandidates: async actualQuery => {
+      assert.equal(actualQuery, query);
+      return [{ id: 'aaaaaaaaaaa', title: 'DJ SMASH — MOSCOW NEVER SLEEPS', channel: 'DJ SMASH', duration: 210 }];
+    } });
+    assert.equal((await h.resolve(`Включи ${query}`))?.title, 'DJ SMASH — MOSCOW NEVER SLEEPS');
+    assert.equal(policyCalls, 0, 'An ordinary title must not be rejected after a successful search');
+    assert.equal(h.events.some(event => event.stage === 'fallback'), false);
+  }
+  const original = harness({ decideMusic: async () => ({ next_tool: 'youtube_music_search', query_source: 'message',
+    search_result_policy: 'rerank_results', confidence: 1 }) });
+  assert.equal((await original.resolve('Включи Moscow never sleep'))?.videoId, 'aaaaaaaaaaa');
+  assert.equal(original.calls.includes('rerank'), false);
 });
 
 test('v3 explicit no-result and no-match decisions abstain; weak or failed decisions fall back', async () => {
@@ -97,8 +118,10 @@ test('v3 explicit no-result and no-match decisions abstain; weak or failed decis
     const noResults = harness({ decideMusic: deferredRoute,
       decideMusicResults: async () => ({ search_result_policy: 'no_result', confidence }) });
     assert.equal((await noResults.resolve('включи Numb live'))?.videoId ?? null, confidence >= 0.6 ? null : 'aaaaaaaaaaa');
+    assert.equal(noResults.events.some(event => event.reason === 'no_result'), confidence >= 0.6);
     const noMatch = harness({ rerankMusic: async () => ({ best_track: -1, no_match: true, confidence }) });
     assert.equal((await noMatch.resolve('включи Numb live'))?.videoId ?? null, confidence >= 0.6 ? null : 'aaaaaaaaaaa');
+    assert.equal(noMatch.events.some(event => event.reason === 'no_match'), confidence >= 0.6);
   }
   const failed = harness({ decideMusic: deferredRoute, decideMusicResults: async () => { throw new Error('worker failed'); } });
   assert.equal((await failed.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');

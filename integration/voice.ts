@@ -7,7 +7,7 @@ import { performance } from 'node:perf_hooks';
 import { VoiceRuntime } from '../src/voice/runtime.js';
 import { contextualCommand, isWakePhrase, validateIntent, type VoiceAction } from '../src/voice/intents.js';
 import { requireFfmpeg } from '../src/utils/stream.js';
-import { extractMusicRequest, musicState, validConfidence, type MusicDecision } from '../src/voice/music.js';
+import { extractMusicRequest, musicState, musicVariant, resolveMusicRequest, validConfidence, type MusicDecision } from '../src/voice/music.js';
 
 const cases: [string, VoiceAction, boolean?][] = [
   ['Следующий трек', 'skip'], ['Пропусти текущую музыку', 'skip'],
@@ -76,6 +76,8 @@ try {
   const musicCases: [string, MusicDecision['next_tool'], MusicDecision['search_result_policy']][] = [
     ['включи Numb', 'youtube_music_search', 'play_first_result'],
     ['поставь песню Rammstein Sonne', 'youtube_music_search', 'play_first_result'],
+    ['Включи Moscow never sleep', 'youtube_music_search', 'play_first_result'],
+    ['Включи Moscow Never Sleeps', 'youtube_music_search', 'play_first_result'],
     ['включи Numb live', 'youtube_music_search', 'rerank_results'],
     ['сыграй Numb remix', 'youtube_music_search', 'rerank_results'],
     ['воспроизведи Numb cover', 'youtube_music_search', 'rerank_results'],
@@ -97,14 +99,24 @@ try {
     console.log(`Music route ${index + 1}: ${decision.next_tool}, ${decision.search_result_policy}, confidence=${decision.confidence.toFixed(3)} (${Math.round(performance.now() - start)} ms)`);
     assert.equal(decision.next_tool, route, `Music route ${index + 1}`);
     assert.ok(validConfidence(decision.confidence), `Music confidence ${index + 1}`);
-    if (decision.defer_result_policy) {
+    if (decision.defer_result_policy && musicVariant(request.query)) {
       const results = [message.replace(/^(включи|поставь|сыграй|воспроизведи)\s+/iu, ''), 'Linkin Park - Numb Lyrics']
         .map((title, i) => ({ index: i, title, artist: 'Linkin Park', duration: '3:00' }));
       const resultPolicy = await runtime.decideMusicResults(request.query, results, signal);
       assert.ok(validConfidence(resultPolicy.confidence), `Music result policy confidence ${index + 1}`);
       assert.notEqual(resultPolicy.search_result_policy, 'no_result', `Music result policy ${index + 1}`);
       if (policy === 'rerank_results') assert.equal(resultPolicy.search_result_policy, policy, `Music result policy ${index + 1}`);
-    } else assert.equal(decision.search_result_policy, policy, `Music policy ${index + 1}`);
+    } else if (!decision.defer_result_policy) assert.equal(decision.search_result_policy, policy, `Music policy ${index + 1}`);
+  }
+  for (const message of ['Включи Moscow never sleep', 'Включи Moscow Never Sleeps']) {
+    const track = await resolveMusicRequest(message, 'Voice check', {
+      decideMusic: (state, signal) => runtime.decideMusic(state, signal),
+      decideMusicResults: async () => { assert.fail('Plain song requests must bypass result policy'); },
+      rerankMusic: async () => { assert.fail('Plain song requests must bypass reranking'); },
+    }, { searchCandidates: async () => [{ id: 'aaaaaaaaaaa', title: 'DJ SMASH — MOSCOW NEVER SLEEPS' }],
+      video: async () => { assert.fail('Song title must use search'); } }, signal);
+    assert.equal(track?.videoId, 'aaaaaaaaaaa');
+    console.log('Moscow voice request pipeline: PASS');
   }
   for (const [index, version] of ['Live in Texas', 'Remix', 'Cover', 'Acoustic', 'Instrumental'].entries()) {
     const query = `Linkin Park Numb ${version}`;

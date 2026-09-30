@@ -29,14 +29,14 @@ export interface MusicMetadata {
   video(url: string, signal: AbortSignal): Promise<VideoInfo>;
 }
 export interface MusicDiagnostic {
-  stage: 'routing' | 'search' | 'policy' | 'selection' | 'fallback';
+  stage: 'routing' | 'search' | 'policy' | 'selection' | 'fallback' | 'rejected';
   ms?: number;
   candidates?: number;
   bestTrack?: number;
   confidence?: number;
   nextTool?: MusicDecision['next_tool'];
   policy?: MusicResultPolicy['search_result_policy'];
-  reason?: 'model' | 'selection' | 'empty' | 'metadata';
+  reason?: 'model' | 'selection' | 'empty' | 'metadata' | 'no_result' | 'no_match' | 'routing' | 'confidence';
 }
 export type MusicRequest = { kind: 'search' | 'video'; query: string };
 
@@ -99,9 +99,19 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
     signal.throwIfAborted();
     diagnostic?.({ stage: 'routing', ms: Math.round(performance.now() - started),
       nextTool: decision.next_tool, policy: decision.search_result_policy, confidence: decision.confidence });
-    if (!validConfidence(decision.confidence) || decision.next_tool === 'unknown' || decision.next_tool === 'player_control') return null;
+    if (!validConfidence(decision.confidence)) {
+      diagnostic?.({ stage: 'rejected', reason: 'confidence' });
+      return null;
+    }
+    if (decision.next_tool === 'unknown' || decision.next_tool === 'player_control') {
+      diagnostic?.({ stage: 'rejected', reason: 'routing' });
+      return null;
+    }
     // The model selects a route; code verifies that it matches the actual input.
-    if (decision.next_tool !== (request.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search')) return null;
+    if (decision.next_tool !== (request.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search')) {
+      diagnostic?.({ stage: 'rejected', reason: 'routing' });
+      return null;
+    }
     policy = decision.search_result_policy;
     deferredPolicy = decision.defer_result_policy === true;
   } catch {
@@ -135,7 +145,12 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
     index: i, title: track.title.slice(0, 240), artist: (info.artist || info.channel || info.uploader || '').slice(0, 120),
     duration: track.duration.slice(0, 32),
   }));
-  if (request.kind === 'search' && deferredPolicy) {
+  // Plain titles follow the product rule: play the first usable search result.
+  // A second model call can wrongly reject valid titles (including ASR spelling
+  // variations). Only an explicit version requires judging the candidates.
+  const variant = request.kind === 'search' ? musicVariant(request.query) : null;
+  if (request.kind === 'search' && !variant) policy = 'play_first_result';
+  if (request.kind === 'search' && deferredPolicy && variant) {
     const policyStart = performance.now();
     try {
       if (!backend.decideMusicResults) throw new Error('Result policy unavailable');
@@ -144,10 +159,11 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
       diagnostic?.({ stage: 'policy', policy: decision.search_result_policy, confidence: decision.confidence,
         ms: Math.round(performance.now() - policyStart) });
       if (!validConfidence(decision.confidence)) throw new Error('Weak result policy');
-      if (decision.search_result_policy === 'no_result') return null;
-      // The voice product takes the first candidate for a plain title. Model
-      // reranking is available when the request explicitly qualifies a version.
-      policy = musicVariant(request.query) ? decision.search_result_policy : 'play_first_result';
+      if (decision.search_result_policy === 'no_result') {
+        diagnostic?.({ stage: 'rejected', reason: 'no_result' });
+        return null;
+      }
+      policy = decision.search_result_policy;
     } catch {
       signal.throwIfAborted();
       diagnostic?.({ stage: 'fallback', reason: 'model' });
@@ -160,7 +176,10 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
     try {
       const selection = await backend.rerankMusic(request.query, selectionCandidates, signal);
       signal.throwIfAborted();
-      if (selection.no_match === true && selection.best_track === -1 && validConfidence(selection.confidence)) return null;
+      if (selection.no_match === true && selection.best_track === -1 && validConfidence(selection.confidence)) {
+        diagnostic?.({ stage: 'rejected', reason: 'no_match' });
+        return null;
+      }
       if (!Number.isInteger(selection.best_track) || !usable[selection.best_track] || !validConfidence(selection.confidence)) {
         throw new Error('Invalid selection');
       }
