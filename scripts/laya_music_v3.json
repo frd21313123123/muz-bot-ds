@@ -1,0 +1,42 @@
+{
+  "profile": "laya-muz-bot-ds-v3",
+  "contract_source": "User-provided v3 state and option labels; question wording verified with the local checkpoint",
+  "routing": {
+    "next_tool": {
+      "type": "choice",
+      "instructions": "Какой инструмент нужно вызвать следующим?",
+      "criteria": {
+        "youtube_music_search": "Поиск музыки по текстовому запросу",
+        "direct_youtube_video": "Воспроизведение конкретного видео YouTube по ссылке",
+        "youtube_playlist": "Получение плейлиста YouTube по ссылке",
+        "player_control": "Управление музыкальным плеером",
+        "no_tool": "Не вызывать инструмент"
+      }
+    },
+    "query_source": {
+      "type": "choice",
+      "instructions": "Откуда взять поисковый запрос?",
+      "criteria": {
+        "parsed_search_query": "Поисковый запрос из parsed_request.search_query",
+        "selected_track": "Выбранный пользователем трек",
+        "current_track": "Текущий воспроизводимый трек",
+        "none": "Поисковый запрос не нужен"
+      }
+    }
+  },
+  "tool_result": {
+    "search_result_policy": {
+      "type": "choice",
+      "instructions": "Как обработать результаты поиска?",
+      "criteria": {
+        "play_first_result": "Воспроизвести первый результат поиска",
+        "rerank_results": "Сравнить результаты и выбрать лучшую версию",
+        "no_result": "Нет подходящих результатов"
+      }
+    }
+  },
+  "rerank": {
+    "instructions": "Какой кандидат лучше всего соответствует запросу?",
+    "none": "Ни один кандидат не подходит"
+  }
+}

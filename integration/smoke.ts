@@ -6,6 +6,10 @@ import { createYtdlpStream, requireFfmpeg } from '../src/utils/stream.js';
 async function main(): Promise<void> {
   requireFfmpeg();
   const ytdlp = await prepareYtdlp();
+  const candidates = await ytdlp.searchCandidates('Linkin Park Numb', 5);
+  if (candidates.length < 2 || candidates.length > 5) throw new Error('Поиск не вернул несколько кандидатов.');
+  if (new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) throw new Error('Поиск вернул дубликаты.');
+  console.log(`Получено ${candidates.length} кандидатов поиска.`);
   const searched = await resolveQuery('Rick Astley Never Gonna Give You Up', 'Smoke', ytdlp);
   if (searched?.type !== 'single') throw new Error('Текстовый поиск не вернул видео.');
   console.log(`Поиск: ${searched.track.title}`);

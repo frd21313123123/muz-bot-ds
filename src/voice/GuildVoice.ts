@@ -1,8 +1,9 @@
 import { AudioPlayerStatus, EndBehaviorType, VoiceConnectionStatus, type VoiceConnection } from '@discordjs/voice';
-import OpusScript from 'opusscript';
+import { VoiceDecoder } from './decoder.js';
 import type { GuildQueue } from '../utils/GuildQueue.js';
-import { VoiceSession, type SpeechCapture } from './session.js';
+import { VoiceSession, type SpeechCapture, type VoiceDiagnostic } from './session.js';
 import type { VoiceRuntime } from './runtime.js';
+import { resolveMusicRequest } from './music.js';
 
 export class GuildVoice {
   readonly session: VoiceSession;
@@ -10,7 +11,17 @@ export class GuildVoice {
   private connection: VoiceConnection | null = null;
   private captures = new Map<string, () => void>();
   private readonly speaking = (userId: string): void => this.receive(userId);
-  private readonly unavailable = (): void => this.setEnabled(false);
+  private readonly unavailable = (): void => {
+    this.enabled = false;
+    this.connection?.receiver.speaking.off('start', this.speaking);
+    this.session.backendUnavailable();
+    for (const release of [...this.captures.values()]) release();
+    // Keep the connection and an already recognized request alive for fallback.
+    const connection = this.connection;
+    if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
+      connection.rejoin({ ...connection.joinConfig, selfDeaf: true });
+    }
+  };
 
   constructor(private readonly queue: GuildQueue, private readonly runtime: VoiceRuntime) {
     this.session = this.newSession();
@@ -18,6 +29,10 @@ export class GuildVoice {
   }
 
   private newSession(): VoiceSession {
+    const diagnostic = (event: VoiceDiagnostic): void => {
+      if (process.env.VOICE_DEBUG === '1') console.log(`[Voice:${this.queue.guildId}] ${JSON.stringify({ ...event,
+        player: this.queue.player.state.status, track: Boolean(this.queue.currentTrack) })}`);
+    };
     return new VoiceSession(this.runtime, {
       wakeName: () => this.queue.wakeName,
       paused: () => this.queue.player.state.status === AudioPlayerStatus.Paused,
@@ -27,9 +42,18 @@ export class GuildVoice {
         && !this.queue.client.users.cache.get(userId)?.bot),
       cue: (signal) => this.queue.playVoiceCue(signal),
       duck: (enabled) => this.queue.setVoiceDucking(enabled),
-      diagnostic: (event) => {
-        if (process.env.VOICE_DEBUG === '1') console.log(`[Voice:${this.queue.guildId}] ${JSON.stringify({ ...event,
-          player: this.queue.player.state.status, track: Boolean(this.queue.currentTrack) })}`);
+      diagnostic,
+      playMusic: async (message, userId, signal, valid) => {
+        const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
+        const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
+        const track = await resolveMusicRequest(message, requestedBy, this.runtime, this.queue.client.ytdlp, signal, diagnostic, {
+          connected: Boolean(this.queue.connection), playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
+          paused: this.queue.player.state.status === AudioPlayerStatus.Paused, autoplay: this.queue.autoplay,
+          queue_length: this.queue.tracks.length,
+        });
+        if (!track || !valid() || this.queue.closed) return false;
+        await this.queue.addTrack(track);
+        return true;
       },
       execute: async (intent) => {
         switch (intent.action) {
@@ -88,7 +112,7 @@ export class GuildVoice {
   }
 
   private capture(userId: string, capture: SpeechCapture): void {
-    const decoder = new OpusScript(16_000, 1, OpusScript.Application.VOIP);
+    const decoder = new VoiceDecoder();
     let stream;
     try {
       stream = this.connection!.receiver.subscribe(userId, {
@@ -114,8 +138,8 @@ export class GuildVoice {
     const timer = setTimeout(abort, capture.maxMs);
     const data = (packet: Buffer): void => {
       try {
-        if (packet.length > OpusScript.MAX_PACKET_SIZE) { release(); return; }
         const pcm = decoder.decode(packet);
+        if (!pcm) return;
         bytes += pcm.length;
         if (bytes > capture.maxMs * 32) { release(); return; }
         chunks.push(pcm);

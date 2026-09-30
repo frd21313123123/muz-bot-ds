@@ -17,12 +17,15 @@ function harness(override: Partial<VoiceBackend> = {}, hostOverride: Partial<Voi
   const actions: VoiceIntent[] = [];
   const backend: VoiceBackend = {
     transcribe: async () => text,
+    decideMusic: async () => ({ next_tool: 'unknown', query_source: 'message', search_result_policy: 'play_first_result', confidence: 1 }),
+    rerankMusic: async () => ({ best_track: 0, confidence: 1 }),
     classify: async () => ({ action: 'skip', confidence: 0.99 }), ...override,
   };
   const host: VoiceHost = {
     wakeName: () => name, present: () => present,
     cue: async () => { cues++; }, duck: (value) => { ducked = value; },
     execute: async (intent) => { actions.push(intent); }, ...hostOverride,
+    playMusic: hostOverride.playMusic ?? (async () => false),
   };
   const session = new VoiceSession(backend, host);
   return { session, actions, setText: (value: string) => { text = value; },
@@ -32,6 +35,11 @@ function harness(override: Partial<VoiceBackend> = {}, hostOverride: Partial<Voi
 
 test('wake name is exact after Unicode normalization; mentions in conversation do not wake', () => {
   assert.equal(isWakePhrase('  МУЗА! ', 'Муза'), true);
+  assert.equal(isWakePhrase('Bot.', 'Бот'), true);
+  assert.equal(isWakePhrase('Бот', 'Bot'), true);
+  assert.equal(isWakePhrase('Muza', 'Муза'), true);
+  assert.equal(isWakePhrase('Вот', 'Бот'), false);
+  assert.equal(isWakePhrase('Кот', 'Бот'), false);
   assert.equal(isWakePhrase('Музочка', 'Муза'), false);
   assert.equal(isWakePhrase('Муза следующий', 'Муза'), false);
   assert.equal(isWakePhrase('Я говорил с Музой', 'Муза'), false);
@@ -82,7 +90,7 @@ test('activation ducks only after cue, binds the speaker, executes once and rest
   } finally { h.session.disable(); }
 });
 
-test('generic turn-on requests resume only a paused track, while song requests remain unsupported', async () => {
+test('generic turn-on requests resume only a paused track and never canonicalize song requests', async () => {
   let paused = true;
   const h = harness({ classify: async (text) => {
     assert.equal(text, 'Продолжи музыку');
@@ -193,6 +201,45 @@ test('concurrent wake results cannot steal activation; renamed wake key takes ef
   assert.equal(h.session.phase, 'idle');
   h.setText('Джев'); await h.session.begin('alice')!.complete(audio);
   assert.equal(h.cues, 2); h.session.disable();
+});
+
+test('a new wake utterance is captured while the previous one is being recognized', async () => {
+  const pending: ((text: string) => void)[] = [];
+  const h = harness({ transcribe: async (_pcm, signal) => new Promise<string>((resolve, reject) => {
+    pending.push(resolve);
+    signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+  }) });
+  try {
+    const first = h.session.begin('alice')!;
+    assert.equal(h.session.begin('alice'), null, 'do not overlap audio captures');
+    const firstResult = first.complete(audio);
+    const second = h.session.begin('alice');
+    assert.ok(second, 'recognition must not block receiving the next utterance');
+    const secondResult = second.complete(audio);
+    pending[1]!('Муза'); await secondResult;
+    assert.equal(h.cues, 1); assert.equal(first.signal.aborted, true);
+    pending[0]!('Муза'); await firstResult;
+    assert.equal(h.cues, 1, 'late recognition must not activate twice');
+    assert.equal(h.session.phase, 'awaiting');
+  } finally { h.session.disable(); }
+});
+
+test('leaving cancels every queued wake recognition from the same speaker', async () => {
+  const pending: ((text: string) => void)[] = [];
+  const h = harness({ transcribe: async () => new Promise<string>((resolve) => pending.push(resolve)) });
+  const captures = [];
+  const results = [];
+  for (let i = 0; i < 4; i++) {
+    const capture = h.session.begin('alice')!;
+    captures.push(capture); results.push(capture.complete(audio));
+  }
+  assert.equal(h.session.begin('alice'), null, 'bound pending audio');
+  h.session.cancelUser('alice');
+  for (const capture of captures) assert.equal(capture.signal.aborted, true);
+  for (const resolve of pending) resolve('Муза');
+  await Promise.all(results);
+  assert.equal(h.cues, 0); assert.equal(h.session.phase, 'idle');
+  h.session.disable();
 });
 
 test('custom names persist per guild and reset independently, with serialized writes', async () => {

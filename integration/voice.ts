@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 import { VoiceRuntime } from '../src/voice/runtime.js';
 import { contextualCommand, isWakePhrase, validateIntent, type VoiceAction } from '../src/voice/intents.js';
 import { requireFfmpeg } from '../src/utils/stream.js';
+import { extractMusicRequest, musicState, validConfidence, type MusicDecision } from '../src/voice/music.js';
 
 const cases: [string, VoiceAction, boolean?][] = [
   ['Следующий трек', 'skip'], ['Пропусти текущую музыку', 'skip'],
@@ -53,6 +54,7 @@ async function decode(file: string): Promise<Buffer> {
 const runtime = new VoiceRuntime();
 try {
   assert.equal(await runtime.start(), true, 'Run npm run setup:voice first');
+  console.log(`Laya checkpoint: ${runtime.modelName ?? 'default'}`);
   const signal = new AbortController().signal;
   let correct = 0;
   let wrongActions = 0;
@@ -71,10 +73,75 @@ try {
   console.log(`Laya: ${correct}/${cases.length} correct; ${wrongActions} incorrect actions; median ${Math.round(timings[Math.floor(timings.length / 2)]!)} ms`);
   assert.equal(wrongActions, 0, 'Wrong playback actions need investigation before use');
   assert.ok(correct >= cases.length - 2, 'Too many supported commands rejected');
+  const musicCases: [string, MusicDecision['next_tool'], MusicDecision['search_result_policy']][] = [
+    ['включи Numb', 'youtube_music_search', 'play_first_result'],
+    ['поставь песню Rammstein Sonne', 'youtube_music_search', 'play_first_result'],
+    ['включи Numb live', 'youtube_music_search', 'rerank_results'],
+    ['сыграй Numb remix', 'youtube_music_search', 'rerank_results'],
+    ['воспроизведи Numb cover', 'youtube_music_search', 'rerank_results'],
+    ['включи Numb acoustic', 'youtube_music_search', 'rerank_results'],
+    ['включи Numb instrumental', 'youtube_music_search', 'rerank_results'],
+    ['включи Numb концертная версия', 'youtube_music_search', 'rerank_results'],
+    ['включи Numb ремикс', 'youtube_music_search', 'rerank_results'],
+    ['включи Numb кавер', 'youtube_music_search', 'rerank_results'],
+    ['включи Numb акустическая версия', 'youtube_music_search', 'rerank_results'],
+    ['включи Numb инструментальная версия', 'youtube_music_search', 'rerank_results'],
+    ['включи https://music.youtube.com/watch?v=dQw4w9WgXcQ', 'direct_youtube_video', 'play_first_result'],
+    ['включи https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ', 'direct_youtube_video', 'play_first_result'],
+  ];
+  for (const [index, [message, route, policy]] of musicCases.entries()) {
+    const request = extractMusicRequest(message);
+    assert.ok(request);
+    const start = performance.now();
+    const decision = await runtime.decideMusic(musicState(message, request), signal);
+    console.log(`Music route ${index + 1}: ${decision.next_tool}, ${decision.search_result_policy}, confidence=${decision.confidence.toFixed(3)} (${Math.round(performance.now() - start)} ms)`);
+    assert.equal(decision.next_tool, route, `Music route ${index + 1}`);
+    assert.ok(validConfidence(decision.confidence), `Music confidence ${index + 1}`);
+    if (decision.defer_result_policy) {
+      const results = [message.replace(/^(включи|поставь|сыграй|воспроизведи)\s+/iu, ''), 'Linkin Park - Numb Lyrics']
+        .map((title, i) => ({ index: i, title, artist: 'Linkin Park', duration: '3:00' }));
+      const resultPolicy = await runtime.decideMusicResults(request.query, results, signal);
+      assert.ok(validConfidence(resultPolicy.confidence), `Music result policy confidence ${index + 1}`);
+      assert.notEqual(resultPolicy.search_result_policy, 'no_result', `Music result policy ${index + 1}`);
+      if (policy === 'rerank_results') assert.equal(resultPolicy.search_result_policy, policy, `Music result policy ${index + 1}`);
+    } else assert.equal(decision.search_result_policy, policy, `Music policy ${index + 1}`);
+  }
+  for (const [index, version] of ['Live in Texas', 'Remix', 'Cover', 'Acoustic', 'Instrumental'].entries()) {
+    const query = `Linkin Park Numb ${version}`;
+    const otherVersion = version === 'Remix' ? 'Instrumental' : 'Remix';
+    const candidates = ['Linkin Park - Numb', `Linkin Park - Numb ${version}`, 'Linkin Park - Numb Lyrics',
+      'Linkin Park - Numb Official Music Video', `Linkin Park - Numb ${otherVersion}`].map((title, i) => ({
+      index: i, title, artist: 'Linkin Park', duration: '3:00',
+    }));
+    const start = performance.now();
+    const selected = await runtime.rerankMusic(query, candidates, signal);
+    console.log(`Music selection ${index + 1}: index=${selected.best_track}, confidence=${selected.confidence.toFixed(3)} (${Math.round(performance.now() - start)} ms)`);
+    assert.equal(selected.best_track, 1, `Music selection ${index + 1}`);
+    assert.ok(validConfidence(selected.confidence), `Music selection confidence ${index + 1}`);
+  }
+  if (runtime.modelName === 'laya-muz-bot-ds-v3') {
+    for (const version of ['live', 'remix', 'cover', 'acoustic', 'instrumental']) {
+      const candidates = ['Linkin Park - Numb', 'Linkin Park - Numb Lyrics', 'Linkin Park - Numb Official Music Video',
+        `Linkin Park - Numb ${version === 'remix' ? 'instrumental' : 'remix'}`, `Linkin Park - Numb ${version}`]
+        .map((title, index) => ({ index, title, artist: 'Linkin Park', duration: '3:00' }));
+      const selection = await runtime.rerankMusic(`Linkin Park Numb ${version}`, candidates, signal);
+      assert.equal(selection.best_track, 4, `Last candidate ${version}`);
+      assert.ok(validConfidence(selection.confidence), `Last candidate confidence ${version}`);
+      console.log(`V3 last candidate ${version}: index=${selection.best_track}, confidence=${selection.confidence.toFixed(3)}`);
+    }
+    const candidates = ['Rammstein - Sonne', 'Linkin Park - Numb live', 'Rammstein - Sonne Lyrics',
+      'Rammstein - Sonne remix', 'Rammstein - Sonne live'].map((title, index) => ({
+      index, title, artist: index === 1 ? 'Linkin Park' : 'Rammstein', duration: '3:00',
+    }));
+    const selection = await runtime.rerankMusic('Rammstein Sonne live', candidates, signal);
+    assert.equal(selection.best_track, 4, 'Artist among two live candidates');
+    assert.ok(validConfidence(selection.confidence), 'Artist selection confidence');
+    console.log(`V3 artist among live candidates: index=${selection.best_track}, confidence=${selection.confidence.toFixed(3)}`);
+  }
   // Optional local WAV fixtures: [{file, action}] or [{file, wakeName}]. Never print the transcript.
   const manifest = process.env.VOICE_TEST_FIXTURES;
   if (manifest) {
-    const fixtures = JSON.parse(await readFile(manifest, 'utf8')) as { file: string; action?: VoiceAction; level?: number; paused?: boolean; wakeName?: string; shouldWake?: boolean }[];
+    const fixtures = JSON.parse(await readFile(manifest, 'utf8')) as { file: string; action?: VoiceAction; level?: number; paused?: boolean; wakeName?: string; shouldWake?: boolean; musicQuery?: string }[];
     let passedCount = 0;
     const asrTimings: number[] = [];
     for (const [i, fixture] of fixtures.entries()) {
@@ -82,11 +149,14 @@ try {
       const transcript = await runtime.transcribe(await decode(path.resolve(path.dirname(manifest), fixture.file)), signal, !fixture.wakeName, fixture.wakeName);
       asrTimings.push(performance.now() - start);
       const text = contextualCommand(transcript, fixture.paused ?? false);
-      const intent = fixture.wakeName ? null : validateIntent(text, await runtime.classify(text, signal));
+      const intent = fixture.wakeName || fixture.musicQuery ? null : validateIntent(text, await runtime.classify(text, signal));
+      const music = fixture.musicQuery ? extractMusicRequest(text) : null;
+      const route = music ? await runtime.decideMusic(musicState(text, music), signal) : null;
       const passed = fixture.wakeName ? isWakePhrase(text, fixture.wakeName) === (fixture.shouldWake ?? true)
+        : fixture.musicQuery ? music?.query === fixture.musicQuery && route?.next_tool === (music?.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search') && validConfidence(route.confidence)
         : intent?.action === fixture.action && (fixture.level === undefined || (intent?.action === 'volume_set' && intent.level === fixture.level));
       if (passed) passedCount++;
-      console.log(`Audio fixture ${i + 1}: ${passed ? 'PASS' : 'FAIL'} [action=${intent?.action ?? 'wake'}] (${Math.round(performance.now() - start)} ms)`);
+      console.log(`Audio fixture ${i + 1}: ${passed ? 'PASS' : 'FAIL'} [action=${intent?.action ?? (fixture.musicQuery ? 'play' : 'wake')}] (${Math.round(performance.now() - start)} ms)`);
     }
     asrTimings.sort((a, b) => a - b);
     console.log(`Audio: ${passedCount}/${fixtures.length} correct; median ASR ${Math.round(asrTimings[Math.floor(asrTimings.length / 2)] ?? 0)} ms`);

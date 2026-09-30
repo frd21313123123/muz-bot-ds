@@ -18,6 +18,9 @@ export interface VideoInfo {
   duration_string?: string;
   thumbnail?: string;
   webpage_url?: string;
+  artist?: string;
+  channel?: string;
+  uploader?: string;
   entries?: VideoInfo[];
 }
 
@@ -96,16 +99,16 @@ export class YtdlpClient {
     });
   }
 
-  async json(args: string[], timeout = 20_000): Promise<VideoInfo> {
+  async json(args: string[], timeout = 20_000, signal?: AbortSignal): Promise<VideoInfo> {
     const { stdout } = await execFileAsync(this.runtime.command,
       [...this.runtime.prefix, ...COMMON_ARGS, '-J', ...args],
-      { timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      { timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true, signal },
     );
     return JSON.parse(stdout) as VideoInfo;
   }
 
-  async video(url: string): Promise<VideoInfo> {
-    return this.json(['--no-playlist', url]);
+  async video(url: string, signal?: AbortSignal): Promise<VideoInfo> {
+    return this.json(['--no-playlist', url], 20_000, signal);
   }
 
   async playlist(url: string, limit: number): Promise<VideoInfo> {
@@ -115,6 +118,20 @@ export class YtdlpClient {
   async search(query: string): Promise<VideoInfo | null> {
     const result = await this.json(['--flat-playlist', `ytsearch1:${query}`]);
     return result.entries?.[0] ?? (result.id ? result : null);
+  }
+
+  async searchCandidates(query: string, limit = 5, signal?: AbortSignal): Promise<VideoInfo[]> {
+    signal?.throwIfAborted();
+    if (!query.trim()) return [];
+    if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('Invalid search limit');
+    const result = await this.json(['--flat-playlist', `ytsearch${limit}:${query}`], 20_000, signal);
+    signal?.throwIfAborted();
+    const seen = new Set<string>();
+    return (result.entries ?? (result.id ? [result] : [])).filter((entry) => {
+      if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    }).slice(0, limit);
   }
 
   async related(videoId: string, limit = 25): Promise<Track[]> {

@@ -59,6 +59,57 @@ async function requireController(interaction: ChatInputCommandInteraction, queue
   return true;
 }
 
+const join: Command = {
+  data: new SlashCommandBuilder().setName('join').setDescription('🎙 Войти в ваш голосовой канал и слушать команды'),
+  async execute(interaction, client) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
+    const channel = memberVoiceChannel(interaction);
+    if (!channel) return interaction.editReply('❌ Войдите в голосовой канал.');
+    const me = interaction.guild?.members.me ?? await interaction.guild?.members.fetchMe().catch(() => null);
+    const permissions = me && channel.permissionsFor(me);
+    if (!permissions?.has(PermissionsBitField.Flags.Connect) || !permissions.has(PermissionsBitField.Flags.Speak)) {
+      return interaction.editReply('❌ Нет прав на подключение и речь в этом канале.');
+    }
+    if (!client.voiceRuntime || !await client.voiceRuntime.start()) {
+      return interaction.editReply('❌ Локальные модели недоступны. Выполните npm run setup:voice и повторите /join.');
+    }
+    // Startup and member fetching may take time; use the latest channel state.
+    if (memberVoiceChannel(interaction)?.id !== channel.id) {
+      return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /join.');
+    }
+    let queue = client.queues.get(interaction.guildId);
+    if (queue?.voiceChannel && queue.voiceChannel.id !== channel.id) {
+      return interaction.editReply('❌ Бот уже работает в другом голосовом канале.');
+    }
+    const created = !queue;
+    if (!queue) {
+      queue = new GuildQueue(interaction.guildId, client);
+      client.queues.set(interaction.guildId, queue);
+    }
+    try {
+      await queue.join(channel);
+      if (memberVoiceChannel(interaction)?.id !== channel.id) {
+        if (created) await queue.stop();
+        return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /join.');
+      }
+      if (!await queue.setVoiceEnabled(true)) {
+        if (created) await queue.stop();
+        return interaction.editReply('❌ Не удалось включить прослушивание. Проверьте /voice status и повторите /join.');
+      }
+      queue.setPlayerChannel(interaction.channelId);
+      return interaction.editReply({
+        content: `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue.wakeName)}**, дождитесь сигнала и произнесите команду, например «включи Numb».`,
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      if (created) await queue.stop().catch(() => {});
+      console.error('[join]', error);
+      return interaction.editReply('❌ Не удалось подключиться или включить прослушивание. Повторите /join.');
+    }
+  },
+};
+
 const play: Command = {
   data: new SlashCommandBuilder().setName('play').setDescription('▶ Воспроизвести трек')
     .addStringOption((option) => option.setName('query').setDescription('Ссылка YouTube или название')
@@ -247,5 +298,5 @@ const watch: Command = {
 };
 
 export const commands: Command[] = [
-  play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch, voice,
+  join, play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch, voice,
 ];

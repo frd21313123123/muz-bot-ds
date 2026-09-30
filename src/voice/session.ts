@@ -1,24 +1,38 @@
-import { contextualCommand, isWakePhrase, normalizeSpeech, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { contextualCommand, isWakePhrase, normalizeSpeech, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { extractMusicRequest, type MusicBackend, type MusicDiagnostic } from './music.js';
 
 export interface VoiceDiagnostic {
-  stage: 'recognition' | 'rejected' | 'decision' | 'execution' | 'error' | 'timeout';
+  stage: 'recognition' | 'rejected' | 'decision' | 'execution' | 'error' | 'timeout' | MusicDiagnostic['stage'];
   kind?: 'wake' | 'command';
   ms?: number;
   words?: number;
+  audioMs?: number;
+  rms?: number;
+  peak?: number;
+  vadMs?: number;
+  segments?: number;
+  rejectedSegments?: number;
+  wakeDistance?: number;
   matched?: boolean;
   paused?: boolean;
   canonicalized?: boolean;
   modelAction?: VoiceAction;
   confidence?: number;
-  action?: VoiceAction;
+  action?: VoiceAction | 'play';
+  candidates?: number;
+  bestTrack?: number;
+  nextTool?: MusicDiagnostic['nextTool'];
+  policy?: MusicDiagnostic['policy'];
   changed?: boolean;
-  reason?: 'empty' | 'unsupported' | 'stale' | 'command' | 'wait' | 'pipeline';
+  reason?: 'empty' | 'unsupported' | 'stale' | 'command' | 'wait' | 'pipeline' | MusicDiagnostic['reason'];
 }
 
-export interface VoiceBackend {
-  transcribe(pcm: Buffer, signal: AbortSignal, command: boolean, wakeName?: string): Promise<string>;
+export interface VoiceBackend extends MusicBackend {
+  transcribe(pcm: Buffer, signal: AbortSignal, command: boolean, wakeName?: string,
+    diagnostic?: (metrics: SpeechMetrics) => void): Promise<string>;
   classify(text: string, signal: AbortSignal): Promise<VoiceDecision>;
 }
+export interface SpeechMetrics { vadMs: number; segments: number; rejectedSegments: number }
 export interface VoiceHost {
   wakeName(): string;
   present(userId: string): boolean;
@@ -26,6 +40,7 @@ export interface VoiceHost {
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
   execute(intent: VoiceIntent): Promise<void | boolean>;
+  playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean): Promise<boolean>;
   diagnostic?(event: VoiceDiagnostic): void;
 }
 export interface SpeechCapture {
@@ -42,8 +57,10 @@ export class VoiceSession {
   private epoch = 0;
   private owner: string | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private tasks = new Map<string, AbortController>();
+  private tasks = new Map<string, Set<AbortController>>();
+  private capturing = new Set<string>();
   private activation: AbortController | null = null;
+  private recognizedMusic = false;
 
   constructor(private readonly backend: VoiceBackend, private readonly host: VoiceHost,
     private readonly timings = { waitMs: 10_000, commandMs: 15_000, wakeMs: 4_000 }) {}
@@ -58,31 +75,45 @@ export class VoiceSession {
     this.clearTimer();
     this.activation?.abort();
     this.activation = null;
-    for (const task of this.tasks.values()) task.abort();
+    for (const tasks of this.tasks.values()) for (const task of tasks) task.abort();
     this.tasks.clear();
+    this.capturing.clear();
     this.owner = null;
+    this.recognizedMusic = false;
     this.host.duck(false);
     if (this.phase !== 'disabled') this.phase = 'idle';
   }
 
   disable(): void { this.cancel(); this.phase = 'disabled'; }
+  // A worker failure cannot recognize new audio, but a decoded music request
+  // may still search with its fallback. Explicit cancellation always aborts it.
+  backendUnavailable(): void { if (!this.recognizedMusic) this.cancel(); }
   cancelUser(userId: string): void {
     if (this.owner === userId) this.cancel();
-    else { this.tasks.get(userId)?.abort(); this.tasks.delete(userId); }
+    else {
+      for (const task of this.tasks.get(userId) ?? []) task.abort();
+      this.tasks.delete(userId); this.capturing.delete(userId);
+    }
   }
 
   begin(userId: string): SpeechCapture | null {
-    if (!this.host.present(userId) || this.tasks.has(userId)) return null;
+    if (!this.host.present(userId) || this.capturing.has(userId)) return null;
     const command = this.phase === 'awaiting' && this.owner === userId;
     if (!command && this.phase !== 'idle') return null;
-    if (this.tasks.size >= 4) return null;
+    if ([...this.tasks.values()].reduce((sum, tasks) => sum + tasks.size, 0) >= 4) return null;
     const controller = new AbortController();
-    this.tasks.set(userId, controller);
+    const tasks = this.tasks.get(userId) ?? new Set<AbortController>();
+    tasks.add(controller); this.tasks.set(userId, tasks); this.capturing.add(userId);
     const epoch = this.epoch;
     let finished = false;
+    const forget = (): void => {
+      tasks.delete(controller);
+      if (!tasks.size && this.tasks.get(userId) === tasks) this.tasks.delete(userId);
+    };
     const cancel = (): void => {
       controller.abort();
-      if (this.tasks.get(userId) === controller) this.tasks.delete(userId);
+      if (!finished) this.capturing.delete(userId);
+      forget();
       if (command && epoch === this.epoch) this.cancel();
     };
     if (command) {
@@ -98,19 +129,34 @@ export class VoiceSession {
       complete: async (pcm) => {
         if (finished || controller.signal.aborted) return;
         finished = true;
+        this.capturing.delete(userId);
         const valid = (): boolean => !controller.signal.aborted && epoch === this.epoch && this.host.present(userId);
         try {
           if (command) { this.clearTimer(); this.phase = 'processing'; }
           if (!pcm.length || !valid()) return;
+          let energy = 0, peak = 0;
+          for (let i = 0; i + 1 < pcm.length; i += 2) {
+            const sample = pcm.readInt16LE(i); energy += sample * sample; peak = Math.max(peak, Math.abs(sample));
+          }
+          let metrics: SpeechMetrics | undefined;
           const asrStart = performance.now();
-          const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName());
+          const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName(),
+            (value) => { metrics = value; });
           const paused = this.host.paused?.() ?? false;
           const text = command ? contextualCommand(transcript, paused) : transcript;
           if (!valid()) return;
           this.host.diagnostic?.({ stage: 'recognition', kind: command ? 'command' : 'wake',
+            audioMs: Math.round(pcm.length / 32), rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak, ...metrics,
+            wakeDistance: command ? undefined : wakeDistance(text, this.host.wakeName()),
             ms: Math.round(performance.now() - asrStart), words: normalizeSpeech(transcript).split(' ').filter(Boolean).length,
             paused, canonicalized: text !== transcript, matched: !command && isWakePhrase(text, this.host.wakeName()) });
           if (command) {
+            if (extractMusicRequest(text)) {
+              this.recognizedMusic = true;
+              const changed = await this.host.playMusic(text, userId, controller.signal, valid);
+              this.host.diagnostic?.({ stage: 'execution', action: 'play', changed });
+              return;
+            }
             if (unsupportedSpeech(text)) { this.host.diagnostic?.({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' }); return; }
             const decisionStart = performance.now();
             const decision = await this.backend.classify(text, controller.signal);
@@ -129,7 +175,10 @@ export class VoiceSession {
             const activation = new AbortController();
             this.activation = activation;
             // Cancel other wake recognitions, but keep this activation alive.
-            for (const [id, task] of this.tasks) if (id !== userId) { task.abort(); this.tasks.delete(id); }
+            for (const [id, pending] of this.tasks) {
+              for (const task of pending) if (task !== controller) { task.abort(); pending.delete(task); }
+              if (!pending.size) { this.tasks.delete(id); this.capturing.delete(id); }
+            }
             await this.host.cue(activation.signal);
             if (!valid() || activation.signal.aborted) { if (epoch === this.epoch) this.cancel(); return; }
             this.host.duck(true);
@@ -138,10 +187,12 @@ export class VoiceSession {
           }
         } catch {
           // Audio/text and model error payloads must never reach ordinary logs.
-          if (!controller.signal.aborted) this.host.diagnostic?.({ stage: 'error', reason: 'pipeline' });
-          if (epoch === this.epoch && (command || this.owner === userId)) this.cancel();
+          if (!controller.signal.aborted) {
+            this.host.diagnostic?.({ stage: 'error', reason: 'pipeline' });
+            if (epoch === this.epoch && (command || this.owner === userId)) this.cancel();
+          }
         } finally {
-          if (this.tasks.get(userId) === controller) this.tasks.delete(userId);
+          forget();
           if (command && epoch === this.epoch) this.cancel();
         }
       },

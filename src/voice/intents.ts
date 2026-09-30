@@ -17,8 +17,31 @@ export function validateWakeName(value: string): string {
 }
 
 export function isWakePhrase(text: string, name: string): boolean {
-  const key = normalizeSpeech(name);
-  return key.length >= 2 && normalizeSpeech(text) === key;
+  const key = wakeSpelling(name);
+  return key.length >= 2 && wakeSpelling(text) === key;
+}
+
+// Whisper can spell a Russian name in Latin letters. Accept equivalent
+// spelling without broadening the match to similar-sounding Russian words.
+const LATIN: Record<string, string> = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y',
+  к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u',
+  ф: 'f', х: 'kh', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'shch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+};
+function wakeSpelling(value: string): string {
+  return normalizeSpeech(value).replace(/[а-я]/g, (letter) => LATIN[letter]!);
+}
+
+export function wakeDistance(text: string, name: string): number {
+  const actual = wakeSpelling(text).slice(0, 128), expected = wakeSpelling(name);
+  let previous = Array.from({ length: expected.length + 1 }, (_, i) => i);
+  for (let i = 0; i < actual.length; i++) {
+    const next = [i + 1];
+    for (let j = 0; j < expected.length; j++) next.push(Math.min(next[j]! + 1, previous[j + 1]! + 1,
+      previous[j]! + (actual[i] === expected[j] ? 0 : 1)));
+    previous = next;
+  }
+  return previous[expected.length]!;
 }
 
 // Generic "turn it on" means resume only when an existing track is paused.

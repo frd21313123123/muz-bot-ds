@@ -221,7 +221,10 @@ export class GuildQueue {
       && this.connection.state.status === VoiceConnectionStatus.Ready) return;
     if (this.joining) return this.joining;
     this.joining = this.connect(channel);
-    try { await this.joining; } finally { this.joining = null; }
+    try {
+      await this.joining;
+      if (!this.closed && !this.currentTrack && !this.tracks.length) this.startIdleTimer();
+    } finally { this.joining = null; }
   }
 
   private async connect(channel: VoiceBasedChannel): Promise<void> {
