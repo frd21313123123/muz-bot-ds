@@ -61,9 +61,17 @@ export function musicState(message: string, request: MusicRequest, player?: Musi
 // and punctuation in song titles. Only command boundaries are interpreted here.
 export function extractMusicRequest(message: string): MusicRequest | null {
   if (message.length > 1000) return null;
-  const match = /^(?:включи|поставь|сыграй|воспроизведи)\s+(.+)$/iu.exec(message.trim());
+  // Conversational lead-ins and punctuation inserted by ASR are not part of
+  // the title. Stay anchored: never fish a command out of a longer sentence.
+  const match = /^(?:(?:вот|ну|пожалуйста)[\s,]+){0,3}(?:включи|включить|включай|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести)(?:\s*[,:\u2014-]\s*|\s+)(.+)$/iu.exec(message.trim());
   if (!match) return null;
-  const query = match[1]!.replace(/^(?:песню|трек)\s+/iu, '').trim();
+  const target = match[1]!.trim();
+  if (/^(?:песню|трек)\s+из[.!…]*$/iu.test(target)) return null;
+  // "Song from Luntik" needs its music noun: searching only "from Luntik"
+  // predominantly returns cartoon episodes, unlike an explicit song title.
+  const query = /^(?:песню|трек)\s+из\s+/iu.test(target)
+    ? target.replace(/^песню\s+/iu, 'песня ')
+    : target.replace(/^(?:песню|трек)\s+/iu, '').trim();
   const words = normalizeSpeech(query);
   if (!words || /^(?:на паузу|паузу|музыку(?: снова| обратно| дальше)?|снова|обратно|дальше|песню|трек|эту(?: песню)?|этот(?: трек)?|ее|его|это|ту|тот|первую|первый|следующую(?: песню| музыку)?|следующий(?: трек)?)$/u.test(words)) return null;
   // Conjunctions in names (e.g. "Numb и Encore") are valid. A second command

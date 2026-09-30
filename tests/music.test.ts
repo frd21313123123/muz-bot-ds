@@ -54,6 +54,21 @@ test('direct music links select one video even with an ordinary playlist', () =>
     'https://youtube.com/watch?v=bad', 'https://youtube.com.evil.test/watch?v=aaaaaaaaaaa']) assert.equal(extractMusicRequest(`включи ${url}`), null);
 });
 
+test('conversational and ASR command forms retain a song-from request without accepting negation or context', () => {
+  for (const text of ['включи песню из Лунтика', 'Вот включи песню из Лунтика',
+    'Ну, включи песню из Лунтика', 'Пожалуйста, включи песню из Лунтика',
+    'Включи, песню из Лунтика', 'Включить песню из Лунтика', 'Включай песню из Лунтика']) {
+    assert.deepEqual(extractMusicRequest(text), { kind: 'search', query: 'песня из Лунтика' }, text);
+  }
+  assert.equal(extractMusicRequest('сыграй трек из Шрека')?.query, 'трек из Шрека');
+  assert.equal(extractMusicRequest('Вот включи песню Linkin Park — Numb/Encore live')?.query, 'Linkin Park — Numb/Encore live');
+  assert.equal(extractMusicRequest('Включить Numb и Encore')?.query, 'Numb и Encore');
+  for (const text of ['Вот не включи Numb', 'Не надо, включи Numb', 'Я сказал включи Numb',
+    'Если можешь включи Numb', 'Ну включи эту', 'Включить песню', 'Включи песню из',
+    'Вот поставь на паузу', 'Вот включи музыку', 'Ну включи Numb и поставь на паузу',
+    'Включить Numb или сыграть Sonne']) assert.equal(extractMusicRequest(text), null, text);
+});
+
 test('plain requests take first result and version requests rerank', async () => {
   const plain = harness();
   assert.equal((await plain.resolve('включи Numb'))?.videoId, 'aaaaaaaaaaa');

@@ -98,6 +98,27 @@ test('a plain Moscow request starts or queues once despite a model that would re
   }
 });
 
+test('a song-from request reaches search from conversational and ASR forms and restores volume', async () => {
+  for (const message of ['включи песню из Лунтика', 'Вот включи песню из Лунтика',
+    'Включи, песню из Лунтика', 'Включить песню из Лунтика']) {
+    const h = musicHarness();
+    let searches = 0;
+    h.metadata.searchCandidates = async (query?: string) => {
+      searches++; assert.equal(query, 'песня из Лунтика');
+      return [{ id: 'aaaaaaaaaaa', title: 'Песня из Лунтика' }];
+    };
+    try {
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.from([0, 0]));
+      assert.equal(searches, 1, message);
+      assert.equal(h.queue.currentTrack?.title, 'Песня из Лунтика');
+      assert.equal(h.queue.currentTrack?.requestedBy, 'Alice');
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
 test('worker failure after recognition keeps music fallback alive and detaches listening', async () => {
   const h = musicHarness();
   h.runtime.decideMusic = async () => {

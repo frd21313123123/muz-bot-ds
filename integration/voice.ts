@@ -78,6 +78,10 @@ try {
     ['поставь песню Rammstein Sonne', 'youtube_music_search', 'play_first_result'],
     ['Включи Moscow never sleep', 'youtube_music_search', 'play_first_result'],
     ['Включи Moscow Never Sleeps', 'youtube_music_search', 'play_first_result'],
+    ['включи песню из Лунтика', 'youtube_music_search', 'play_first_result'],
+    ['Вот включи песню из Лунтика', 'youtube_music_search', 'play_first_result'],
+    ['Включи, песню из Лунтика', 'youtube_music_search', 'play_first_result'],
+    ['Включить песню из Лунтика', 'youtube_music_search', 'play_first_result'],
     ['включи Numb live', 'youtube_music_search', 'rerank_results'],
     ['сыграй Numb remix', 'youtube_music_search', 'rerank_results'],
     ['воспроизведи Numb cover', 'youtube_music_search', 'rerank_results'],
@@ -108,15 +112,20 @@ try {
       if (policy === 'rerank_results') assert.equal(resultPolicy.search_result_policy, policy, `Music result policy ${index + 1}`);
     } else if (!decision.defer_result_policy) assert.equal(decision.search_result_policy, policy, `Music policy ${index + 1}`);
   }
-  for (const message of ['Включи Moscow never sleep', 'Включи Moscow Never Sleeps']) {
+  for (const message of ['Включи Moscow never sleep', 'Включи Moscow Never Sleeps',
+    'Вот включи песню из Лунтика', 'Включи, песню из Лунтика', 'Включить песню из Лунтика']) {
+    const expectedQuery = message.includes('Лунтика') ? 'песня из Лунтика' : extractMusicRequest(message)!.query;
     const track = await resolveMusicRequest(message, 'Voice check', {
       decideMusic: (state, signal) => runtime.decideMusic(state, signal),
       decideMusicResults: async () => { assert.fail('Plain song requests must bypass result policy'); },
       rerankMusic: async () => { assert.fail('Plain song requests must bypass reranking'); },
-    }, { searchCandidates: async () => [{ id: 'aaaaaaaaaaa', title: 'DJ SMASH — MOSCOW NEVER SLEEPS' }],
+    }, { searchCandidates: async (query) => {
+      assert.equal(query, expectedQuery);
+      return [{ id: 'aaaaaaaaaaa', title: 'Music pipeline fixture' }];
+    },
       video: async () => { assert.fail('Song title must use search'); } }, signal);
     assert.equal(track?.videoId, 'aaaaaaaaaaa');
-    console.log('Moscow voice request pipeline: PASS');
+    console.log('Plain voice request pipeline: PASS');
   }
   for (const [index, version] of ['Live in Texas', 'Remix', 'Cover', 'Acoustic', 'Instrumental'].entries()) {
     const query = `Linkin Park Numb ${version}`;
