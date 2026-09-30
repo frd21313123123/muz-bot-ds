@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { StreamType } from '@discordjs/voice';
+import { AudioPlayerStatus, VoiceConnectionStatus, type AudioPlayer, type VoiceConnection } from '@discordjs/voice';
 import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { MusicClient, Track } from '../src/types.js';
 import type { ManagedAudioStream } from '../src/utils/stream.js';
@@ -122,5 +123,96 @@ test('a track setup failure skips to the next queued track', async () => {
     assert.equal(queue.tracks.length, 0);
   } finally {
     await queue.stop();
+  }
+});
+
+test('ducking preserves user volume and applies to subsequent tracks, without interrupting a skip fade', async () => {
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-duck', client, () => {
+    const stream = new PassThrough();
+    return { stream, type: StreamType.OggOpus, destroy: () => stream.destroy() };
+  });
+  const gain = () => queue.player.state.status === AudioPlayerStatus.Idle ? null : queue.player.state.resource.volume?.volume;
+  try {
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    queue.setVolume(100); queue.setVoiceDucking(true);
+    assert.equal(queue.volume, 1); assert.equal(gain(), 0.2);
+    queue.setVolume(150); assert.ok(Math.abs(gain()! - 0.3) < 0.00001);
+    queue.setVoiceDucking(false); assert.equal(gain(), 1.5);
+    queue.setVoiceDucking(true);
+    await queue.addTrack(track('bbbbbbbbbbb')); queue.skip();
+    await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
+    assert.ok(Math.abs(gain()! - 0.3) < 0.00001);
+    queue.setVoiceDucking(false); assert.equal(gain(), 1.5);
+  } finally { await queue.stop(); }
+});
+
+test('voice cue keeps the current resource and queue; cancellation restores subscription', async () => {
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  let destroyed = 0;
+  const queue = new GuildQueue('guild-cue', client, () => {
+    const stream = new PassThrough();
+    return { stream, type: StreamType.OggOpus, destroy: () => { destroyed++; stream.destroy(); } };
+  });
+  const outputs: AudioPlayer[] = [];
+  const connection = { state: { status: VoiceConnectionStatus.Ready },
+    subscribe: (player: AudioPlayer) => { outputs.push(player); },
+    destroy: () => { connection.state.status = VoiceConnectionStatus.Destroyed; },
+  } as unknown as VoiceConnection;
+  queue.connection = connection;
+  try {
+    await queue.addTracks([track('aaaaaaaaaaa'), track('bbbbbbbbbbb')]);
+    const original = queue.player.state;
+    const signal = new AbortController();
+    const cue = queue.playVoiceCue(signal.signal);
+    const rejected = assert.rejects(cue);
+    assert.notEqual(outputs[0], queue.player);
+    signal.abort(); await rejected;
+    assert.equal(outputs.at(-1), queue.player);
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.equal(queue.tracks.length, 1); assert.equal(destroyed, 0);
+    if (original.status !== AudioPlayerStatus.Idle && queue.player.state.status !== AudioPlayerStatus.Idle) {
+      assert.equal(original.resource, queue.player.state.resource);
+    }
+  } finally { await queue.stop(); }
+});
+
+test('audible cue resumes the original track and preserves a concurrent pause request', async () => {
+  for (const userPauses of [false, true]) {
+    const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+    const raw = new PassThrough();
+    const queue = new GuildQueue(`guild-cue-${userPauses}`, client, () => ({ stream: raw,
+      type: StreamType.Raw, destroy: () => raw.destroy() }));
+    // Simulate the network side, while using the real AudioPlayer and Opus encoder.
+    let subscription: { unsubscribe(): void } | undefined;
+    let packets = 0;
+    const connection = {
+      state: { status: VoiceConnectionStatus.Ready },
+      subscribe: (player: AudioPlayer) => {
+        subscription?.unsubscribe();
+        subscription = Reflect.apply(Reflect.get(player, 'subscribe'), player, [connection]) as { unsubscribe(): void };
+        return subscription;
+      },
+      onSubscriptionRemoved: () => {}, setSpeaking: () => {},
+      prepareAudioPacket: () => { packets++; }, dispatchAudio: () => true,
+      destroy: () => { subscription?.unsubscribe(); connection.state.status = VoiceConnectionStatus.Destroyed; },
+    } as unknown as VoiceConnection;
+    queue.connection = connection; connection.subscribe(queue.player);
+    try {
+      await queue.addTrack(track('aaaaaaaaaaa'));
+      raw.write(Buffer.alloc(48_000 * 4 * 3));
+      await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing);
+      const before = queue.player.state;
+      const startPackets = packets;
+      const cue = queue.playVoiceCue(new AbortController().signal);
+      if (userPauses) assert.equal(queue.pause(), true);
+      await cue;
+      assert.ok(packets > startPackets, 'cue produced actual Opus packets');
+      assert.equal(queue.player.state.status, userPauses ? AudioPlayerStatus.Paused : AudioPlayerStatus.Playing);
+      if (before.status !== AudioPlayerStatus.Idle) {
+        assert.equal(queue.player.state.resource, before.resource);
+      }
+      assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    } finally { await queue.stop(); }
   }
 });

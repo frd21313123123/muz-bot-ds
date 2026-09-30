@@ -5,3 +5,5 @@ debug-*.js
 dist/
 .runtime/
 *.log
+__pycache__/
+*.py[cod]

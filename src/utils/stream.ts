@@ -25,7 +25,7 @@ export function requireFfmpeg(): string {
 
 export interface ManagedAudioStream {
   stream: Readable;
-  type: StreamType.OggOpus;
+  type: StreamType;
   destroy(): void;
 }
 

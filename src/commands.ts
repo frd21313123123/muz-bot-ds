@@ -11,6 +11,42 @@ import { canControl, memberVoiceChannel } from './utils/voiceAccess.js';
 const privateReply = (interaction: ChatInputCommandInteraction, content: string): Promise<unknown> =>
   interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 
+const voice: Command = {
+  data: new SlashCommandBuilder().setName('voice').setDescription('🎙 Голосовое управление')
+    .addSubcommand((command) => command.setName('on').setDescription('Включить прослушивание имени'))
+    .addSubcommand((command) => command.setName('off').setDescription('Отключить прослушивание'))
+    .addSubcommand((command) => command.setName('status').setDescription('Состояние голосового управления'))
+    .addSubcommand((command) => command.setName('name').setDescription('Изменить обращение; без имени — вернуть имя Discord')
+      .addStringOption((option) => option.setName('value').setDescription('Новое обращение к боту').setMinLength(2).setMaxLength(64))),
+  async execute(interaction, client) {
+    if (!interaction.guildId) return privateReply(interaction, '❌ Команда работает только на сервере.');
+    const queue = client.queues.get(interaction.guildId);
+    const action = interaction.options.getSubcommand();
+    if (action === 'status') {
+      const name = queue?.wakeName ?? client.voiceSettings?.get(interaction.guildId)
+        ?? interaction.guild?.members.me?.displayName ?? client.user?.username ?? '';
+      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nМодели ${client.voiceRuntime?.ready ? 'готовы' : 'недоступны — выполните npm run setup:voice'}.`);
+    }
+    if (!await requireController(interaction, queue)) return;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (action === 'name') {
+      const value = interaction.options.getString('value');
+      if (!client.voiceSettings) return interaction.editReply('❌ Хранилище настроек недоступно.');
+      try {
+        queue!.voice?.reset();
+        await client.voiceSettings.set(interaction.guildId, value);
+        queue!.voice?.reset();
+        return interaction.editReply({ content: `🎙 Новое обращение: **${escapeMarkdown(queue!.wakeName)}**.`, allowedMentions: { parse: [] } });
+      } catch { return interaction.editReply('❌ Не удалось сохранить имя. Используйте 2–64 символа с буквами или цифрами.'); }
+    }
+    const enabled = action === 'on';
+    if (!await queue!.setVoiceEnabled(enabled)) return interaction.editReply('❌ Локальные модели недоступны. Выполните npm run setup:voice и повторите /voice on.');
+    return interaction.editReply({ content: enabled
+      ? `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue!.wakeName)}**, дождитесь сигнала и произнесите команду.`
+      : '🎙 Прослушивание выключено.', allowedMentions: { parse: [] } });
+  },
+};
+
 async function requireController(interaction: ChatInputCommandInteraction, queue: GuildQueue | undefined): Promise<boolean> {
   if (!queue?.voiceChannel) {
     await privateReply(interaction, 'ℹ️ Бот сейчас не в голосовом канале.');
@@ -211,5 +247,5 @@ const watch: Command = {
 };
 
 export const commands: Command[] = [
-  play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch,
+  play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch, voice,
 ];
