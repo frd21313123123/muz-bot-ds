@@ -11,7 +11,10 @@
     "deploy": "npm run build && node dist/src/deploy-commands.js",
     "test": "npm run build && node dist/tests/run.js",
     "test:integration": "npm run build && node dist/integration/smoke.js",
-    "update:ytdlp": "npm run build && node dist/src/update-ytdlp.js"
+    "normalize:audio": "npm run build && node dist/src/normalize-audio.js",
+    "update:ytdlp": "npm run build && node dist/src/update-ytdlp.js",
+    "setup:voice": "npm run build && node dist/src/setup-voice.js",
+    "test:voice": "npm run build && node dist/integration/voice.js"
   },
   "engines": {
     "node": ">=24.17.0"

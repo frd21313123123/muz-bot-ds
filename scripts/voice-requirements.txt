@@ -1,0 +1,9 @@
+# CPU inference; model weights and transitive dependency lock live in .runtime/voice.
+faster-whisper==1.2.1
+laya==0.3.22
+ctranslate2==4.8.2
+huggingface-hub==1.33.0
+transformers==5.17.0
+onnxruntime==1.30.0
+numpy==2.2.6; python_version < '3.12'
+numpy==2.5.3; python_version >= '3.12'

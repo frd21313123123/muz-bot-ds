@@ -11,6 +11,42 @@ import { canControl, memberVoiceChannel } from './utils/voiceAccess.js';
 const privateReply = (interaction: ChatInputCommandInteraction, content: string): Promise<unknown> =>
   interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 
+const voice: Command = {
+  data: new SlashCommandBuilder().setName('voice').setDescription('🎙 Голосовое управление')
+    .addSubcommand((command) => command.setName('on').setDescription('Включить прослушивание имени'))
+    .addSubcommand((command) => command.setName('off').setDescription('Отключить прослушивание'))
+    .addSubcommand((command) => command.setName('status').setDescription('Состояние голосового управления'))
+    .addSubcommand((command) => command.setName('name').setDescription('Изменить обращение; без имени — вернуть имя Discord')
+      .addStringOption((option) => option.setName('value').setDescription('Новое обращение к боту').setMinLength(2).setMaxLength(64))),
+  async execute(interaction, client) {
+    if (!interaction.guildId) return privateReply(interaction, '❌ Команда работает только на сервере.');
+    const queue = client.queues.get(interaction.guildId);
+    const action = interaction.options.getSubcommand();
+    if (action === 'status') {
+      const name = queue?.wakeName ?? client.voiceSettings?.get(interaction.guildId)
+        ?? interaction.guild?.members.me?.displayName ?? client.user?.username ?? '';
+      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nМодели ${client.voiceRuntime?.ready ? 'готовы' : 'недоступны — выполните npm run setup:voice'}.`);
+    }
+    if (!await requireController(interaction, queue)) return;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (action === 'name') {
+      const value = interaction.options.getString('value');
+      if (!client.voiceSettings) return interaction.editReply('❌ Хранилище настроек недоступно.');
+      try {
+        queue!.voice?.reset();
+        await client.voiceSettings.set(interaction.guildId, value);
+        queue!.voice?.reset();
+        return interaction.editReply({ content: `🎙 Новое обращение: **${escapeMarkdown(queue!.wakeName)}**.`, allowedMentions: { parse: [] } });
+      } catch { return interaction.editReply('❌ Не удалось сохранить имя. Используйте 2–64 символа с буквами или цифрами.'); }
+    }
+    const enabled = action === 'on';
+    if (!await queue!.setVoiceEnabled(enabled)) return interaction.editReply('❌ Локальные модели недоступны. Выполните npm run setup:voice и повторите /voice on.');
+    return interaction.editReply({ content: enabled
+      ? `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue!.wakeName)}**, дождитесь сигнала и произнесите команду.`
+      : '🎙 Прослушивание выключено.', allowedMentions: { parse: [] } });
+  },
+};
+
 async function requireController(interaction: ChatInputCommandInteraction, queue: GuildQueue | undefined): Promise<boolean> {
   if (!queue?.voiceChannel) {
     await privateReply(interaction, 'ℹ️ Бот сейчас не в голосовом канале.');
@@ -22,6 +58,57 @@ async function requireController(interaction: ChatInputCommandInteraction, queue
   }
   return true;
 }
+
+const join: Command = {
+  data: new SlashCommandBuilder().setName('join').setDescription('🎙 Войти в ваш голосовой канал и слушать команды'),
+  async execute(interaction, client) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
+    const channel = memberVoiceChannel(interaction);
+    if (!channel) return interaction.editReply('❌ Войдите в голосовой канал.');
+    const me = interaction.guild?.members.me ?? await interaction.guild?.members.fetchMe().catch(() => null);
+    const permissions = me && channel.permissionsFor(me);
+    if (!permissions?.has(PermissionsBitField.Flags.Connect) || !permissions.has(PermissionsBitField.Flags.Speak)) {
+      return interaction.editReply('❌ Нет прав на подключение и речь в этом канале.');
+    }
+    if (!client.voiceRuntime || !await client.voiceRuntime.start()) {
+      return interaction.editReply('❌ Локальные модели недоступны. Выполните npm run setup:voice и повторите /join.');
+    }
+    // Startup and member fetching may take time; use the latest channel state.
+    if (memberVoiceChannel(interaction)?.id !== channel.id) {
+      return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /join.');
+    }
+    let queue = client.queues.get(interaction.guildId);
+    if (queue?.voiceChannel && queue.voiceChannel.id !== channel.id) {
+      return interaction.editReply('❌ Бот уже работает в другом голосовом канале.');
+    }
+    const created = !queue;
+    if (!queue) {
+      queue = new GuildQueue(interaction.guildId, client);
+      client.queues.set(interaction.guildId, queue);
+    }
+    try {
+      await queue.join(channel);
+      if (memberVoiceChannel(interaction)?.id !== channel.id) {
+        if (created) await queue.stop();
+        return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /join.');
+      }
+      if (!await queue.setVoiceEnabled(true)) {
+        if (created) await queue.stop();
+        return interaction.editReply('❌ Не удалось включить прослушивание. Проверьте /voice status и повторите /join.');
+      }
+      queue.setPlayerChannel(interaction.channelId);
+      return interaction.editReply({
+        content: `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue.wakeName)}**, дождитесь сигнала и произнесите команду, например «включи Numb».`,
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      if (created) await queue.stop().catch(() => {});
+      console.error('[join]', error);
+      return interaction.editReply('❌ Не удалось подключиться или включить прослушивание. Повторите /join.');
+    }
+  },
+};
 
 const play: Command = {
   data: new SlashCommandBuilder().setName('play').setDescription('▶ Воспроизвести трек')
@@ -211,5 +298,5 @@ const watch: Command = {
 };
 
 export const commands: Command[] = [
-  play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch,
+  join, play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch, voice,
 ];
