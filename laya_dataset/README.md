@@ -10,9 +10,51 @@
 - `autoplay_mode`: enable, disable, toggle, unchanged;
 - `is_music_control`: является ли текст командой музыкальному боту;
 - `best_track`: выбор лучшего кандидата из результатов YouTube-поиска, включая `none`;
-- `has_good_match`: есть ли среди кандидатов подходящий результат.
+- `has_good_match`: есть ли среди кандидатов подходящий результат;
+- `next_tool`: `youtube_music_search`, `direct_youtube_video`, `player_control` или `no_tool`;
+- `search_result_policy`: `play_first_result`, `rerank_results` или `no_result`.
 
 Проверка Discord permissions, нахождение пользователя в voice channel, диапазон громкости, управление соединением и очередью должны оставаться детерминированным TypeScript-кодом.
+
+## Поток с YouTube Music
+
+Датасет теперь отдельно обучает выбор инструмента и поведение после ответа инструмента.
+
+Обычный запрос:
+
+```text
+"включи Numb"
+    ↓
+next_tool = youtube_music_search
+    ↓
+youtube_music_search("Numb")
+    ↓
+[0] Linkin Park - Numb
+[1] Linkin Park - Numb (Lyrics)
+[2] Numb Encore
+    ↓
+search_result_policy = play_first_result
+    ↓
+воспроизвести results[0]
+```
+
+Запрос со специальной версией:
+
+```text
+"включи Numb live"
+    ↓
+next_tool = youtube_music_search
+    ↓
+результаты поиска
+    ↓
+search_result_policy = rerank_results
+    ↓
+best_track = подходящая live-версия
+```
+
+Если результатов нет, модель выбирает `no_result`.
+
+Laya не генерирует произвольный текст аргумента инструмента. Поэтому окружающий код передаёт ей подготовленный `search_query` в `state.parsed_request`. Модель решает, нужно ли вызывать `youtube_music_search`, а затем как обработать полученные результаты.
 
 ## Формат
 
