@@ -11,7 +11,10 @@ const python = candidates.find(([command, ...prefix]) => spawnSync(command!, [..
   'import sys; assert sys.version_info >= (3, 11)'], { windowsHide: true, timeout: 10_000 }).status === 0);
 if (!python) throw new Error('Нужен Python 3.11+ для setup:tts.');
 const [command, ...prefix] = python;
-const child = spawn(command!, [...prefix, path.resolve('scripts/setup_tts.py'), requireFfmpeg()], {
+const engine = process.env.VOICE_TTS_ENGINE ?? 'silero';
+if (engine !== 'silero' && engine !== 'piper') throw new Error('VOICE_TTS_ENGINE: silero или piper.');
+const script = engine === 'silero' ? 'setup_silero_tts.py' : 'setup_tts.py';
+const child = spawn(command!, [...prefix, path.resolve('scripts', script), requireFfmpeg()], {
   windowsHide: true, stdio: 'inherit',
 });
 child.once('error', () => { console.error('Не удалось запустить setup:tts.'); process.exitCode = 1; });

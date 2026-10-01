@@ -5,6 +5,7 @@ import { VoiceSession, type SpeechCapture, type VoiceDiagnostic } from './sessio
 import type { VoiceRuntime } from './runtime.js';
 import { resolveMusicRequest } from './music.js';
 import type { Confirmation } from './tts.js';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 
 export class GuildVoice {
   readonly session: VoiceSession;
@@ -45,7 +46,7 @@ export class GuildVoice {
     };
     return new VoiceSession(this.runtime, {
       wakeName: () => this.queue.wakeName,
-      paused: () => this.queue.player.state.status === AudioPlayerStatus.Paused,
+      paused: () => this.queue.isPaused,
       present: (userId) => Boolean(!this.queue.closed && this.queue.voiceChannel
         && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(this.queue.client.user?.id ?? '')?.channelId === this.queue.voiceChannel.id
         && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(userId)?.channelId === this.queue.voiceChannel.id
@@ -55,7 +56,7 @@ export class GuildVoice {
       diagnostic,
       playerState: () => ({ connected: Boolean(this.queue.connection),
         playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
-        paused: this.queue.player.state.status === AudioPlayerStatus.Paused,
+        paused: this.queue.isPaused,
         autoplay: this.queue.autoplay, queue_length: this.queue.tracks.length }),
       training: this.queue.client.voiceTrainingLog?.enabled ? (example) => this.queue.client.voiceTrainingLog?.append(example,
         { stt: this.runtime.sttModelName ?? null, nli: this.runtime.modelName ?? null }) : undefined,
@@ -65,7 +66,7 @@ export class GuildVoice {
         const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
         const track = await resolveMusicRequest(message, requestedBy, this.runtime, this.queue.client.ytdlp, signal, report, {
           connected: Boolean(this.queue.connection), playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
-          paused: this.queue.player.state.status === AudioPlayerStatus.Paused, autoplay: this.queue.autoplay,
+          paused: this.queue.isPaused, autoplay: this.queue.autoplay,
           queue_length: this.queue.tracks.length,
         });
         if (!valid() || this.queue.closed) return false;
@@ -137,12 +138,22 @@ export class GuildVoice {
     signal.throwIfAborted();
     const pcm = this.queue.client.voiceTts?.audio(key);
     if (!pcm || this.queue.closed) return;
+    const started = performance.now();
+    const delay = process.env.VOICE_DEBUG === '1' ? monitorEventLoopDelay({ resolution: 10 }) : null;
+    delay?.enable();
+    let status = 'played';
     try { await this.queue.playVoiceAudio(pcm, signal); }
     catch {
+      status = signal.aborted ? 'cancelled' : 'failed';
       // Playback/model failures must not undo a successful player action.
       // Explicit session cancellation must still prevent delayed skip/stop.
       signal.throwIfAborted();
       if (process.env.VOICE_DEBUG === '1') console.log(`[TTS:${this.queue.guildId}] playback failed`);
+    } finally {
+      delay?.disable();
+      if (delay) console.log(`[TTS:${this.queue.guildId}] ${JSON.stringify({ phrase: key, status,
+        audioMs: Math.round(pcm.length / 192), elapsedMs: Math.round(performance.now() - started),
+        eventLoopMaxMs: Math.round(delay.max / 1e6) })}`);
     }
   }
 

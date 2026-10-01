@@ -1,11 +1,10 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from 'discord.js';
-import { AudioPlayerStatus } from '@discordjs/voice';
 import type { Track } from '../types.js';
 import type { GuildQueue } from './GuildQueue.js';
 
 const cut = (value: string, max: number): string => value.length > max ? `${value.slice(0, max - 1)}…` : value;
 
-export function nowPlayingEmbed(track: Track, autoplay = false): EmbedBuilder {
+export function nowPlayingEmbed(track: Track, autoplay = false, speed = 1): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setColor(track.isAutoplay ? 0x57f287 : 0x1db954)
     .setTitle(track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
@@ -13,6 +12,7 @@ export function nowPlayingEmbed(track: Track, autoplay = false): EmbedBuilder {
     .addFields(
       { name: '⏱ Длительность', value: track.duration, inline: true },
       { name: '👤 Запросил', value: escapeMarkdown(cut(track.requestedBy, 100)), inline: true },
+      { name: '⏩ Скорость', value: `${speed}×`, inline: true },
     );
   if (autoplay) embed.addFields({ name: '♾', value: 'Бесконечное воспроизведение включено' });
   if (track.thumbnail) embed.setThumbnail(track.thumbnail);
@@ -42,7 +42,7 @@ function durationSeconds(value: string): number | null {
 export function playerEmbed(queue: GuildQueue): EmbedBuilder {
   const track = queue.currentTrack;
   if (!track) return new EmbedBuilder().setColor(0x99aab5).setTitle('⏹ Ничего не играет');
-  const paused = queue.player.state.status === AudioPlayerStatus.Paused;
+  const paused = queue.isPaused;
   const duration = durationSeconds(track.duration);
   const progress = duration
     ? '▰'.repeat(Math.min(12, Math.round(queue.getElapsedSeconds() / duration * 12)))
@@ -54,6 +54,7 @@ export function playerEmbed(queue: GuildQueue): EmbedBuilder {
     .setDescription(`**[${escapeMarkdown(cut(track.title, 200))}](${track.url})**\n\n${progress}`)
     .addFields(
       { name: '🔊 Громкость', value: `${Math.round(queue.volume * 100)}%`, inline: true },
+      { name: '⏩ Скорость', value: `${queue.speed}×`, inline: true },
       { name: '♾ Бесконечное', value: queue.autoplay ? 'Вкл' : 'Выкл', inline: true },
       { name: '📋 В очереди', value: `${queue.tracks.length}`, inline: true },
     );
@@ -63,7 +64,7 @@ export function playerEmbed(queue: GuildQueue): EmbedBuilder {
 }
 
 export function playerActionRow(queue: GuildQueue): ActionRowBuilder<ButtonBuilder> {
-  const paused = queue.player.state.status === AudioPlayerStatus.Paused;
+  const paused = queue.isPaused;
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('player_playpause').setEmoji(paused ? '▶' : '⏸').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('player_skip').setEmoji('⏭').setStyle(ButtonStyle.Primary),

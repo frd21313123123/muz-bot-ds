@@ -1,4 +1,3 @@
-import { AudioPlayerStatus } from '@discordjs/voice';
 import { MessageFlags, type Interaction } from 'discord.js';
 import type { MusicClient } from '../types.js';
 import { commands } from '../commands.js';
@@ -35,8 +34,8 @@ export async function onInteraction(interaction: Interaction, client: MusicClien
     switch (interaction.customId) {
       case 'player_playpause':
         await interaction.deferUpdate();
-        if (queue.player.state.status === AudioPlayerStatus.Playing) queue.pause();
-        else queue.resume();
+        if (queue.isPaused) queue.resume();
+        else queue.pause();
         break;
       case 'player_skip':
         await interaction.deferUpdate();

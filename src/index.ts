@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   if (client.voiceTrainingLog.enabled) console.log('[NLI] Учебный журнал команд включён: .runtime/nli (текст, без аудио).');
   const tts = new LocalTts();
   client.voiceTts = tts;
-  console.log(await tts.load() ? '[TTS] Piper готов.' : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
+  console.log(await tts.load() ? `[TTS] ${tts.voice} готов.` : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
   const voiceReady = await client.voiceRuntime.start().catch(() => false);
   console.log(voiceReady ? `[Voice] Whisper ${client.voiceRuntime.sttModelName ?? '?'} (wake: ${client.voiceRuntime.wakeModelName ?? '?'}, device: ${client.voiceRuntime.inferenceDevice ?? '?'}) + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; прослушивание временно выключено. Музыка продолжает работать.'));

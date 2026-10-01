@@ -37,8 +37,26 @@ export function loudnessFilter(measured?: LoudnessMeasurement | null, report = f
   return `${stereo},loudnorm=${target}:${mode}${report ? ':print_format=json' : ''},${finite},${resample}`;
 }
 
-export function musicPcmArguments(): string[] {
-  return ['-map', '0:a:0', '-vn', '-sn', '-dn', '-af', loudnessFilter(),
+export const MIN_SPEED = 0.5;
+export const MAX_SPEED = 2;
+
+export interface MusicPlaybackOptions { speed?: number; startSeconds?: number }
+
+export function validateSpeed(speed: number): void {
+  if (!Number.isFinite(speed) || speed < MIN_SPEED || speed > MAX_SPEED) {
+    throw new Error(`Скорость должна быть от ${MIN_SPEED} до ${MAX_SPEED}.`);
+  }
+}
+
+export function musicPcmArguments({ speed = 1, startSeconds = 0 }: MusicPlaybackOptions = {}): string[] {
+  validateSpeed(speed);
+  if (!Number.isFinite(startSeconds) || startSeconds < 0) throw new Error('Некорректная позиция трека.');
+  // Normalize the input rate before reinterpreting samples: asetrate changes
+  // both tempo and pitch. Trim in source samples, before changing the speed.
+  const playback = speed !== 1 || startSeconds > 0
+    ? `aresample=48000,atrim=start_sample=${Math.round(startSeconds * 48000)},asetpts=PTS-STARTPTS,asetrate=${Math.round(48000 * speed)},`
+    : '';
+  return ['-map', '0:a:0', '-vn', '-sn', '-dn', '-af', playback + loudnessFilter(),
     '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'];
 }
 

@@ -19,6 +19,11 @@ export interface VideoInfo {
   thumbnail?: string;
   webpage_url?: string;
   artist?: string;
+  artists?: string[];
+  track?: string;
+  categories?: string[];
+  is_live?: boolean;
+  live_status?: string;
   channel?: string;
   uploader?: string;
   entries?: VideoInfo[];
@@ -116,15 +121,17 @@ export class YtdlpClient {
   }
 
   async search(query: string): Promise<VideoInfo | null> {
-    const result = await this.json(['--flat-playlist', `ytsearch1:${query}`]);
-    return result.entries?.[0] ?? (result.id ? result : null);
+    return (await this.searchCandidates(query, 1))[0] ?? null;
   }
 
   async searchCandidates(query: string, limit = 5, signal?: AbortSignal): Promise<VideoInfo[]> {
     signal?.throwIfAborted();
     if (!query.trim()) return [];
     if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('Invalid search limit');
-    const result = await this.json(['--flat-playlist', `ytsearch${limit}:${query}`], 20_000, signal);
+    // The songs section excludes podcasts and other ordinary YouTube videos.
+    // Do not fall back to unrestricted video search when no song is found.
+    const url = `https://music.youtube.com/search?q=${encodeURIComponent(query.trim())}#songs`;
+    const result = await this.json(['--flat-playlist', '--playlist-end', String(limit), url], 20_000, signal);
     signal?.throwIfAborted();
     const seen = new Set<string>();
     return (result.entries ?? (result.id ? [result] : [])).filter((entry) => {
@@ -136,17 +143,46 @@ export class YtdlpClient {
 
   async related(videoId: string, limit = 25): Promise<Track[]> {
     if (!/^[\w-]{11}$/.test(videoId)) return [];
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid recommendation limit');
     const result = await this.json([
       '--flat-playlist', '--playlist-items', `2:${Math.min(50, limit) + 1}`,
       `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`,
     ], 25_000);
     const seen = new Set([videoId]);
-    return (result.entries ?? []).flatMap((entry) => {
-      if (!entry.id || !/^[\w-]{11}$/.test(entry.id) || seen.has(entry.id)) return [];
+    const candidates = (result.entries ?? []).filter((entry) => {
+      if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id)) return false;
       seen.add(entry.id);
-      return [toTrack(entry, '🤖 Бесконечное', true)];
-    });
+      return !isNonSong(entry);
+    }).slice(0, 50);
+    // Flat radio entries lack categories. Verify them before queueing, with
+    // bounded concurrency and a shared deadline so a radio cannot stall playback.
+    const signal = AbortSignal.timeout(25_000);
+    const songs: VideoInfo[] = [];
+    for (let offset = 0; offset < candidates.length && songs.length < limit && !signal.aborted; offset += 4) {
+      const batch = await Promise.all(candidates.slice(offset, offset + 4).map(async (entry) => {
+        try {
+          const info = await this.video(`https://www.youtube.com/watch?v=${entry.id}`, signal);
+          return info.id === entry.id && isSong(info) ? info : null;
+        } catch { return null; }
+      }));
+      songs.push(...batch.filter((info): info is VideoInfo => info !== null));
+    }
+    return songs.slice(0, limit).map((info) => toTrack(info, '🤖 Бесконечное', true));
   }
+}
+
+function isNonSong(info: VideoInfo): boolean {
+  if (info.is_live || ['is_live', 'is_upcoming'].includes(info.live_status ?? '')) return true;
+  const title = (info.title ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
+  return /(?:^| )(?:podcasts?|подкаст\p{L}*|interviews?|интервью|аудиокниг\p{L}*|audiobooks?|лекци\p{L}*|lectures?)(?: |$)/u.test(title)
+    || /(?:^| )(?:full album|full concert|dj set|полный альбом|полный концерт|сборник)(?: |$)/u.test(title);
+}
+
+export function isSong(info: VideoInfo): boolean {
+  if (!info.id || !/^[\w-]{11}$/.test(info.id) || !info.title?.trim() || isNonSong(info)) return false;
+  // Artist channels also upload interviews: a channel name alone is not proof.
+  return info.categories?.some((category) => category.toLowerCase() === 'music') === true
+    || Boolean(info.track?.trim() && (info.artist?.trim() || info.artists?.some((artist) => artist.trim())));
 }
 
 export function toTrack(info: VideoInfo, requestedBy: string, isAutoplay = false): Track {

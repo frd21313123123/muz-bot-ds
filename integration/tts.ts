@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { AudioPlayerStatus, StreamType, VoiceConnectionStatus, type AudioPlayer, type VoiceConnection } from '@discordjs/voice';
 import OpusScript from 'opusscript';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { LocalTts, type Confirmation } from '../src/voice/tts.js';
 import phrases from '../src/voice/confirmations.json' with { type: 'json' };
 import { GuildQueue } from '../src/utils/GuildQueue.js';
@@ -50,11 +51,16 @@ try {
     const audio = tts.audio(key)!;
     const before = Buffer.from(audio);
     const packetsBefore = audiblePackets;
-    await queue.playVoiceAudio(audio, new AbortController().signal);
+    const started = performance.now();
+    const delay = monitorEventLoopDelay({ resolution: 10 });
+    delay.enable();
+    try { await queue.playVoiceAudio(audio, new AbortController().signal); }
+    finally { delay.disable(); }
     assert.ok(audiblePackets > packetsBefore + 10, 'confirmation must produce audible Opus');
     assert.deepEqual(audio, before, 'cached PCM must remain reusable');
     assert.equal(state().status, AudioPlayerStatus.Idle);
-    console.log(`Piper ${key}: PASS (${(audio.length / 192000).toFixed(2)}s)`);
+    console.log(`${tts.voice} ${key}: PASS (${(audio.length / 192000).toFixed(2)}s audio, `
+      + `${((performance.now() - started) / 1000).toFixed(2)}s playback, ${Math.round(delay.max / 1e6)}ms max event loop delay)`);
   }
   await queue.addTrack(toTrack({ id: 'aaaaaaaaaaa', title: 'Music resource' }, 'Tester'));
   // A new song is usually still buffering when its confirmation starts.

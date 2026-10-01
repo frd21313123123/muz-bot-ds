@@ -6,6 +6,7 @@ import { AudioPlayerStatus, VoiceConnectionStatus, type AudioPlayer, type VoiceC
 import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { MusicClient, Track } from '../src/types.js';
 import type { ManagedAudioStream } from '../src/utils/stream.js';
+import type { MusicPlaybackOptions } from '../src/utils/audio.js';
 
 const track = (id: string): Track => ({
   videoId: id, url: `https://www.youtube.com/watch?v=${id}`, title: id,
@@ -64,6 +65,92 @@ test('repeat can be armed on an empty queue, repeats the current track and relea
     await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
     queue.setAutoplay(true); assert.equal(queue.loopCurrent, false);
   } finally { await queue.stop(); }
+});
+
+test('speed replaces the current stream at its source position, keeps the queue and applies to subsequent tracks', async () => {
+  const calls: { url: string; options: MusicPlaybackOptions; stream: PassThrough }[] = [];
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const queue = new GuildQueue('speed', client, (url, options) => {
+    const stream = new PassThrough(); calls.push({ url, options, stream });
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  const resource = () => {
+    const state = queue.player.state;
+    assert.notEqual(state.status, AudioPlayerStatus.Idle);
+    if (state.status === AudioPlayerStatus.Idle) throw new Error('Missing resource');
+    return state.resource;
+  };
+  try {
+    await queue.addTracks([track('aaaaaaaaaaa'), track('bbbbbbbbbbb')]);
+    resource().playbackDuration = 3250;
+    queue.setVolume(150); queue.setVoiceDucking(true); queue.setLoop(true);
+    queue.setSpeed(0.5);
+    assert.equal(calls[0]?.stream.destroyed, true);
+    assert.deepEqual(calls[1]?.options, { speed: 0.5, startSeconds: 3.25 });
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.deepEqual(queue.tracks.map(track => track.videoId), ['bbbbbbbbbbb']);
+    assert.equal(queue.loopCurrent, true);
+    assert.ok(Math.abs(resource().volume!.volume - 0.3) < 0.00001);
+    resource().playbackDuration = 2000;
+    assert.equal(queue.getElapsedSeconds(), 4);
+    queue.setSpeed(1.25);
+    assert.deepEqual(calls[2]?.options, { speed: 1.25, startSeconds: 4.25 });
+    resource().playbackDuration = 2000;
+    assert.equal(queue.getElapsedSeconds(), 6);
+    queue.setSpeed(1.25); assert.equal(calls.length, 3, 'same speed must not restart');
+    queue.setLoop(false); queue.skip();
+    await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
+    assert.deepEqual(calls[3]?.options, { speed: 1.25, startSeconds: 0 });
+    assert.equal(queue.getElapsedSeconds(), 0);
+  } finally { await queue.stop(); }
+});
+
+test('changing speed preserves a paused track through buffering and resume can cancel a pending pause', async () => {
+  const streams: PassThrough[] = [];
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const queue = new GuildQueue('paused-speed', client, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  try {
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    assert.equal(queue.pause(), true);
+    queue.setSpeed(0.8);
+    assert.equal(queue.isPaused, true);
+    streams[1]!.write(Buffer.from([0xf8, 0xff, 0xfe]));
+    await waitFor(() => queue.player.state.status === AudioPlayerStatus.Paused);
+    assert.equal(queue.resume(), true);
+    assert.equal(queue.isPaused, false);
+    queue.pause(); queue.setSpeed(1.25);
+    assert.equal(queue.player.state.status, AudioPlayerStatus.Buffering);
+    assert.equal(queue.resume(), true);
+    assert.equal(queue.isPaused, false);
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+  } finally { await queue.stop(); }
+});
+
+test('speed can be set before playback and failed replacements keep the original stream and settings', async () => {
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const stream = new PassThrough();
+  let options: MusicPlaybackOptions | undefined;
+  let fail = false;
+  const queue = new GuildQueue('speed-failure', client, (_url, settings) => {
+    if (fail) throw new Error('replacement failed');
+    options = settings;
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  try {
+    queue.setSpeed(0.8);
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    assert.deepEqual(options, { speed: 0.8, startSeconds: 0 });
+    const original = queue.player.state;
+    fail = true;
+    assert.throws(() => queue.setSpeed(1.25), /replacement failed/);
+    assert.equal(queue.speed, 0.8); assert.equal(queue.player.state, original);
+    assert.equal(stream.destroyed, false);
+    for (const value of [NaN, Infinity, 0.4, 2.1]) assert.throws(() => queue.setSpeed(value));
+  } finally { await queue.stop(); }
+  assert.throws(() => queue.setSpeed(1), /остановлена/);
 });
 
 test('manual track added while recommendations load plays before them', async () => {

@@ -69,6 +69,32 @@ test('normalization preserves silence and short tracks instead of inventing soun
   }
 });
 
+test('real FFmpeg changes duration and pitch together, seeking in original track time', async () => {
+  for (const speed of [0.5, 0.8, 1, 1.25, 2]) {
+    const { pcm } = await ffmpeg(tone(0.1, 4), [...rawInput, ...musicPcmArguments({ speed, startSeconds: 1 })]);
+    const seconds = pcm.length / (48000 * 4);
+    assert.ok(Math.abs(seconds - 3 / speed) < 0.005, `speed ${speed}: duration ${seconds}`);
+    const frequency = 440 * speed;
+    let energy = 0, real = 0, imaginary = 0;
+    const start = 4800, end = Math.min(pcm.length / 4 - 4800, 52800);
+    for (let i = start; i < end; i++) {
+      const sample = pcm.readInt16LE(i * 4);
+      energy += sample * sample;
+      real += sample * Math.cos(2 * Math.PI * frequency * i / 48000);
+      imaginary += sample * Math.sin(2 * Math.PI * frequency * i / 48000);
+    }
+    assert.ok(energy > 0);
+    assert.ok(2 * (real * real + imaginary * imaginary) / ((end - start) * energy) > 0.98,
+      `speed ${speed}: expected ${frequency} Hz, not pitch-preserving time stretch`);
+  }
+  // Input sample rate must not leak into the speed multiplier.
+  const mono = await ffmpeg(null, ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=4',
+    ...musicPcmArguments({ speed: 0.8, startSeconds: 1 })]);
+  assert.ok(Math.abs(mono.pcm.length / (48000 * 4) - 3.75) < 0.005);
+  for (const speed of [NaN, Infinity, 0, 0.49, 2.01]) assert.throws(() => musicPcmArguments({ speed }));
+  for (const startSeconds of [NaN, Infinity, -1]) assert.throws(() => musicPcmArguments({ startSeconds }));
+});
+
 test('normalization handles silent introductions and limits transient peaks', async () => {
   const input = Buffer.concat([Buffer.alloc(48000 * 4 * 3), tone(0.02, 6), Buffer.alloc(48000 * 4)]);
   for (const position of [4, 6, 8]) {

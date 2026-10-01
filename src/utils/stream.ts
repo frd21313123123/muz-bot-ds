@@ -3,7 +3,7 @@ import type { Readable } from 'node:stream';
 import { createRequire } from 'node:module';
 import { StreamType } from '@discordjs/voice';
 import type { YtdlpClient } from './ytdlp.js';
-import { musicPcmArguments } from './audio.js';
+import { musicPcmArguments, type MusicPlaybackOptions } from './audio.js';
 
 let ffmpegCommand: string | null = null;
 const require = createRequire(import.meta.url);
@@ -20,12 +20,12 @@ export function requireFfmpeg(): string {
       const filters = spawnSync(candidate, ['-hide_banner', '-filters'], {
         encoding: 'utf8', timeout: 10_000, windowsHide: true,
       });
-      if (filters.status !== 0 || !['loudnorm', 'aresample', 'aeval'].every(filter => filters.stdout.includes(filter))) continue;
+      if (filters.status !== 0 || !['loudnorm', 'aresample', 'aeval', 'asetrate', 'atrim', 'asetpts'].every(filter => filters.stdout.includes(filter))) continue;
       ffmpegCommand = candidate;
       return candidate;
     }
   }
-  throw new Error('Не найден FFmpeg с libopus, loudnorm, aresample и aeval. Установите ffmpeg-static или задайте FFMPEG_PATH.');
+  throw new Error('Не найден FFmpeg с libopus и фильтрами loudnorm, aresample, aeval, asetrate, atrim, asetpts. Установите ffmpeg-static или задайте FFMPEG_PATH.');
 }
 
 export interface ManagedAudioStream {
@@ -34,14 +34,15 @@ export interface ManagedAudioStream {
   destroy(): void;
 }
 
-export function createYtdlpStream(ytdlp: YtdlpClient, url: string): ManagedAudioStream {
+export function createYtdlpStream(ytdlp: YtdlpClient, url: string, options: MusicPlaybackOptions = {}): ManagedAudioStream {
+  const audioArgs = musicPcmArguments(options);
   const ffmpeg = requireFfmpeg();
   const downloader = ytdlp.spawn([
     '-f', 'bestaudio/best', '-o', '-', '--no-playlist', url,
   ]);
   const transcoder = spawn(ffmpeg, [
     '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
-    ...musicPcmArguments(),
+    ...audioArgs,
   ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 
   return createProcessStream(downloader, transcoder, StreamType.Raw);

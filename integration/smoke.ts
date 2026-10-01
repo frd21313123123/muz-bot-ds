@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   const result = await resolveQuery(process.env.SMOKE_VIDEO_URL || 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'Smoke', ytdlp);
   if (result?.type !== 'single') throw new Error('Не удалось получить метаданные видео.');
   console.log(`Видео: ${result.track.title}`);
-  const media = createYtdlpStream(ytdlp, result.track.url);
+  const media = createYtdlpStream(ytdlp, result.track.url, { speed: 0.8, startSeconds: 15 });
   if (media.type !== StreamType.Raw) { media.destroy(); throw new Error('Ожидался нормализованный PCM.'); }
   const resource = createAudioResource(media.stream, { inputType: media.type, inlineVolume: true });
   configureMusicEncoder(resource);
@@ -38,7 +38,7 @@ async function main(): Promise<void> {
     resource.playStream.on('end', () => { clearTimeout(timer); media.destroy(); resolve(total); });
   });
   if (bytes === 0 || packets === 0) throw new Error('Аудиопоток пуст.');
-  console.log(`Получено ${bytes} байт нормализованного PCM и ${packets} пакетов Opus после регулировки громкости.`);
+  console.log(`Получено ${bytes} байт нормализованного PCM и ${packets} пакетов Opus: скорость 0.8×, позиция 15 с, после регулировки громкости.`);
   const related = await ytdlp.related(result.track.videoId, 5);
   if (!related.length) throw new Error('Не получены рекомендации.');
   console.log(`Получено ${related.length} рекомендаций.`);

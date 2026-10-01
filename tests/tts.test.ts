@@ -9,13 +9,16 @@ import { LocalTts, type Confirmation } from '../src/voice/tts.js';
 test('local confirmations load without a worker; missing, stale or invalid caches disable TTS safely', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'muz-tts-'));
   const tts = new LocalTts();
-  const manifest = { engine: 'piper', sampleRate: 48000, channels: 2, phrases };
+  const manifest = { engine: 'piper', voice: 'ru_RU-irina-medium', sampleRate: 48000, channels: 2, phrases };
   try {
     assert.equal(await tts.load(directory), false);
     await writeFile(path.join(directory, 'ready.json'), JSON.stringify(manifest));
     for (const key of Object.keys(phrases)) await writeFile(path.join(directory, `${key}.pcm`), Buffer.alloc(4800));
     assert.equal(await tts.load(directory), true);
     assert.equal(tts.ready, true);
+    await writeFile(path.join(directory, 'ready.json'), JSON.stringify({ ...manifest, engine: 'silero', voice: 'v5_5_ru/xenia' }));
+    assert.equal(await tts.load(directory), true);
+    assert.equal(tts.voice, 'v5_5_ru/xenia');
     for (const key of Object.keys(phrases) as Confirmation[]) assert.equal(tts.audio(key)?.length, 4800);
     await writeFile(path.join(directory, 'pause.pcm'), Buffer.alloc(3));
     assert.equal(await tts.load(directory), false);

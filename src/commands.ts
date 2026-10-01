@@ -7,6 +7,7 @@ import { GuildQueue } from './utils/GuildQueue.js';
 import { nowPlayingEmbed, playerActionRow, playerEmbed, queueEmbed } from './utils/embeds.js';
 import { resolveQuery } from './utils/resolve.js';
 import { canControl, memberVoiceChannel } from './utils/voiceAccess.js';
+import { MIN_SPEED, MAX_SPEED } from './utils/audio.js';
 
 const privateReply = (interaction: ChatInputCommandInteraction, content: string): Promise<unknown> =>
   interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
@@ -238,12 +239,30 @@ const autoplay: Command = {
   },
 };
 
+const speed: Command = {
+  data: new SlashCommandBuilder().setName('speed').setDescription('⏩ Изменить скорость и тональность музыки')
+    .addNumberOption((option) => option.setName('value').setDescription('От 0.5 до 2; 1 — обычная скорость')
+      .setRequired(true).setMinValue(MIN_SPEED).setMaxValue(MAX_SPEED)),
+  async execute(interaction, client) {
+    const queue = client.queues.get(interaction.guildId!);
+    if (!await requireController(interaction, queue)) return;
+    const value = interaction.options.getNumber('value', true);
+    try {
+      queue!.setSpeed(value);
+      return privateReply(interaction, `⏩ Скорость: ${value}×. ${value === 1 ? 'Обычная тональность.'
+        : value < 1 ? 'Музыка медленнее, тональность ниже.' : 'Музыка быстрее, тональность выше.'}`);
+    } catch (error) {
+      return privateReply(interaction, `❌ ${error instanceof Error ? error.message : 'Не удалось изменить скорость.'}`);
+    }
+  },
+};
+
 const nowplaying: Command = {
   data: new SlashCommandBuilder().setName('nowplaying').setDescription('🎵 Текущий трек'),
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId!);
     if (!queue?.currentTrack) return privateReply(interaction, '❌ Сейчас ничего не играет.');
-    return interaction.reply({ embeds: [nowPlayingEmbed(queue.currentTrack, queue.autoplay)], flags: MessageFlags.Ephemeral });
+    return interaction.reply({ embeds: [nowPlayingEmbed(queue.currentTrack, queue.autoplay, queue.speed)], flags: MessageFlags.Ephemeral });
   },
 };
 
@@ -298,5 +317,5 @@ const watch: Command = {
 };
 
 export const commands: Command[] = [
-  join, play, skip, stop, pause, resume, clear, volume, autoplay, nowplaying, queueCommand, player, watch, voice,
+  join, play, skip, stop, pause, resume, clear, volume, speed, autoplay, nowplaying, queueCommand, player, watch, voice,
 ];
