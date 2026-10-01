@@ -187,7 +187,7 @@ export class GuildQueue {
     this.clearFade();
     this.destroyStream();
     try {
-      let next = this.loopCurrent ? this.currentTrack : this.pending.shift();
+      let next = this.loopCurrent && this.currentTrack ? this.currentTrack : this.pending.shift();
       if (!next && this.autoplay && this.currentTrack) {
         try {
           const related = await this.client.ytdlp.related(this.currentTrack.videoId);
@@ -362,12 +362,17 @@ export class GuildQueue {
 
   setAutoplay(value: boolean): boolean {
     this.autoplay = value;
+    if (value) this.loopCurrent = false;
     void this.playerMessage.update();
     return value;
   }
   toggleAutoplay(): boolean { return this.setAutoplay(!this.autoplay); }
   toggleLoop(): boolean {
-    this.loopCurrent = !this.loopCurrent;
+    return this.setLoop(!this.loopCurrent);
+  }
+  setLoop(value: boolean): boolean {
+    this.loopCurrent = value;
+    if (value) this.autoplay = false;
     void this.playerMessage.update();
     return this.loopCurrent;
   }

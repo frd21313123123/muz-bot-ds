@@ -8,7 +8,7 @@ import OpusScript from 'opusscript';
 import { GuildVoice } from '../src/voice/GuildVoice.js';
 import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { VoiceRuntime } from '../src/voice/runtime.js';
-import type { MusicClient } from '../src/types.js';
+import type { MusicClient, Track } from '../src/types.js';
 import type { MusicDecision, MusicResultPolicy } from '../src/voice/music.js';
 import { toTrack } from '../src/utils/ytdlp.js';
 import type { VoiceDecision } from '../src/voice/intents.js';
@@ -27,7 +27,7 @@ function musicHarness() {
   const members = new Map([['alice', { displayName: 'Alice' }]]);
   const states = new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }]]);
   const metadata = {
-    related: async () => [],
+    related: async (_videoId: string): Promise<Track[]> => [],
     searchCandidates: async () => [{ id: 'aaaaaaaaaaa', title: 'Numb' }, { id: 'bbbbbbbbbbb', title: 'Numb live' }],
     video: async () => ({ id: 'aaaaaaaaaaa', title: 'Numb' }),
   };
@@ -155,7 +155,7 @@ test('leaving, voice off, stop and reset during recognition or search prevent en
       assert.equal(capture.signal.aborted, true);
       release(); await processing;
       assert.equal(h.queue.currentTrack, null); assert.equal(h.queue.tracks.length, 0);
-      assert.equal(h.voice.session.phase, cancel === 'stop' ? 'disabled' : 'idle');
+      assert.equal(h.voice.session.phase, cancel === 'stop' || cancel === 'off' ? 'disabled' : 'idle');
     } finally { release?.(); await h.queue.stop(); }
   }
 });
@@ -180,6 +180,91 @@ test('short next aliases skip a busy queue exactly once without searching or enq
       assert.equal(h.queue.tracks[0]?.title, 'Already queued');
       assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
     } finally { await h.queue.stop(); }
+  }
+});
+
+test('voice autoplay and repeat set explicit states, preserve the queue and stay mutually exclusive', async () => {
+  const h = musicHarness();
+  h.metadata.searchCandidates = async () => { assert.fail('Modes must never search'); };
+  h.runtime.classify = async () => { assert.fail('Modes must bypass the old classifier'); };
+  try {
+    await h.queue.addTracks([toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Bob'),
+      toTrack({ id: 'ddddddddddd', title: 'Manual' }, 'Bob')]);
+    const resource = Reflect.get(h.queue, 'activeResource');
+    for (const [phrase, autoplay, loop] of [
+      ['Включи бесконечный режим', true, false], ['Включи бесконечный режим', true, false],
+      ['Включи повтор трека', false, true], ['Включи повтор трека', false, true],
+      ['Выключи повтор трека', false, false], ['Включи автоплей', true, false],
+      ['Отключи бесконечный режим', false, false],
+    ] as const) {
+      await (await h.command(phrase)).processing;
+      assert.equal(h.queue.autoplay, autoplay, phrase); assert.equal(h.queue.loopCurrent, loop, phrase);
+      assert.equal(h.queue.currentTrack?.videoId, 'ccccccccccc');
+      assert.deepEqual(h.queue.tracks.map(track => track.videoId), ['ddddddddddd']);
+      assert.equal(Reflect.get(h.queue, 'activeResource'), resource);
+    }
+    await (await h.command('Очисти очередь')).processing;
+    assert.equal(h.queue.tracks.length, 0); assert.equal(h.queue.currentTrack?.videoId, 'ccccccccccc');
+    assert.equal(Reflect.get(h.queue, 'activeResource'), resource);
+  } finally { await h.queue.stop(); }
+});
+
+test('spoken infinite mode fetches YouTube recommendations only after manual tracks finish', async () => {
+  const h = musicHarness();
+  const relatedCalls: string[] = [];
+  h.metadata.related = async (...args: unknown[]) => {
+    relatedCalls.push(String(args[0]));
+    return [toTrack({ id: 'eeeeeeeeeee', title: 'YouTube recommendation' }, 'Auto', true)];
+  };
+  h.metadata.searchCandidates = async () => { assert.fail('Autoplay is not a search request'); };
+  try {
+    await h.queue.addTracks([toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Bob'),
+      toTrack({ id: 'ddddddddddd', title: 'Manual' }, 'Bob')]);
+    await (await h.command('Включи бесконечный режим')).processing;
+    assert.deepEqual(relatedCalls, []);
+    h.queue.player.stop(true); await waitFor(() => h.queue.currentTrack?.videoId === 'ddddddddddd');
+    assert.deepEqual(relatedCalls, []);
+    h.queue.player.stop(true); await waitFor(() => h.queue.currentTrack?.videoId === 'eeeeeeeeeee');
+    assert.deepEqual(relatedCalls, ['ddddddddddd']);
+  } finally { await h.queue.stop(); }
+});
+
+test('spoken voice off disables listening and never enqueues a track', async () => {
+  const h = musicHarness();
+  h.metadata.searchCandidates = async () => { assert.fail('Voice off must not search'); };
+  try {
+    await (await h.command('Выключи голосовое управление')).processing;
+    assert.equal(h.voice.enabled, false); assert.equal(h.voice.session.phase, 'disabled');
+    assert.equal(h.queue.currentTrack, null); assert.equal(h.queue.tracks.length, 0);
+    assert.equal(h.voice.session.begin('alice'), null);
+    h.voice.setEnabled(true);
+    assert.equal(h.voice.enabled, true); assert.equal(h.voice.session.phase, 'idle');
+    await (await h.command('Включи бесконечный режим')).processing;
+    assert.equal(h.queue.autoplay, true);
+  } finally { await h.queue.stop(); }
+});
+
+test('worker recovery restores requested listening without changing playback or overriding voice off', async () => {
+  for (const requested of [true, false]) {
+    const h = musicHarness(); const deaf: boolean[] = [];
+    h.queue.connection!.rejoin = (config) => { deaf.push(Boolean(config?.selfDeaf)); return true; };
+    try {
+      await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Alice'));
+      await h.queue.addTrack(toTrack({ id: 'ddddddddddd', title: 'Pending' }, 'Alice'));
+      const current = h.queue.currentTrack;
+      h.voice.setEnabled(requested);
+      h.runtime.ready = false; h.runtime.emit('unavailable');
+      assert.equal(h.voice.enabled, false); assert.equal(deaf.at(-1), true);
+      h.runtime.ready = true; h.runtime.emit('available');
+      assert.equal(h.voice.enabled, requested); assert.equal(deaf.at(-1), !requested);
+      assert.equal(h.queue.currentTrack, current); assert.equal(h.queue.tracks.length, 1);
+      assert.equal(h.queue.closed, false);
+      if (requested) {
+        await (await h.command('Включи бесконечный режим')).processing;
+        assert.equal(h.queue.autoplay, true);
+      } else assert.equal(h.voice.session.phase, 'disabled');
+    } finally { await h.queue.stop(); }
+    assert.equal(h.runtime.listenerCount('available'), 0);
   }
 });
 

@@ -11,7 +11,10 @@ export const NLI_QUESTIONS = { intent: { type: 'choice',
   criteria: { play: 'Найти и включить песню или исполнителя', skip: 'Пропустить трек, включить следующий',
     pause: 'Поставить на паузу', resume: 'Продолжить после паузы', stop: 'Остановить и отключиться',
     volume_set: 'Установить громкость в процентах', volume_up: 'Сделать громче',
-    volume_down: 'Сделать тише', unknown: 'Другая, отрицательная или составная просьба' } } };
+    volume_down: 'Сделать тише', autoplay_on: 'Включить рекомендации YouTube', autoplay_off: 'Выключить рекомендации YouTube',
+    loop_on: 'Повторять текущий трек', loop_off: 'Выключить повтор трека', queue_clear: 'Очистить очередь',
+    voice_on: 'Включить голосовое управление', voice_off: 'Выключить голосовое управление',
+    unknown: 'Другая, отрицательная или составная просьба' } } };
 
 export interface TrainingExample {
   state: { phase: 'request'; message: string; canonical_message: string; selected_track: null; player: MusicPlayerState | null };

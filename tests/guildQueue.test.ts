@@ -44,6 +44,28 @@ test('skip advances to the next manual track and stops the old stream', async ()
   }
 });
 
+test('repeat can be armed on an empty queue, repeats the current track and releases the manual queue when disabled', async () => {
+  let resources = 0;
+  const client = { queues: new Map(), ytdlp: { related: async () => { assert.fail('Repeat must not fetch recommendations'); } } } as unknown as MusicClient;
+  const queue = new GuildQueue('repeat', client, () => {
+    resources++; const stream = new PassThrough();
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  client.queues.set(queue.guildId, queue);
+  try {
+    queue.setAutoplay(true); queue.setLoop(true);
+    assert.equal(queue.autoplay, false);
+    await queue.addTracks([track('aaaaaaaaaaa'), track('bbbbbbbbbbb')]);
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    queue.player.stop(true); await waitFor(() => resources >= 2);
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.deepEqual(queue.tracks.map(track => track.videoId), ['bbbbbbbbbbb']);
+    queue.setLoop(false); queue.player.stop(true);
+    await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
+    queue.setAutoplay(true); assert.equal(queue.loopCurrent, false);
+  } finally { await queue.stop(); }
+});
+
 test('manual track added while recommendations load plays before them', async () => {
   const streams: PassThrough[] = [];
   let resolveRelated: ((tracks: Track[]) => void) | undefined;

@@ -26,9 +26,13 @@ def main():
     environment.pop("HF_HUB_OFFLINE", None)
     environment.pop("TRANSFORMERS_OFFLINE", None)
     if not models_only:
-        print("Installing CPU dependencies", flush=True)
-        subprocess.run([str(PYTHON), "-m", "pip", "install", "torch==2.14.0",
-                    "--index-url", "https://download.pytorch.org/whl/cpu"], check=True, env=environment)
+        device = os.environ.get("VOICE_DEVICE", "cpu").strip().lower()
+        if device not in ("cpu", "cuda"):
+            raise ValueError("VOICE_DEVICE must be cpu or cuda")
+        print(f"Installing {device} dependencies", flush=True)
+        torch_version = "2.11.0" if device == "cuda" else "2.14.0"
+        subprocess.run([str(PYTHON), "-m", "pip", "install", "torch==" + torch_version,
+                    "--index-url", "https://download.pytorch.org/whl/" + ("cu128" if device == "cuda" else "cpu")], check=True, env=environment)
         subprocess.run([str(PYTHON), "-m", "pip", "install", "-r",
                     str(ROOT / "scripts" / "voice-requirements.txt")], check=True, env=environment)
     subprocess.run([str(PYTHON), str(ROOT / "scripts" / "voice_worker.py"), "--prepare"], check=True, env=environment)

@@ -20,15 +20,17 @@ async function main(): Promise<void> {
   client.ytdlp = ytdlp;
   client.voiceSettings = new VoiceSettings();
   await client.voiceSettings.load().catch(() => console.error('[Voice] Не удалось прочитать настройки имени.'));
-  client.voiceRuntime = new VoiceRuntime();
+  client.voiceRuntime = new VoiceRuntime({ autoRestart: true });
+  client.voiceRuntime.on('failure', (event) => console.error('[Voice] Сбой обработчика:', JSON.stringify({ at: new Date().toISOString(), ...event })));
+  client.voiceRuntime.on('recovering', (event) => console.error('[Voice] Перезапуск обработчика:', JSON.stringify(event)));
   client.voiceTrainingLog = new VoiceTrainingLog();
   if (client.voiceTrainingLog.enabled) console.log('[NLI] Учебный журнал команд включён: .runtime/nli (текст, без аудио).');
   const tts = new LocalTts();
   client.voiceTts = tts;
   console.log(await tts.load() ? '[TTS] Piper готов.' : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
   const voiceReady = await client.voiceRuntime.start().catch(() => false);
-  console.log(voiceReady ? `[Voice] Whisper ${client.voiceRuntime.sttModelName ?? '?'} (wake: ${client.voiceRuntime.wakeModelName ?? '?'}) + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
-  client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; повторное включение через /voice on.'));
+  console.log(voiceReady ? `[Voice] Whisper ${client.voiceRuntime.sttModelName ?? '?'} (wake: ${client.voiceRuntime.wakeModelName ?? '?'}, device: ${client.voiceRuntime.inferenceDevice ?? '?'}) + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
+  client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; прослушивание временно выключено. Музыка продолжает работать.'));
   client.once(Events.ClientReady, () => {
     console.log('[Bot] Ready');
     console.log(`✅ Бот запущен как ${client.user?.tag}`);

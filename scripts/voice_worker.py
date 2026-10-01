@@ -26,7 +26,10 @@ def laya_source(manifest, prepare=False):
         return str(directory), None
     return (DEFAULT_LAYA_MODEL, None) if prepare else (manifest.get("laya", DEFAULT_LAYA_MODEL), manifest.get("laya_revision"))
 
-COMMAND_PROMPT = "Linkin Park, Numb, live, remix, cover. Монеточка, Земфира, Кино, Сплин, Баста, Би-2."
+COMMAND_PROMPT = ("Музыкальный плеер: включи, выключи, бесконечный режим, автоплей, повтор трека, "
+                  "очисти очередь, голосовое управление, поставь на паузу, продолжи музыку, "
+                  "следующий трек, останови музыку, громкость, сделай громче, сделай тише. "
+                  "Linkin Park, Numb, live, remix, cover. Монеточка, Земфира, Кино, Сплин, Баста, Би-2.")
 
 # Give the short, ambiguous name competing spellings instead of telling the
 # recognizer that it must hear the bot's name. Similar words remain non-wakes.
@@ -287,6 +290,13 @@ def whisper_names(manifest, prepare=False):
 
 def models(prepare=False):
     import torch
+    # PyTorch's Windows wheel bundles the CUDA/cuDNN DLLs needed by CTranslate2.
+    # Keep DLL-directory handles alive for the lifetime of the worker.
+    dll_handles = []
+    if os.name == "nt":
+        torch_lib = str(Path(torch.__file__).parent / "lib")
+        os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
+        dll_handles.append(os.add_dll_directory(torch_lib))
     import laya
     from faster_whisper import WhisperModel
     import numpy as np
@@ -339,11 +349,18 @@ def models(prepare=False):
                         "segments": len(segments), "rejectedSegments": len(segments) - len(accepted)}}
             return text
     torch.set_num_threads(max(1, min(8, int(os.environ.get("VOICE_CPU_THREADS", "4")))))
+    device = os.environ.get("VOICE_DEVICE", "cpu").strip().lower()
+    if device not in ("cpu", "cuda"):
+        raise ValueError("VOICE_DEVICE must be cpu or cuda")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable; install CUDA PyTorch or use VOICE_DEVICE=cpu")
+    compute_type = "int8_float16" if device == "cuda" else "int8"
+    print(f"Voice inference: {device}, Whisper {compute_type}", file=sys.stderr, flush=True)
     marker = RUNTIME / "ready.json"
     manifest = {} if prepare else json.loads(marker.read_text(encoding="utf-8"))
     name, wake_name = whisper_names(manifest, prepare)
     def load_whisper(model_name):
-        model = CommandWhisper(model_name, device="cpu", compute_type="int8", cpu_threads=torch.get_num_threads(),
+        model = CommandWhisper(model_name, device=device, compute_type=compute_type, cpu_threads=torch.get_num_threads(),
                                download_root=str(RUNTIME / "whisper"), local_files_only=not prepare)
         model.runtime_name = model_name
         return model
@@ -353,7 +370,9 @@ def models(prepare=False):
     if prepare and not Path(laya_model).is_dir():
         from huggingface_hub import model_info
         revision = model_info(laya_model).sha
-    agent = laya.load(laya_model, device="cpu", revision=revision)
+    agent = laya.load(laya_model, device=device, revision=revision)
+    agent._voice_dll_handles = dll_handles
+    print(f"Laya inference: {agent.device}", file=sys.stderr, flush=True)
     # Warm encoder/decoder and VAD as well as Laya before the first real wake.
     for model in (whisper,) if whisper is wake_whisper else (whisper, wake_whisper):
         model.encoder_frames = 3000 if model is whisper else 600
@@ -380,7 +399,8 @@ def main():
         return
     print(json.dumps({"ready": True, "modelName": agent.cfg.get("model_name", "laya-multilingual"),
                       "sttModelName": whisper.runtime_name,
-                      "wakeModelName": wake_whisper.runtime_name}), flush=True)
+                      "wakeModelName": wake_whisper.runtime_name,
+                      "inferenceDevice": whisper.model.device}), flush=True)
     import numpy as np
     for line in sys.stdin:
         request = {}

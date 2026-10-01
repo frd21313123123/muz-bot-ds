@@ -1,4 +1,4 @@
-import { contextualCommand, isWakePhrase, normalizeSpeech, playerControlRequest, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { contextualCommand, isWakePhrase, modeCommand, normalizeSpeech, playerControlRequest, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
 import { extractMusicRequest, type MusicBackend, type MusicDiagnostic, type MusicPlayerState } from './music.js';
 import type { TrainingExample } from './training.js';
 
@@ -91,6 +91,7 @@ export class VoiceSession {
   }
 
   disable(): void { this.cancel(); this.phase = 'disabled'; }
+  enable(): void { this.cancel(); this.phase = 'idle'; }
   // A worker failure cannot recognize new audio, but a decoded music request
   // may still search with its fallback. Explicit cancellation always aborts it.
   backendUnavailable(): void { if (!this.recognizedMusic) this.cancel(); }
@@ -155,6 +156,7 @@ export class VoiceSession {
             (value) => { metrics = value; });
           const paused = this.host.paused?.() ?? false;
           const text = command ? contextualCommand(transcript, paused) : transcript;
+          const direct = command ? modeCommand(text) : null;
           const explicitMusic = command ? extractMusicRequest(text) : null;
           const music = explicitMusic ?? (command ? extractMusicRequest(text, true) : null);
           const unsupported = command && !music && unsupportedSpeech(text);
@@ -182,8 +184,8 @@ export class VoiceSession {
               if (valid()) await this.host.feedback?.('unknown', controller.signal);
               return;
             }
-            let intent: VoiceIntent = { action: 'unknown' };
-            if (!explicitMusic) {
+            let intent: VoiceIntent = direct ?? { action: 'unknown' };
+            if (!explicitMusic && !direct) {
               const decisionStart = performance.now();
               try {
                 const decision = await this.backend.classify(text, controller.signal);

@@ -1,4 +1,5 @@
-export type VoiceAction = 'skip' | 'pause' | 'resume' | 'stop' | 'volume_set' | 'volume_up' | 'volume_down' | 'unknown';
+export type VoiceAction = 'skip' | 'pause' | 'resume' | 'stop' | 'volume_set' | 'volume_up' | 'volume_down'
+  | 'autoplay_on' | 'autoplay_off' | 'loop_on' | 'loop_off' | 'queue_clear' | 'voice_on' | 'voice_off' | 'unknown';
 export type VoiceIntent = { action: 'volume_set'; level: number }
   | { action: Exclude<VoiceAction, 'volume_set'> };
 export interface VoiceDecision { action: VoiceAction; confidence: number }
@@ -48,6 +49,48 @@ export function commandLeadIn(text: string): string {
   return text.trim().replace(/^(?:(?:вот|ну|пожалуйста|слушай|давай)[\s,.:;!—-]+){1,3}/iu, '');
 }
 
+// Modes have explicit on/off semantics. Parse complete phrases before music
+// extraction; a model trained only on player controls cannot supply these labels.
+export function modeCommand(text: string): VoiceIntent | null {
+  const words = normalizeSpeech(commandLeadIn(text)).replace(/ (?:пожалуйста|please)$/u, '');
+  const on = '(?:включи|включить|включай|ключи|ключить|запусти|запустить|поставь|поставить|активируй|enable|turn on)';
+  const off = '(?:выключи|выключить|отключи|отключить|отключай|деактивируй|убери|останови|disable|turn off)';
+  const auto = '(?:бесконечный режим(?: воспроизведения)?|режим (?:бесконечного воспроизведения|автоподбора|автоплея|рекомендаций)|бесконечное воспроизведение|бесконечную музыку|музыку бесконечно|'
+    + 'авто ?плей|автопли|автоплэй|автоподбор(?: песен| музыки)?|автовоспроизведение|автоматический подбор(?: песен| музыки)?|'
+    + 'автоматическое воспроизведение|автоматический режим|рекомендации(?: песен| музыки)?|autoplay|infinite mode)'
+    + '(?: (?:от|с|на) (?:youtube|ютуба|ютубе))?';
+  const loop = '(?:(?:повтор|повторение)(?: (?:трека|песни|этого трека|этой песни))?|режим (?:повтора|повторения)(?: трека| песни)?|'
+    + 'зацикливание(?: трека| песни)?|repeat|loop)';
+  const voice = '(?:голосовое управление|голосовой режим|режим голосового управления|прослушивание)';
+  const match = (verb: string, target: string): boolean => new RegExp(`^${verb} ${target}$`, 'u').test(words);
+  const unsafe = text.includes('?') || /(?:^| )(?:не|нет|если|и|или|потом|затем|not|never|and|or|then)(?: |$)/u.test(words);
+  if (!unsafe) {
+    if (new RegExp(`^${on} громкость(?: |$)`, 'u').test(words)) {
+      const level = parseVolume(text);
+      return level === null ? { action: 'unknown' } : { action: 'volume_set', level };
+    }
+    if (match(on, auto)) return { action: 'autoplay_on' };
+    if (match(off, auto)) return { action: 'autoplay_off' };
+    if (match(on, loop) || /^(?:повторяй|зацикли) (?:этот трек|эту песню|трек|песню)$/u.test(words)) return { action: 'loop_on' };
+    if (match(off, loop) || /^перестань повторять (?:этот трек|эту песню|трек|песню)$/u.test(words)) return { action: 'loop_off' };
+    if (match(on, voice)) return { action: 'voice_on' };
+    if (match(off, voice)) return { action: 'voice_off' };
+    if (match(on, '(?:паузу|режим паузы)')) return { action: 'pause' };
+    if (match(off, '(?:паузу|режим паузы)')) return { action: 'resume' };
+    if (/^включи (?:следующий трек|следующую песню)$/u.test(words)) return { action: 'skip' };
+    if (/^(?:очисти|очистить|сбрось|сбросить) очередь(?: песен| треков)?$|^удали (?:все )?(?:песни|треки) из очереди$/u.test(words)) return { action: 'queue_clear' };
+  }
+  // Reserve mode requests even when negated, compound, incomplete or unknown.
+  // Explicit titles ("включи песню Бесконечный режим") stay music queries.
+  const target = words.replace(new RegExp(`^(?:(?:не|нет) )?(?:${on}|${off}) `, 'u'), '');
+  if (new RegExp(`^(?:(?:${auto}|${loop}|${voice})(?: |$)|режим(?: |$)|[\\p{L}]+ режим(?: |$)|паузу(?: |$))`, 'u').test(target)
+    || (target !== words && /^громкость(?: |$)/u.test(target))
+    || /^(?:очисти|очистить|сбрось|сбросить|удали|удалить|повторяй|зацикли|перестань повторять)(?: |$)/u.test(words)) {
+    return { action: 'unknown' };
+  }
+  return null;
+}
+
 function controlAlias(text: string): string | null {
   if (text.includes('?')) return null;
   const words = normalizeSpeech(commandLeadIn(text)).replace(/ (?:пожалуйста|please)$/u, '');
@@ -62,6 +105,7 @@ function controlAlias(text: string): string | null {
 
 // Closed control prefixes take priority over a free-form YouTube query.
 export function playerControlRequest(text: string): boolean {
+  if (modeCommand(text)) return true;
   const words = normalizeSpeech(controlAlias(text) ?? commandLeadIn(text));
   return /^(?:следующ\p{L}*|пропуст\p{L}*|скип\p{L}*|пауз\p{L}*|продолж\p{L}*|возобнов\p{L}*|приостанов\p{L}*|останов\p{L}*|стоп|выключ\p{L}*|отключ\p{L}*|выйди|выйти|громк\p{L}*|громче|тише|погромче|потише|установ\p{L}*|увелич\p{L}*|уменьш\p{L}*|сдела\p{L}*)(?: |$)/u.test(words)
     || /^(?:поставь|поставить) (?:(?:на )?паузу|громкость|звук)(?: |$)|^сними с паузы(?: |$)|^хватит играть(?: |$)|^на паузу(?: |$)|^музыка на паузе(?: |$)/u.test(words);
@@ -116,6 +160,8 @@ export function parseVolume(text: string): number | null {
 }
 
 export function unsupportedSpeech(text: string): boolean {
+  const mode = modeCommand(text);
+  if (mode) return mode.action === 'unknown';
   const words = normalizeSpeech(text).split(' ');
   if (!words[0] || words.length > 35
     || words.some((word) => /^(не|нет|если|потом|затем|сначала|и|или|но|not|no|never|dont|and|or|then|but)$/.test(word))
@@ -131,6 +177,8 @@ export function unsupportedSpeech(text: string): boolean {
 }
 
 export function validateIntent(text: string, decision: VoiceDecision, threshold = 0.6): VoiceIntent {
+  const direct = modeCommand(text);
+  if (direct) return direct;
   if (unsupportedSpeech(text) || !Number.isFinite(decision.confidence)
     || decision.confidence < threshold || decision.confidence > 1) return { action: 'unknown' };
   const allowed: VoiceAction[] = ['skip', 'pause', 'resume', 'stop', 'volume_set', 'volume_up', 'volume_down', 'unknown'];

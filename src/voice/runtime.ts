@@ -20,22 +20,37 @@ interface Request {
   cleanup(): void;
 }
 
+export interface VoiceFailure {
+  reason: 'startup_timeout' | 'request_timeout' | 'invalid_reply' | 'worker_error' | 'worker_exit' | 'stdin_error';
+  operation?: string;
+  elapsedMs?: number;
+  exitCode?: number | null;
+}
+
 export class VoiceRuntime extends EventEmitter implements VoiceBackend {
   ready = false;
   modelName: string | null = null;
   sttModelName: string | null = null;
   wakeModelName: string | null = null;
+  inferenceDevice: 'cpu' | 'cuda' | null = null;
   private child: ChildProcessWithoutNullStreams | null = null;
   private waiting: Request[] = [];
   private active: Request | null = null;
   private sequence = 0;
   private timeout: NodeJS.Timeout | null = null;
   private starting: Promise<boolean> | null = null;
+  private activeSince = 0;
+  private stopped = false;
+  private recoveryTimer: NodeJS.Timeout | null = null;
+  private recoveryAttempts = 0;
 
   constructor(private readonly options: { command?: string; args?: string[]; prepared?: boolean;
-    requestTimeoutMs?: number } = {}) { super(); }
+    requestTimeoutMs?: number; autoRestart?: boolean; recoveryDelayMs?: number } = {}) { super(); }
 
   async start(): Promise<boolean> {
+    this.stopped = false;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
     if (this.ready) return true;
     if (this.starting) return this.starting;
     this.starting = this.launch();
@@ -56,7 +71,7 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     return new Promise<boolean>((resolve) => {
       let settled = false;
       const finish = (ok: boolean): void => { if (!settled) { settled = true; clearTimeout(timer); resolve(ok); } };
-      const timer = setTimeout(() => { if (this.child === child) this.fail(); finish(false); }, 90_000);
+      const timer = setTimeout(() => { if (this.child === child) this.fail('startup_timeout'); finish(false); }, 90_000);
       const lines = createInterface({ input: child.stdout });
       lines.on('line', (line) => {
         if (this.child !== child) return;
@@ -72,31 +87,40 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
               ? message.modelName : null;
             this.sttModelName = safeName(message.sttModelName);
             this.wakeModelName = safeName(message.wakeModelName);
-            this.ready = true; finish(true); return;
+            this.inferenceDevice = message.inferenceDevice === 'cpu' || message.inferenceDevice === 'cuda'
+              ? message.inferenceDevice : null;
+            this.ready = true; finish(true); this.emit('available'); return;
           }
           const request = this.active;
           if (!request || message.id !== request.id) return;
           if (this.timeout) clearTimeout(this.timeout);
           this.timeout = null;
           this.active = null;
+          this.activeSince = 0;
           request.cleanup();
           if (message.error) request.reject(new Error('Локальная модель не обработала запрос.'));
-          else request.resolve(message.result);
+          else { this.recoveryAttempts = 0; request.resolve(message.result); }
           this.pump();
-        } catch { this.fail(); finish(false); }
+        } catch { this.fail('invalid_reply'); finish(false); }
       });
-      child.once('error', () => { if (this.child === child) this.fail(); finish(false); });
-      child.once('exit', () => { if (this.child === child) this.fail(); finish(false); lines.close(); });
-      child.stdin.on('error', () => { if (this.child === child) this.fail(); finish(false); });
+      child.once('error', () => { if (this.child === child) this.fail('worker_error'); finish(false); });
+      child.once('exit', (code) => { if (this.child === child) this.fail('worker_exit', code); finish(false); lines.close(); });
+      child.stdin.on('error', () => { if (this.child === child) this.fail('stdin_error'); finish(false); });
     });
   }
 
-  private fail(): void {
+  private fail(reason: VoiceFailure['reason'] | 'closed', exitCode?: number | null): void {
     const wasReady = this.ready;
+    const operation = this.active?.payload.op;
+    const failure: VoiceFailure | null = reason === 'closed' ? null : { reason,
+      ...(typeof operation === 'string' && ['transcribe', 'classify', 'music_route', 'music_policy', 'music_rerank'].includes(operation) ? { operation } : {}),
+      ...(this.activeSince ? { elapsedMs: Date.now() - this.activeSince } : {}),
+      ...(exitCode !== undefined ? { exitCode } : {}) };
     this.ready = false;
     this.modelName = null;
     this.sttModelName = null;
     this.wakeModelName = null;
+    this.inferenceDevice = null;
     if (this.timeout) clearTimeout(this.timeout);
     this.timeout = null;
     const child = this.child;
@@ -106,18 +130,39 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
       if (request) { request.cleanup(); request.reject(new Error('Голосовой обработчик недоступен.')); }
     }
     this.active = null;
+    this.activeSince = 0;
     this.waiting = [];
     if (wasReady) this.emit('unavailable');
+    if (failure) { this.emit('failure', failure); this.scheduleRecovery(); }
   }
 
-  close(): void { this.fail(); }
+  private scheduleRecovery(): void {
+    if (!this.options.autoRestart || this.stopped || this.recoveryTimer || this.ready || this.recoveryAttempts >= 3) return;
+    const delayMs = (this.options.recoveryDelayMs ?? 5_000) * 2 ** this.recoveryAttempts;
+    this.emit('recovering', { attempt: this.recoveryAttempts + 1, delayMs });
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (this.stopped) return;
+      this.recoveryAttempts++;
+      void this.start().then((ok) => { if (!ok) this.scheduleRecovery(); })
+        .catch(() => this.scheduleRecovery());
+    }, delayMs);
+  }
+
+  close(): void {
+    this.stopped = true;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
+    this.fail('closed');
+  }
 
   private pump(): void {
     if (!this.ready || !this.child || this.active) return;
     const request = this.waiting.shift();
     if (!request) return;
     this.active = request;
-    this.timeout = setTimeout(() => this.fail(), this.options.requestTimeoutMs ?? 30_000);
+    this.activeSince = Date.now();
+    this.timeout = setTimeout(() => this.fail('request_timeout'), this.options.requestTimeoutMs ?? 30_000);
     this.child.stdin.write(`${JSON.stringify({ id: request.id, ...request.payload })}\n`);
   }
 

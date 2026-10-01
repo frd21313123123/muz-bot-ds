@@ -9,9 +9,17 @@ import type { Confirmation } from './tts.js';
 export class GuildVoice {
   readonly session: VoiceSession;
   enabled = true;
+  private listeningRequested = true;
   private connection: VoiceConnection | null = null;
   private captures = new Map<string, () => void>();
   private readonly speaking = (userId: string): void => this.receive(userId);
+  private readonly available = (): void => {
+    if (!this.listeningRequested || this.enabled || this.queue.closed) return;
+    try {
+      this.setEnabled(true);
+      console.log(`[Voice:${this.queue.guildId}] Прослушивание восстановлено после перезапуска обработчика.`);
+    } catch { console.error(`[Voice:${this.queue.guildId}] Не удалось восстановить прослушивание; повторите /voice on.`); }
+  };
   private readonly unavailable = (): void => {
     this.enabled = false;
     this.connection?.receiver.speaking.off('start', this.speaking);
@@ -27,6 +35,7 @@ export class GuildVoice {
   constructor(private readonly queue: GuildQueue, private readonly runtime: VoiceRuntime) {
     this.session = this.newSession();
     runtime.on('unavailable', this.unavailable);
+    runtime.on('available', this.available);
   }
 
   private newSession(): VoiceSession {
@@ -70,6 +79,28 @@ export class GuildVoice {
         signal.throwIfAborted();
         let changed: boolean;
         switch (intent.action) {
+          case 'autoplay_on': case 'autoplay_off': {
+            const enabled = intent.action === 'autoplay_on';
+            changed = this.queue.autoplay !== enabled || (enabled && this.queue.loopCurrent);
+            this.queue.setAutoplay(enabled);
+            await this.confirm(intent.action, signal);
+            return changed;
+          }
+          case 'loop_on': case 'loop_off': {
+            const enabled = intent.action === 'loop_on';
+            changed = this.queue.loopCurrent !== enabled || (enabled && this.queue.autoplay);
+            this.queue.setLoop(enabled);
+            await this.confirm(intent.action, signal);
+            return changed;
+          }
+          case 'queue_clear': changed = this.queue.clearQueue() > 0; break;
+          case 'voice_on':
+            // A spoken on-command implies listening is already active.
+            await this.confirm('voice_on', signal); return false;
+          case 'voice_off':
+            await this.confirm('voice_off', signal);
+            signal.throwIfAborted();
+            return this.queue.setVoiceEnabled(false);
           case 'skip':
             if (!this.queue.currentTrack) return false;
             // Finish the confirmation before skip's fade/advance replaces the
@@ -130,9 +161,11 @@ export class GuildVoice {
   }
 
   setEnabled(enabled: boolean): void {
+    this.listeningRequested = enabled;
     this.enabled = enabled && this.runtime.ready;
     const connection = this.connection ?? this.queue.connection;
     this.suspend();
+    if (this.enabled) this.session.enable(); else this.session.disable();
     if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
       connection.rejoin({ ...connection.joinConfig, selfDeaf: !this.enabled });
       this.attach(connection);
@@ -143,8 +176,10 @@ export class GuildVoice {
   reset(): void { this.session.cancel(); for (const release of [...this.captures.values()]) release(); }
 
   destroy(): void {
+    this.listeningRequested = false;
     this.suspend(); this.session.disable();
     this.runtime.off('unavailable', this.unavailable);
+    this.runtime.off('available', this.available);
   }
 
   private receive(userId: string): void {

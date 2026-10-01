@@ -3,12 +3,31 @@ import test from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { contextualCommand, isWakePhrase, parseVolume, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
+import { contextualCommand, isWakePhrase, modeCommand, parseVolume, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
+import { extractMusicRequest } from '../src/voice/music.js';
 import { VoiceSettings } from '../src/voice/settings.js';
 import { VoiceSession, type VoiceBackend, type VoiceDiagnostic, type VoiceHost } from '../src/voice/session.js';
 import type { TrainingExample } from '../src/voice/training.js';
 
 const audio = Buffer.from([0, 0]);
+const modeCases: [string, VoiceIntent['action']][] = [
+  ['Включи бесконечный режим', 'autoplay_on'], ['Выключи бесконечный режим', 'autoplay_off'],
+  ['Включи автоплей', 'autoplay_on'], ['Отключи автоподбор песен', 'autoplay_off'],
+  ['Включи рекомендации от YouTube', 'autoplay_on'], ['Выключи рекомендации музыки', 'autoplay_off'],
+  ['Включи автоматический подбор песен', 'autoplay_on'], ['Останови автоматическое воспроизведение', 'autoplay_off'],
+  ['Включи режим бесконечного воспроизведения', 'autoplay_on'],
+  ['Включи режим автоподбора', 'autoplay_on'], ['Включи бесконечный режим на Ютубе', 'autoplay_on'],
+  ['Поставь бесконечный режим', 'autoplay_on'], ['Включи музыку бесконечно', 'autoplay_on'],
+  ['Включи режим повторения', 'loop_on'],
+  ['Ключи повтор трека', 'loop_on'], ['Ключи автопли', 'autoplay_on'], ['Включи авто плей', 'autoplay_on'],
+  ['Включи повтор трека', 'loop_on'], ['Отключи повтор этой песни', 'loop_off'],
+  ['Зацикли этот трек', 'loop_on'], ['Перестань повторять эту песню', 'loop_off'],
+  ['Включи режим повтора', 'loop_on'], ['Выключи зацикливание трека', 'loop_off'],
+  ['Очисти очередь', 'queue_clear'], ['Удали все треки из очереди', 'queue_clear'],
+  ['Включи голосовое управление', 'voice_on'], ['Выключи голосовое управление', 'voice_off'],
+  ['Включи паузу', 'pause'], ['Выключи режим паузы', 'resume'],
+  ['Включи следующий трек', 'skip'], ['Ну, включи бесконечный режим, пожалуйста', 'autoplay_on'],
+];
 function harness(override: Partial<VoiceBackend> = {}, hostOverride: Partial<VoiceHost> = {}) {
   let text = 'Муза';
   let present = true;
@@ -49,7 +68,46 @@ test('wake name is exact after Unicode normalization; mentions in conversation d
   assert.throws(() => validateWakeName('🔊'));
 });
 
+test('every explicit mode command executes once without model routing or a YouTube search', async () => {
+  for (const [phrase, action] of modeCases) {
+    assert.deepEqual(modeCommand(phrase), { action }, phrase);
+    assert.equal(extractMusicRequest(phrase, true), null, phrase);
+    const h = harness({ classify: async () => { assert.fail('Explicit modes must not depend on old model labels'); } },
+      { playMusic: async () => { assert.fail('A mode must not enqueue a song'); } });
+    try {
+      await h.session.begin('alice')!.complete(audio);
+      h.setText(phrase); const capture = h.session.begin('alice')!;
+      await capture.complete(audio); await capture.complete(audio);
+      assert.deepEqual(h.actions, [{ action }], phrase);
+    } finally { h.session.disable(); }
+  }
+});
+
+test('unknown, negated, compound and incomplete modes cannot change state or search', async () => {
+  for (const phrase of ['Не включай бесконечный режим', 'Включи бесконечный режим и паузу',
+    'Включи бесконечный режим?', 'Выключи повтор и останови музыку', 'Включи ночной режим',
+    'Включи режим перемешивания', 'Автоплей', 'Повтор трека', 'Очисти очередь и включи Numb',
+    'Включи бесконечный режим Metallica', 'Включи громкость']) {
+    assert.equal(extractMusicRequest(phrase, true), null, phrase);
+    const h = harness({ classify: async () => { assert.fail('Invalid modes must be rejected'); } },
+      { playMusic: async () => { assert.fail('Invalid modes must not search'); } });
+    try {
+      await h.session.begin('alice')!.complete(audio); h.setText(phrase);
+      await h.session.begin('alice')!.complete(audio);
+      assert.deepEqual(h.actions, [], phrase);
+    } finally { h.session.disable(); }
+  }
+  for (const phrase of ['Включи песню Бесконечный режим', 'Включи трек Повтор', 'Включи Повторяю']) {
+    assert.equal(modeCommand(phrase), null, phrase);
+    assert.equal(extractMusicRequest(phrase, true)?.kind, 'search', phrase);
+  }
+});
+
 test('volume numbers have a closed range and ambiguous values are rejected', () => {
+  assert.deepEqual(modeCommand('Поставь громкость пятьдесят процентов'), { action: 'volume_set', level: 50 });
+  assert.equal(extractMusicRequest('Поставь громкость пятьдесят процентов', true), null);
+  for (const phrase of ['Поставь громкость 0', 'Поставь громкость -10', 'Поставь громкость 10.5',
+    'Поставь громкость 151', 'Поставь громкость 50 или 60']) assert.deepEqual(modeCommand(phrase), { action: 'unknown' }, phrase);
   for (const [text, level] of [['Громкость 1', 1], ['Громкость 150 процентов', 150],
     ['Громкость пятьдесят пять', 55], ['Громкость сто двадцать три', 123]] as const) {
     assert.equal(parseVolume(text), level);
