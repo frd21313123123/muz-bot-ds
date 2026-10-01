@@ -56,6 +56,7 @@ const runtime = new VoiceRuntime();
 try {
   assert.equal(await runtime.start(), true, 'Run npm run setup:voice first');
   console.log(`Laya checkpoint: ${runtime.modelName ?? 'default'}`);
+  console.log(`Command STT: ${runtime.sttModelName ?? 'legacy'}; wake STT: ${runtime.wakeModelName ?? 'legacy'}`);
   const signal = new AbortController().signal;
   let correct = 0;
   let wrongActions = 0;

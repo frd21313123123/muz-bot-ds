@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   client.voiceTts = tts;
   console.log(await tts.load() ? '[TTS] Piper готов.' : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
   const voiceReady = await client.voiceRuntime.start().catch(() => false);
-  console.log(voiceReady ? `[Voice] Whisper + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
+  console.log(voiceReady ? `[Voice] Whisper ${client.voiceRuntime.sttModelName ?? '?'} (wake: ${client.voiceRuntime.wakeModelName ?? '?'}) + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; повторное включение через /voice on.'));
   client.once(Events.ClientReady, () => {
     console.log('[Bot] Ready');

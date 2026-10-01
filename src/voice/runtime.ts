@@ -23,6 +23,8 @@ interface Request {
 export class VoiceRuntime extends EventEmitter implements VoiceBackend {
   ready = false;
   modelName: string | null = null;
+  sttModelName: string | null = null;
+  wakeModelName: string | null = null;
   private child: ChildProcessWithoutNullStreams | null = null;
   private waiting: Request[] = [];
   private active: Request | null = null;
@@ -64,8 +66,12 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
           if (!value || typeof value !== 'object') throw new Error('Invalid worker reply');
           const message = value as Record<string, unknown>;
           if (message.ready === true) {
+            const safeName = (value: unknown): string | null => typeof value === 'string'
+              && /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,95}$/.test(value) ? value : null;
             this.modelName = typeof message.modelName === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,95}$/.test(message.modelName)
               ? message.modelName : null;
+            this.sttModelName = safeName(message.sttModelName);
+            this.wakeModelName = safeName(message.wakeModelName);
             this.ready = true; finish(true); return;
           }
           const request = this.active;
@@ -89,6 +95,8 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     const wasReady = this.ready;
     this.ready = false;
     this.modelName = null;
+    this.sttModelName = null;
+    this.wakeModelName = null;
     if (this.timeout) clearTimeout(this.timeout);
     this.timeout = null;
     const child = this.child;

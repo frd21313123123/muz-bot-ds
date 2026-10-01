@@ -26,7 +26,7 @@ def laya_source(manifest, prepare=False):
         return str(directory), None
     return (DEFAULT_LAYA_MODEL, None) if prepare else (manifest.get("laya", DEFAULT_LAYA_MODEL), manifest.get("laya_revision"))
 
-COMMAND_PROMPT = "Музыкальный поиск и управление: включи, поставь песню, хочу послушать, сыграй, воспроизведи, продолжи музыку, поставь на паузу, следующий трек, громче, тише, громкость. Название песни, имя исполнителя или описание музыки могут быть на русском или английском. Например: Монеточка, Земфира, Кино, Сплин, Баста, Би-2, Linkin Park, Numb, live, remix, cover."
+COMMAND_PROMPT = "Linkin Park, Numb, live, remix, cover. Монеточка, Земфира, Кино, Сплин, Баста, Би-2."
 
 # Give the short, ambiguous name competing spellings instead of telling the
 # recognizer that it must hear the bot's name. Similar words remain non-wakes.
@@ -277,6 +277,14 @@ def classify(agent, text):
     return {"action": answer["choice"], "confidence": answer["answer_confidence"]}
 
 
+def whisper_names(manifest, prepare=False):
+    if prepare:
+        return (os.environ.get("WHISPER_MODEL", "large-v3-turbo"),
+                os.environ.get("WHISPER_WAKE_MODEL", "small"))
+    # Old installations used one model for both phases.
+    return manifest["whisper"], manifest.get("whisper_wake", manifest["whisper"])
+
+
 def models(prepare=False):
     import torch
     import laya
@@ -284,20 +292,40 @@ def models(prepare=False):
     import numpy as np
 
     class CommandWhisper(WhisperModel):
-        # CTranslate2 4.8 accepts a shorter encoder window. faster-whisper still
-        # pads every utterance to 30 seconds; keep the real audio and 1.5 s margin,
-        # with at least 6 s of context, instead of encoding all that padding.
+        # Keep standard context for command recognition: truncating the larger
+        # encoder's window can make short utterances repeat. The small wake
+        # model retains its separately tested low-latency window.
         encoder_frames = 3000
+        encoder_cache = None
+
+        def detect_language(self, audio=None, features=None, **kwargs):
+            # faster-whisper decodes shape[-1] - 1 content frames but language
+            # detection includes the final boundary frame. Align that boundary
+            # for a short command so both stages can reuse the exact encoding.
+            if features is not None and 1 < features.shape[-1] < self.feature_extractor.nb_max_frames:
+                features = features[..., :-1]
+            return super().detect_language(audio=audio, features=features, **kwargs)
 
         def encode(self, features):
-            return super().encode(features[..., :self.encoder_frames])
+            features = features[..., :self.encoder_frames]
+            # Automatic language detection and decoding can encode the same
+            # window twice. Reuse it only when the feature arrays match exactly.
+            if self.encoder_cache is not None:
+                previous, output = self.encoder_cache
+                if np.array_equal(previous, features):
+                    return output
+            output = super().encode(features)
+            self.encoder_cache = (features.copy(), output)
+            return output
 
         def command(self, audio, prompt=None, diagnostic=False):
+            self.encoder_cache = None
             frames = int(len(audio) / 16000 * 100) + 150
-            self.encoder_frames = min(3000, max(600, (frames + 1) // 2 * 2))
+            self.encoder_frames = 3000 if prompt is None else min(3000, max(600, (frames + 1) // 2 * 2))
             # Wake words keep the fast greedy pass. Song/artist names benefit
             # from comparing several hypotheses, without a fixed artist list.
-            segments, info = self.transcribe(audio, language="ru", beam_size=5 if prompt is None else 1, temperature=0,
+            segments, info = self.transcribe(audio, language=None if prompt is None else "ru",
+                                          task="transcribe", beam_size=5 if prompt is None else 1, temperature=0,
                                           condition_on_previous_text=False, vad_filter=True,
                                           initial_prompt=COMMAND_PROMPT if prompt is None else prompt,
                                           without_timestamps=True, max_new_tokens=96)
@@ -305,6 +333,7 @@ def models(prepare=False):
             accepted = [segment for segment in segments
                         if prompt is None or (segment.no_speech_prob < 0.6 and segment.avg_logprob >= -1.0)]
             text = " ".join(segment.text.strip() for segment in accepted)
+            self.encoder_cache = None
             if diagnostic:
                 return {"text": text, "metrics": {"vadMs": round(info.duration_after_vad * 1000),
                         "segments": len(segments), "rejectedSegments": len(segments) - len(accepted)}}
@@ -312,34 +341,46 @@ def models(prepare=False):
     torch.set_num_threads(max(1, min(8, int(os.environ.get("VOICE_CPU_THREADS", "4")))))
     marker = RUNTIME / "ready.json"
     manifest = {} if prepare else json.loads(marker.read_text(encoding="utf-8"))
-    name = os.environ.get("WHISPER_MODEL", "small") if prepare else manifest["whisper"]
-    whisper = CommandWhisper(name, device="cpu", compute_type="int8", cpu_threads=torch.get_num_threads(),
-                           download_root=str(RUNTIME / "whisper"), local_files_only=not prepare)
+    name, wake_name = whisper_names(manifest, prepare)
+    def load_whisper(model_name):
+        model = CommandWhisper(model_name, device="cpu", compute_type="int8", cpu_threads=torch.get_num_threads(),
+                               download_root=str(RUNTIME / "whisper"), local_files_only=not prepare)
+        model.runtime_name = model_name
+        return model
+    whisper = load_whisper(name)
+    wake_whisper = whisper if name == wake_name else load_whisper(wake_name)
     laya_model, revision = laya_source(manifest, prepare)
     if prepare and not Path(laya_model).is_dir():
         from huggingface_hub import model_info
         revision = model_info(laya_model).sha
     agent = laya.load(laya_model, device="cpu", revision=revision)
     # Warm encoder/decoder and VAD as well as Laya before the first real wake.
-    whisper.encoder_frames = 600
-    warm_segments, _ = whisper.transcribe(np.zeros(16000, dtype=np.float32), language="ru",
-                                          beam_size=1, temperature=0, without_timestamps=True,
-                                          max_new_tokens=8, condition_on_previous_text=False)
-    list(warm_segments)
+    for model in (whisper,) if whisper is wake_whisper else (whisper, wake_whisper):
+        model.encoder_frames = 3000 if model is whisper else 600
+        warm_segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="ru",
+                                           beam_size=1, temperature=0, without_timestamps=True,
+                                           max_new_tokens=8, condition_on_previous_text=False)
+        list(warm_segments)
     whisper.command(np.zeros(16000, dtype=np.float32))
+    wake_whisper.command(np.zeros(16000, dtype=np.float32), "")
     agent.predict("Следующий трек", QUESTIONS)
     if prepare:
-        marker.write_text(json.dumps({"whisper": name, "laya": laya_model, "laya_revision": revision}), encoding="utf-8")
-    return whisper, agent
+        temporary = marker.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps({"whisper": name, "whisper_wake": wake_name,
+                                        "laya": laya_model, "laya_revision": revision}), encoding="utf-8")
+        temporary.replace(marker)
+    return whisper, wake_whisper, agent
 
 
 def main():
     prepare = "--prepare" in sys.argv
     with redirect_stdout(sys.stderr):
-        whisper, agent = models(prepare)
+        whisper, wake_whisper, agent = models(prepare)
     if prepare:
         return
-    print(json.dumps({"ready": True, "modelName": agent.cfg.get("model_name", "laya-multilingual")}), flush=True)
+    print(json.dumps({"ready": True, "modelName": agent.cfg.get("model_name", "laya-multilingual"),
+                      "sttModelName": whisper.runtime_name,
+                      "wakeModelName": wake_whisper.runtime_name}), flush=True)
     import numpy as np
     for line in sys.stdin:
         request = {}
@@ -357,7 +398,8 @@ def main():
                     # A single-name instruction biases noise toward that name.
                     # A contrastive vocabulary helps distinguish short words.
                     prompt = WAKE_VOCABULARY.get(wake_name.strip().lower(), "") if isinstance(wake_name, str) and len(wake_name) <= 64 else None
-                    result = whisper.command(audio, prompt, diagnostic=True)
+                    model = whisper if prompt is None else wake_whisper
+                    result = model.command(audio, prompt, diagnostic=True)
                 elif request["op"] == "classify":
                     text = request["text"]
                     if not isinstance(text, str) or len(text) > 1000:

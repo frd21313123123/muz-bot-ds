@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline';
-console.log(JSON.stringify({ ready: true, modelName: process.argv.includes('--v3') ? 'laya-muz-bot-ds-v3' : 'test' }));
+console.log(JSON.stringify({ ready: true, modelName: process.argv.includes('--v3') ? 'laya-muz-bot-ds-v3' : 'test',
+  sttModelName: 'large-v3-turbo', wakeModelName: 'small' }));
 createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
   if (process.argv.includes('--hang')) return;
