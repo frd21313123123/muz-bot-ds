@@ -1,5 +1,5 @@
 import type { Track } from '../types.js';
-import { normalizeSpeech } from './intents.js';
+import { commandLeadIn, normalizeSpeech, playerControlRequest } from './intents.js';
 import { toTrack, type VideoInfo } from '../utils/ytdlp.js';
 
 export type MusicVariant = 'live' | 'remix' | 'cover' | 'acoustic' | 'instrumental';
@@ -59,13 +59,25 @@ export function musicState(message: string, request: MusicRequest, player?: Musi
 
 // Extract from the original transcript: speech normalization would destroy URLs
 // and punctuation in song titles. Only command boundaries are interpreted here.
-export function extractMusicRequest(message: string): MusicRequest | null {
+export function extractMusicRequest(message: string, allowBare = false): MusicRequest | null {
   if (message.length > 1000) return null;
   // Conversational lead-ins and punctuation inserted by ASR are not part of
   // the title. Stay anchored: never fish a command out of a longer sentence.
-  const match = /^(?:(?:вот|ну|пожалуйста)[\s,]+){0,3}(?:включи|включить|включай|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести)(?:\s*[,:\u2014-]\s*|\s+)(.+)$/iu.exec(message.trim());
-  if (!match) return null;
-  const target = match[1]!.trim();
+  const cleaned = commandLeadIn(message);
+  if (playerControlRequest(cleaned)) return null;
+  // ASR can lose the quiet initial consonant in "включи". Interpret this
+  // leading command form only; never rewrite words inside the query.
+  const match = /^(?:(?:можешь|можете)\s+)?(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть|хочу послушать|послушаем)(?:\s*[,:\u2014-]\s*|\s+)(.+)$/iu.exec(cleaned);
+  if (!match && !allowBare) return null;
+  if (!match) {
+    const bare = normalizeSpeech(cleaned);
+    // Only the speaker's command window permits a bare title/artist. Do not
+    // turn conversations, negations, questions or incomplete commands into music.
+    if (!bare || bare.split(' ').length > 35 || cleaned.includes('?')
+      || /^(?:не|нет|если|сначала|потом|затем|как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|я|мы|ты|вы|он|она|мне нравится|добавь|найди|очисти)(?: |$)/u.test(bare)
+      || /(?:^| )(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть)(?: |$)/u.test(bare)) return null;
+  }
+  const target = (match?.[1] ?? cleaned).trim();
   if (/^(?:песню|трек)\s+из[.!…]*$/iu.test(target)) return null;
   // "Song from Luntik" needs its music noun: searching only "from Luntik"
   // predominantly returns cartoon episodes, unlike an explicit song title.
@@ -73,10 +85,11 @@ export function extractMusicRequest(message: string): MusicRequest | null {
     ? target.replace(/^песню\s+/iu, 'песня ')
     : target.replace(/^(?:песню|трек)\s+/iu, '').trim();
   const words = normalizeSpeech(query);
-  if (!words || /^(?:на паузу|паузу|музыку(?: снова| обратно| дальше)?|снова|обратно|дальше|песню|трек|эту(?: песню)?|этот(?: трек)?|ее|его|это|ту|тот|первую|первый|следующую(?: песню| музыку)?|следующий(?: трек)?)$/u.test(words)) return null;
+  if (!words || /^(?:на паузу|паузу|музыку(?: снова| обратно| дальше)?|музыка|воспроизведение|снова|обратно|дальше|песню|песни|песня|трек|эту(?: песню)?|этот(?: трек)?|ее|его|это|то|ту|тот|первую|первый|следующую(?: песню| музыку)?|следующий(?: трек)?)$/u.test(words)) return null;
   // Conjunctions in names (e.g. "Numb и Encore") are valid. A second command
   // verb after a command separator is not a song name.
-  if (/(?:^|\s)(?:и|или|потом|затем)\s+(?:не\s+)?(?:включ\p{L}*|постав\p{L}*|сыгра\p{L}*|воспроизвед\p{L}*|останов\p{L}*|останавли\p{L}*|выключ\p{L}*|пропуст\p{L}*|продолж\p{L}*|возобнов\p{L}*|сдела\p{L}*|пауза|следующий|громче|тише|стоп)(?:\s|$)/iu.test(words)) return null;
+  if (/(?:^|\s)(?:и|или|потом|затем)\s+(?:не\s+)?(?:включ\p{L}*|ключи\p{L}*|постав\p{L}*|сыгра\p{L}*|воспроизвед\p{L}*|запуст\p{L}*|проигра\p{L}*|останов\p{L}*|останавли\p{L}*|выключ\p{L}*|пропуст\p{L}*|продолж\p{L}*|возобнов\p{L}*|сдела\p{L}*|пауза|следующий|громче|тише|стоп)(?:\s|$)/iu.test(words)) return null;
+  if (/[,;.!]\s*(?:не\s+)?(?:включ\p{L}*|ключи\p{L}*|постав\p{L}*|сыгра\p{L}*|воспроизвед\p{L}*|запуст\p{L}*|проигра\p{L}*|останов\p{L}*|выключ\p{L}*|пропуст\p{L}*|продолж\p{L}*|возобнов\p{L}*|сдела\p{L}*|пауза|следующий|громче|тише|стоп)(?:\s|$)/iu.test(query)) return null;
   if (/https?:\/\//iu.test(query)) {
     let url: URL;
     try { url = new URL(query.replace(/[.!…]+$/u, '')); } catch { return null; }
@@ -93,35 +106,17 @@ export function validConfidence(value: number): boolean {
   return Number.isFinite(value) && value >= 0.6 && value <= 1;
 }
 
-export async function resolveMusicRequest(message: string, requestedBy: string, backend: MusicBackend,
+export async function resolveMusicRequest(message: string, requestedBy: string, _backend: MusicBackend,
   metadata: MusicMetadata, signal: AbortSignal, diagnostic?: (event: MusicDiagnostic) => void,
-  player?: MusicPlayerState): Promise<Track | null> {
-  const request = extractMusicRequest(message);
+  _player?: MusicPlayerState): Promise<Track | null> {
+  const request = extractMusicRequest(message, true);
   if (!request) return null;
   signal.throwIfAborted();
-  const started = performance.now();
-  try {
-    const decision = await backend.decideMusic(musicState(message, request, player), signal);
-    signal.throwIfAborted();
-    diagnostic?.({ stage: 'routing', ms: Math.round(performance.now() - started),
-      nextTool: decision.next_tool, policy: 'play_first_result', confidence: decision.confidence });
-    if (!validConfidence(decision.confidence)) {
-      diagnostic?.({ stage: 'rejected', reason: 'confidence' });
-      return null;
-    }
-    if (decision.next_tool === 'unknown' || decision.next_tool === 'player_control') {
-      diagnostic?.({ stage: 'rejected', reason: 'routing' });
-      return null;
-    }
-    // The model selects a route; code verifies that it matches the actual input.
-    if (decision.next_tool !== (request.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search')) {
-      diagnostic?.({ stage: 'rejected', reason: 'routing' });
-      return null;
-    }
-  } catch {
-    signal.throwIfAborted();
-    diagnostic?.({ stage: 'fallback', reason: 'model' });
-  }
+  // A parsed music request is a search query, not a label the model must know.
+  // Laya is reserved for player controls; artist/title queries go straight to
+  // YouTube with its own spelling correction and relevance order.
+  diagnostic?.({ stage: 'routing', ms: 0, nextTool: request.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search',
+    policy: 'play_first_result' });
   let candidates: VideoInfo[];
   const searchStart = performance.now();
   try {
@@ -146,7 +141,7 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
     ...(usable.length ? {} : { reason: 'empty' as const }) });
   if (!usable.length) return null;
   // YouTube's relevance order is authoritative, including for live/remix/etc.
-  // Laya only routes the request; candidates never return to the model.
+  // Neither routing nor candidates need a model decision for a parsed query.
   signal.throwIfAborted();
   return usable[0]!.track;
 }

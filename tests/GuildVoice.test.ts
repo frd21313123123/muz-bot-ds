@@ -123,8 +123,9 @@ test('a song-from request reaches search from conversational and ASR forms and r
 
 test('worker failure after recognition keeps music fallback alive and detaches listening', async () => {
   const h = musicHarness();
-  h.runtime.decideMusic = async () => {
-    h.runtime.ready = false; h.runtime.emit('unavailable'); throw new Error('worker stopped');
+  h.metadata.searchCandidates = async () => {
+    h.runtime.ready = false; h.runtime.emit('unavailable');
+    return [{ id: 'aaaaaaaaaaa', title: 'Numb' }];
   };
   try {
     await (await h.command()).processing;
@@ -134,15 +135,18 @@ test('worker failure after recognition keeps music fallback alive and detaches l
   } finally { await h.queue.stop(); }
 });
 
-test('leaving, voice off, stop and reset during routing or search prevent enqueue', async () => {
-  for (const stage of ['route', 'search']) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
+test('leaving, voice off, stop and reset during recognition or search prevent enqueue', async () => {
+  for (const stage of ['recognition', 'search']) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
     const h = musicHarness();
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const deferred = async () => { entered(); await new Promise<void>((resolve) => { release = resolve; }); };
     if (stage === 'search') h.metadata.searchCandidates = async () => { await deferred(); return [{ id: 'aaaaaaaaaaa', title: 'Numb' }]; };
-    else h.runtime.decideMusic = async () => { await deferred(); return { next_tool: 'youtube_music_search', query_source: 'message', search_result_policy: 'rerank_results', confidence: 1 }; };
+    else {
+      const transcribe = h.runtime.transcribe;
+      h.runtime.transcribe = async () => { const text = await transcribe(); if (text !== 'Муза') await deferred(); return text; };
+    }
     try {
       const { capture, processing } = await h.command(); await started;
       if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
@@ -153,6 +157,41 @@ test('leaving, voice off, stop and reset during routing or search prevent enqueu
       assert.equal(h.queue.currentTrack, null); assert.equal(h.queue.tracks.length, 0);
       assert.equal(h.voice.session.phase, cancel === 'stop' ? 'disabled' : 'idle');
     } finally { release?.(); await h.queue.stop(); }
+  }
+});
+
+test('artist requests and bare names search once without model approval in a voice session', async () => {
+  for (const message of ['Включи Монеточку', 'Вот, включи Монеточку', 'Монеточка', 'Поставь Кино', 'песни Монеточки']) {
+    const h = musicHarness();
+    let searches = 0;
+    h.runtime.decideMusic = async () => { assert.fail('Must bypass model routing'); };
+    h.metadata.searchCandidates = async () => { searches++; return [{ id: 'aaaaaaaaaaa', title: 'First artist result' }]; };
+    try {
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(searches, 1);
+      assert.equal(h.queue.currentTrack?.title, 'First artist result');
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('failed search and unsupported requests speak feedback without changing the queue', async () => {
+  for (const [message, reply] of [['Включи Монеточку', 'not_found'], ['Включи эту', 'unknown'], ['Не включи Кино', 'unknown']] as const) {
+    const h = musicHarness();
+    const replies: Confirmation[] = [];
+    h.metadata.searchCandidates = async () => [];
+    h.runtime.classify = async () => ({ action: 'unknown', confidence: 1 });
+    h.queue.client.voiceTts = { audio: key => { replies.push(key); return Buffer.alloc(4); } };
+    h.queue.playVoiceAudio = async () => {};
+    try {
+      await (await h.command(message)).processing;
+      assert.deepEqual(replies, [reply]);
+      assert.equal(h.queue.currentTrack, null);
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
   }
 });
 

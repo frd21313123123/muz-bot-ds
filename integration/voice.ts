@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { VoiceRuntime } from '../src/voice/runtime.js';
-import { contextualCommand, isWakePhrase, validateIntent, type VoiceAction } from '../src/voice/intents.js';
+import { contextualCommand, isWakePhrase, normalizeSpeech, validateIntent, type VoiceAction } from '../src/voice/intents.js';
 import { requireFfmpeg } from '../src/utils/stream.js';
 import { extractMusicRequest, musicState, resolveMusicRequest, validConfidence, type MusicDecision } from '../src/voice/music.js';
 
@@ -36,6 +36,7 @@ const cases: [string, VoiceAction, boolean?][] = [
   ['Возобнови', 'resume', true], ['Продолжай играть', 'resume', true],
   ['Не продолжай музыку', 'unknown', true], ['Продолжай и следующий трек', 'unknown', true],
   ['Продолжай читать', 'unknown', true], ['Продолжай рассказ', 'unknown', true],
+  ['Поставь паузу', 'pause'], ['Вот, поставь на паузу', 'pause'],
 ];
 
 async function decode(file: string): Promise<Buffer> {
@@ -95,7 +96,8 @@ try {
     ['включи https://music.youtube.com/watch?v=dQw4w9WgXcQ', 'direct_youtube_video', 'play_first_result'],
     ['включи https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ', 'direct_youtube_video', 'play_first_result'],
   ];
-  for (const [index, [message, route, policy]] of musicCases.entries()) {
+  // Legacy trained contract smoke check. Production music search bypasses it.
+  for (const [index, [message, route]] of musicCases.entries()) {
     const request = extractMusicRequest(message);
     assert.ok(request);
     const start = performance.now();
@@ -108,10 +110,12 @@ try {
   }
   for (const message of ['Включи Moscow never sleep', 'Включи Moscow Never Sleeps',
     'Вот включи песню из Лунтика', 'Включи, песню из Лунтика', 'Включить песню из Лунтика',
-    'включи Numb live', 'включи Numb remix', 'включи Numb кавер']) {
-    const expectedQuery = message.includes('Лунтика') ? 'песня из Лунтика' : extractMusicRequest(message)!.query;
+    'включи Numb live', 'включи Numb remix', 'включи Numb кавер',
+    'Включи Монеточку', 'Вот, включи Монеточку', 'Монеточка', 'Поставь Кино',
+    'Хочу послушать Земфиру', 'песни Монеточки', 'Можешь включить Монеточку']) {
+    const expectedQuery = message.includes('Лунтика') ? 'песня из Лунтика' : extractMusicRequest(message, true)!.query;
     const track = await resolveMusicRequest(message, 'Voice check', {
-      decideMusic: (state, signal) => runtime.decideMusic(state, signal),
+      decideMusic: async () => { assert.fail('Search queries must bypass model routing'); },
       decideMusicResults: async () => { assert.fail('Plain song requests must bypass result policy'); },
       rerankMusic: async () => { assert.fail('Plain song requests must bypass reranking'); },
     }, { searchCandidates: async (query) => {
@@ -134,10 +138,9 @@ try {
       asrTimings.push(performance.now() - start);
       const text = contextualCommand(transcript, fixture.paused ?? false);
       const intent = fixture.wakeName || fixture.musicQuery ? null : validateIntent(text, await runtime.classify(text, signal));
-      const music = fixture.musicQuery ? extractMusicRequest(text) : null;
-      const route = music ? await runtime.decideMusic(musicState(text, music), signal) : null;
+      const music = fixture.musicQuery ? extractMusicRequest(text, true) : null;
       const passed = fixture.wakeName ? isWakePhrase(text, fixture.wakeName) === (fixture.shouldWake ?? true)
-        : fixture.musicQuery ? music?.query === fixture.musicQuery && route?.next_tool === (music?.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search') && validConfidence(route.confidence)
+        : fixture.musicQuery ? music !== null && normalizeSpeech(music.query) === normalizeSpeech(fixture.musicQuery)
         : intent?.action === fixture.action && (fixture.level === undefined || (intent?.action === 'volume_set' && intent.level === fixture.level));
       if (passed) passedCount++;
       console.log(`Audio fixture ${i + 1}: ${passed ? 'PASS' : 'FAIL'} [action=${intent?.action ?? (fixture.musicQuery ? 'play' : 'wake')}] (${Math.round(performance.now() - start)} ms)`);

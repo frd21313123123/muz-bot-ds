@@ -16,6 +16,7 @@ export interface VoiceDiagnostic {
   matched?: boolean;
   paused?: boolean;
   canonicalized?: boolean;
+  requestKind?: 'search' | 'video' | 'control' | 'rejected';
   modelAction?: VoiceAction;
   confidence?: number;
   action?: VoiceAction | 'play';
@@ -41,6 +42,7 @@ export interface VoiceHost {
   duck(enabled: boolean): void;
   execute(intent: VoiceIntent, signal: AbortSignal): Promise<void | boolean>;
   playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean): Promise<boolean>;
+  feedback?(key: 'unknown' | 'not_found', signal: AbortSignal): Promise<void>;
   diagnostic?(event: VoiceDiagnostic): void;
 }
 export interface SpeechCapture {
@@ -145,19 +147,26 @@ export class VoiceSession {
           const paused = this.host.paused?.() ?? false;
           const text = command ? contextualCommand(transcript, paused) : transcript;
           if (!valid()) return;
+          const music = command ? extractMusicRequest(text, true) : null;
+          const unsupported = command && !music && unsupportedSpeech(text);
           this.host.diagnostic?.({ stage: 'recognition', kind: command ? 'command' : 'wake',
             audioMs: Math.round(pcm.length / 32), rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak, ...metrics,
             wakeDistance: command ? undefined : wakeDistance(text, this.host.wakeName()),
             ms: Math.round(performance.now() - asrStart), words: normalizeSpeech(transcript).split(' ').filter(Boolean).length,
-            paused, canonicalized: text !== transcript, matched: !command && isWakePhrase(text, this.host.wakeName()) });
+            paused, canonicalized: text !== transcript, matched: !command && isWakePhrase(text, this.host.wakeName()),
+            requestKind: command ? music?.kind ?? (unsupported ? 'rejected' : 'control') : undefined });
           if (command) {
-            if (extractMusicRequest(text)) {
+            if (music) {
               this.recognizedMusic = true;
               const changed = await this.host.playMusic(text, userId, controller.signal, valid);
               this.host.diagnostic?.({ stage: 'execution', action: 'play', changed });
               return;
             }
-            if (unsupportedSpeech(text)) { this.host.diagnostic?.({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' }); return; }
+            if (unsupported) {
+              this.host.diagnostic?.({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' });
+              if (valid()) await this.host.feedback?.('unknown', controller.signal);
+              return;
+            }
             const decisionStart = performance.now();
             const decision = await this.backend.classify(text, controller.signal);
             if (!valid()) { this.host.diagnostic?.({ stage: 'rejected', reason: 'stale' }); return; }
@@ -168,7 +177,7 @@ export class VoiceSession {
             if (intent.action !== 'unknown') {
               const changed = await this.host.execute(intent, controller.signal);
               this.host.diagnostic?.({ stage: 'execution', action: intent.action, changed: changed !== false });
-            }
+            } else if (valid()) await this.host.feedback?.('unknown', controller.signal);
           } else if (this.phase === 'idle' && isWakePhrase(text, this.host.wakeName())) {
             this.owner = userId;
             this.phase = 'signalling';

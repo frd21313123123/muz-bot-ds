@@ -44,6 +44,7 @@ export class GuildVoice {
       cue: (signal) => this.queue.playVoiceCue(signal),
       duck: (enabled) => this.queue.setVoiceDucking(enabled),
       diagnostic,
+      feedback: (key, signal) => this.confirm(key, signal),
       playMusic: async (message, userId, signal, valid) => {
         const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
         const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
@@ -52,7 +53,8 @@ export class GuildVoice {
           paused: this.queue.player.state.status === AudioPlayerStatus.Paused, autoplay: this.queue.autoplay,
           queue_length: this.queue.tracks.length,
         });
-        if (!track || !valid() || this.queue.closed) return false;
+        if (!valid() || this.queue.closed) return false;
+        if (!track) { await this.confirm('not_found', signal); return false; }
         const queued = Boolean(this.queue.currentTrack || this.queue.tracks.length);
         await this.queue.addTrack(track);
         if (valid() && !this.queue.closed) await this.confirm(queued ? 'queued' : 'play', signal);

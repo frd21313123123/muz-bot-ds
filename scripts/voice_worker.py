@@ -26,7 +26,7 @@ def laya_source(manifest, prepare=False):
         return str(directory), None
     return (DEFAULT_LAYA_MODEL, None) if prepare else (manifest.get("laya", DEFAULT_LAYA_MODEL), manifest.get("laya_revision"))
 
-COMMAND_PROMPT = "Музыкальные команды: включи песню, поставь трек, сыграй, воспроизведи, продолжи музыку, на паузу, следующий трек, громче, тише, громкость. Названия песен и исполнителей могут быть на английском: Linkin Park, Numb, live, remix, cover."
+COMMAND_PROMPT = "Музыкальный поиск и управление: включи, поставь песню, хочу послушать, сыграй, воспроизведи, продолжи музыку, поставь на паузу, следующий трек, громче, тише, громкость. Название песни, имя исполнителя или описание музыки могут быть на русском или английском. Например: Монеточка, Земфира, Кино, Сплин, Баста, Би-2, Linkin Park, Numb, live, remix, cover."
 
 # Give the short, ambiguous name competing spellings instead of telling the
 # recognizer that it must hear the bot's name. Similar words remain non-wakes.
@@ -295,7 +295,9 @@ def models(prepare=False):
         def command(self, audio, prompt=None, diagnostic=False):
             frames = int(len(audio) / 16000 * 100) + 150
             self.encoder_frames = min(3000, max(600, (frames + 1) // 2 * 2))
-            segments, info = self.transcribe(audio, language="ru", beam_size=1, temperature=0,
+            # Wake words keep the fast greedy pass. Song/artist names benefit
+            # from comparing several hypotheses, without a fixed artist list.
+            segments, info = self.transcribe(audio, language="ru", beam_size=5 if prompt is None else 1, temperature=0,
                                           condition_on_previous_text=False, vad_filter=True,
                                           initial_prompt=COMMAND_PROMPT if prompt is None else prompt,
                                           without_timestamps=True, max_new_tokens=96)

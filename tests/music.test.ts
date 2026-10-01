@@ -54,6 +54,36 @@ test('direct music links select one video even with an ordinary playlist', () =>
     'https://youtube.com/watch?v=bad', 'https://youtube.com.evil.test/watch?v=aaaaaaaaaaa']) assert.equal(extractMusicRequest(`включи ${url}`), null);
 });
 
+test('the command window accepts arbitrary artists, titles and descriptions like YouTube search', async () => {
+  for (const [message, query] of [
+    ['Включи Монеточку', 'Монеточку'], ['Вот, включи Монеточку', 'Монеточку'],
+    ['Ключи монеточку.', 'монеточку.'],
+    ['Монеточка', 'Монеточка'], ['Давай Монеточку', 'Монеточку'],
+    ['песни Монеточки', 'песни Монеточки'], ['Хочу послушать Земфиру', 'Земфиру'],
+    ['Можешь включить Монеточку', 'Монеточку'], ['запусти Кино', 'Кино'],
+    ['Включи Всё', 'Всё'], ['Numb и Encore', 'Numb и Encore'],
+    ['Включи музыку Земфиры', 'музыку Земфиры'],
+  ]) {
+    assert.deepEqual(extractMusicRequest(message!, true), { kind: 'search', query });
+    const h = harness({ decideMusic: async () => { assert.fail('Artist queries must never require model approval'); } });
+    assert.equal((await h.resolve(message!))?.videoId, 'aaaaaaaaaaa');
+    assert.deepEqual(h.calls, [`search:${query}`]);
+  }
+  assert.equal(extractMusicRequest('Монеточка'), null, 'bare names are only accepted in the command window');
+});
+
+test('bare query support preserves control priority and rejects missing context, negation and multiple actions', () => {
+  for (const message of ['Пауза', 'Поставь на паузу', 'Поставь паузу', 'Поставь громкость 50',
+    'Сделай музыку громче', 'Продолжай', 'Следующий трек', 'Останови музыку', 'Громкость 70',
+    'Не включай Монеточку', 'Вот не включи Кино', 'Я сказал включи Кино', 'Как включить музыку?',
+    'Включи эту', 'эту', 'Включи то', 'Включи', 'Включи музыку', 'Включи песню из',
+    'Включи Кино и поставь паузу', 'Включи Кино, поставь паузу', 'Кино потом пауза',
+    'Включи Кино или включи Монеточку', 'Включи Кино и запусти Монеточку',
+    'Включи Кино, пауза', 'Ключи Кино и проиграй Монеточку']) {
+    assert.equal(extractMusicRequest(message, true), null, message);
+  }
+});
+
 test('conversational and ASR command forms retain a song-from request without accepting negation or context', () => {
   for (const text of ['включи песню из Лунтика', 'Вот включи песню из Лунтика',
     'Ну, включи песню из Лунтика', 'Пожалуйста, включи песню из Лунтика',
@@ -72,11 +102,11 @@ test('conversational and ASR command forms retain a song-from request without ac
 test('plain and version requests preserve search order without calling a selector', async () => {
   const plain = harness();
   assert.equal((await plain.resolve('включи Numb'))?.videoId, 'aaaaaaaaaaa');
-  assert.deepEqual(plain.calls, ['route', 'search:Numb']);
+  assert.deepEqual(plain.calls, ['search:Numb']);
   const live = harness();
   const track = await live.resolve('включи Numb live');
   assert.equal(track?.videoId, 'aaaaaaaaaaa'); assert.equal(track?.requestedBy, 'Alice');
-  assert.deepEqual(live.calls, ['route', 'search:Numb live']);
+  assert.deepEqual(live.calls, ['search:Numb live']);
   assert.equal(JSON.stringify(live.events).includes('Numb'), false);
 });
 
@@ -143,17 +173,17 @@ test('obsolete candidate decisions cannot veto or replace the first search resul
 test('direct route never searches or reranks', async () => {
   const h = harness();
   assert.equal((await h.resolve('включи https://music.youtube.com/watch?v=aaaaaaaaaaa&list=PLfoo'))?.videoId, 'aaaaaaaaaaa');
-  assert.deepEqual(h.calls, ['route', 'video:https://www.youtube.com/watch?v=aaaaaaaaaaa']);
+  assert.deepEqual(h.calls, ['video:https://www.youtube.com/watch?v=aaaaaaaaaaa']);
 });
 
-test('failed routing falls back but explicit unknown and weak decisions abstain', async () => {
+test('a parsed search bypasses unavailable or rejecting model routing', async () => {
   const fallback = harness({ decideMusic: async () => { throw new Error('unavailable'); } });
   assert.equal((await fallback.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');
   assert.deepEqual(fallback.calls, ['search:Numb live']);
-  assert.ok(fallback.events.some((event) => event.reason === 'model'));
+  assert.equal(fallback.events.some((event) => event.stage === 'fallback'), false);
   for (const [next_tool, confidence] of [['unknown', 1], ['player_control', 1], ['youtube_music_search', 0.1], ['direct_youtube_video', 1]] as const) {
     const h = harness({ decideMusic: async () => ({ next_tool, confidence, query_source: 'message', search_result_policy: 'play_first_result' }) });
-    assert.equal(await h.resolve('включи Numb'), null); assert.deepEqual(h.calls, []);
+    assert.equal((await h.resolve('включи Numb'))?.videoId, 'aaaaaaaaaaa'); assert.deepEqual(h.calls, ['search:Numb']);
   }
 });
 
@@ -178,13 +208,13 @@ test('empty or failed searches do not create a track; invalid entries and duplic
   assert.equal(h.events.find((event) => event.stage === 'search')?.candidates, 2);
 });
 
-test('aborts in routing and search never fall back or return a track', async () => {
-  for (const stage of ['route', 'search']) {
+test('already cancelled requests and abort during search never return a track', async () => {
+  for (const stage of ['before', 'search']) {
     const h = harness(
-      stage === 'route' ? { decideMusic: async () => { h.controller.abort(); throw new Error('cancel'); } }
-        : {},
+      {},
       stage === 'search' ? { searchCandidates: async () => { h.controller.abort(); return entries; } } : {},
     );
+    if (stage === 'before') h.controller.abort();
     await assert.rejects(h.resolve('включи Numb live'));
     assert.equal(h.events.some((event) => event.stage === 'fallback'), false);
   }

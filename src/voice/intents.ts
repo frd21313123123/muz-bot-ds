@@ -44,17 +44,29 @@ export function wakeDistance(text: string, name: string): number {
   return previous[expected.length]!;
 }
 
+export function commandLeadIn(text: string): string {
+  return text.trim().replace(/^(?:(?:вот|ну|пожалуйста|слушай|давай)[\s,.:;!—-]+){1,3}/iu, '');
+}
+
+// Closed control prefixes take priority over a free-form YouTube query.
+export function playerControlRequest(text: string): boolean {
+  const words = normalizeSpeech(commandLeadIn(text));
+  return /^(?:следующ\p{L}*|пропуст\p{L}*|скип\p{L}*|пауз\p{L}*|продолж\p{L}*|возобнов\p{L}*|приостанов\p{L}*|останов\p{L}*|стоп|выключ\p{L}*|отключ\p{L}*|выйди|выйти|громк\p{L}*|громче|тише|погромче|потише|установ\p{L}*|увелич\p{L}*|уменьш\p{L}*|сдела\p{L}*)(?: |$)/u.test(words)
+    || /^(?:поставь|поставить) (?:(?:на )?паузу|громкость|звук)(?: |$)|^сними с паузы(?: |$)|^хватит играть(?: |$)|^на паузу(?: |$)|^музыка на паузе(?: |$)/u.test(words);
+}
+
 // Generic "turn it on" means resume only when an existing track is paused.
 // Keep song titles and any extra words outside this closed set.
 export function contextualCommand(text: string, paused: boolean): string {
-  const words = normalizeSpeech(text);
+  const cleaned = commandLeadIn(text);
+  const words = normalizeSpeech(cleaned);
   if (paused && !text.includes('?') && (
     /^(включи|включить|включай)( музыку| воспроизведение)?( снова| обратно| дальше)?$/.test(words)
     || /^(продолжай|продолжи|продолжить|возобнови|возобновить)( музыку| воспроизведение| играть)?$/.test(words)
   )) {
     return 'Продолжи музыку';
   }
-  return text;
+  return cleaned;
 }
 
 // A closed decision model cannot supply arbitrary arguments. Parse numbers in code.
