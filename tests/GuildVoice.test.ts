@@ -37,7 +37,7 @@ function musicHarness() {
   } as unknown as MusicClient;
   const runtime = Object.assign(new EventEmitter(), { ready: true,
     transcribe: async () => text,
-    classify: async (): Promise<VoiceDecision> => { throw new Error('Music must not reach player classifier'); },
+    classify: async (_text: string): Promise<VoiceDecision> => ({ action: 'unknown', confidence: 1 }),
     decideMusic: async (): Promise<MusicDecision> => ({ next_tool: 'youtube_music_search', query_source: 'message', search_result_policy: 'rerank_results', confidence: 1 }),
     rerankMusic: async () => ({ best_track: 1, confidence: 1 }),
     decideMusicResults: async (): Promise<MusicResultPolicy> => ({ search_result_policy: 'rerank_results', confidence: 1 }),
@@ -160,7 +160,45 @@ test('leaving, voice off, stop and reset during recognition or search prevent en
   }
 });
 
-test('artist requests and bare names search once without model approval in a voice session', async () => {
+test('short next aliases skip a busy queue exactly once without searching or enqueueing', async () => {
+  for (const message of ['Следующее', 'Далее', 'Next', 'Skip', 'Переключи']) {
+    const h = musicHarness();
+    let skips = 0;
+    h.runtime.classify = async text => {
+      assert.equal(text, 'Следующий трек');
+      return { action: 'skip', confidence: 0.99 };
+    };
+    h.metadata.searchCandidates = async () => { assert.fail('Skip must not search'); };
+    h.queue.skip = () => { skips++; return true; };
+    try {
+      await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
+      await h.queue.addTrack(toTrack({ id: 'ddddddddddd', title: 'Already queued' }, 'Bob'));
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(skips, 1);
+      assert.equal(h.queue.tracks.length, 1);
+      assert.equal(h.queue.tracks[0]?.title, 'Already queued');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('bare artist fallback survives a classifier failure after successful recognition', async () => {
+  const h = musicHarness();
+  h.runtime.classify = async () => {
+    h.runtime.ready = false; h.runtime.emit('unavailable');
+    throw new Error('Classifier unavailable');
+  };
+  try {
+    await (await h.command('Монеточка')).processing;
+    assert.equal(h.queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.equal(h.voice.enabled, false);
+    assert.equal(h.voice.session.phase, 'idle');
+    assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+  } finally { await h.queue.stop(); }
+});
+
+test('artist requests and bare names search once without music model approval in a voice session', async () => {
   for (const message of ['Включи Монеточку', 'Вот, включи Монеточку', 'Монеточка', 'Поставь Кино', 'песни Монеточки']) {
     const h = musicHarness();
     let searches = 0;

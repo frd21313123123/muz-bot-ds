@@ -44,11 +44,17 @@ export class GuildVoice {
       cue: (signal) => this.queue.playVoiceCue(signal),
       duck: (enabled) => this.queue.setVoiceDucking(enabled),
       diagnostic,
+      playerState: () => ({ connected: Boolean(this.queue.connection),
+        playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
+        paused: this.queue.player.state.status === AudioPlayerStatus.Paused,
+        autoplay: this.queue.autoplay, queue_length: this.queue.tracks.length }),
+      training: this.queue.client.voiceTrainingLog?.enabled ? (example) => this.queue.client.voiceTrainingLog?.append(example,
+        { stt: this.runtime.sttModelName ?? null, nli: this.runtime.modelName ?? null }) : undefined,
       feedback: (key, signal) => this.confirm(key, signal),
-      playMusic: async (message, userId, signal, valid) => {
+      playMusic: async (message, userId, signal, valid, report = diagnostic) => {
         const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
         const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
-        const track = await resolveMusicRequest(message, requestedBy, this.runtime, this.queue.client.ytdlp, signal, diagnostic, {
+        const track = await resolveMusicRequest(message, requestedBy, this.runtime, this.queue.client.ytdlp, signal, report, {
           connected: Boolean(this.queue.connection), playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
           paused: this.queue.player.state.status === AudioPlayerStatus.Paused, autoplay: this.queue.autoplay,
           queue_length: this.queue.tracks.length,

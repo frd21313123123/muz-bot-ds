@@ -74,7 +74,8 @@ export function extractMusicRequest(message: string, allowBare = false): MusicRe
     // Only the speaker's command window permits a bare title/artist. Do not
     // turn conversations, negations, questions or incomplete commands into music.
     if (!bare || bare.split(' ').length > 35 || cleaned.includes('?')
-      || /^(?:не|нет|если|сначала|потом|затем|как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|я|мы|ты|вы|он|она|мне нравится|добавь|найди|очисти)(?: |$)/u.test(bare)
+      || /^(?:не|нет|если|сначала|потом|затем|как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|я|мы|ты|вы|он|она|мне нравится|добавь|найди|очисти|not|no|never|don t|dont|do not|please don t)(?: |$)/u.test(bare)
+      || /(?:^| )(?:next|skip|pause|resume|stop|louder|quieter)(?: |$)/u.test(bare)
       || /(?:^| )(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть)(?: |$)/u.test(bare)) return null;
   }
   const target = (match?.[1] ?? cleaned).trim();

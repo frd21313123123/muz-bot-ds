@@ -6,6 +6,7 @@ import path from 'node:path';
 import { contextualCommand, isWakePhrase, parseVolume, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
 import { VoiceSettings } from '../src/voice/settings.js';
 import { VoiceSession, type VoiceBackend, type VoiceDiagnostic, type VoiceHost } from '../src/voice/session.js';
+import type { TrainingExample } from '../src/voice/training.js';
 
 const audio = Buffer.from([0, 0]);
 function harness(override: Partial<VoiceBackend> = {}, hostOverride: Partial<VoiceHost> = {}) {
@@ -56,6 +57,111 @@ test('volume numbers have a closed range and ambiguous values are rejected', () 
   for (const text of ['Громкость 0', 'Громкость 151', 'Громкость 10.5', 'Громкость -10',
     'Громкость 50 или 60', 'Громкость пять пять', 'Громкость 100 50', 'Громкость двадцать десять', 'Громкость']) assert.equal(parseVolume(text), null);
   assert.deepEqual(validateIntent('Громкость сто пятьдесят', { action: 'volume_set', confidence: 0.99 }), { action: 'volume_set', level: 150 });
+});
+
+test('short next/pause aliases classify as controls before search, while explicit titles remain music', async () => {
+  for (const phrase of ['следующее', 'следующая', 'далее', 'дальше', 'next', 'next track', 'skip', 'переключи', 'Вот, следующее пожалуйста']) {
+    const h = harness({ classify: async text => {
+      assert.equal(text, 'Следующий трек'); return { action: 'skip', confidence: 0.99 };
+    } }, { playMusic: async () => { assert.fail('A short control must never search'); } });
+    try {
+      await h.session.begin('alice')!.complete(audio);
+      h.setText(phrase); const capture = h.session.begin('alice')!;
+      await capture.complete(audio); await capture.complete(audio);
+      assert.deepEqual(h.actions, [{ action: 'skip' }], phrase);
+      assert.equal(h.ducked, false);
+    } finally { h.session.disable(); }
+  }
+  let played = 0;
+  const h = harness({ classify: async () => { assert.fail('An explicit title bypasses control classification'); } },
+    { playMusic: async message => { assert.equal(message, 'Включи Next'); played++; return true; } });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    h.setText('Включи Next'); await h.session.begin('alice')!.complete(audio);
+    assert.equal(played, 1); assert.equal(h.actions.length, 0);
+  } finally { h.session.disable(); }
+});
+
+test('bare artists receive a control preflight without letting a model hallucination skip playback', async () => {
+  const calls: string[] = [];
+  const h = harness({ classify: async () => { calls.push('classify'); return { action: 'skip', confidence: 0.999 }; } },
+    { playMusic: async () => { calls.push('search'); return true; } });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    h.setText('Монеточка'); await h.session.begin('alice')!.complete(audio);
+    assert.deepEqual(calls, ['classify', 'search']); assert.equal(h.actions.length, 0);
+  } finally { h.session.disable(); }
+});
+
+test('unknown short controls, negative and compound aliases never fall through to search', async () => {
+  const h = harness({ classify: async () => ({ action: 'unknown', confidence: 1 }) },
+    { playMusic: async () => { assert.fail('Must not search'); } });
+  try {
+    for (const phrase of ['Next', 'не следующее', 'next and pause', 'do not skip', 'переключи трек и пауза']) {
+      h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
+      h.setText(phrase); await h.session.begin('alice')!.complete(audio);
+      assert.equal(h.actions.length, 0); assert.equal(h.ducked, false);
+    }
+  } finally { h.session.disable(); }
+});
+
+test('the corpus captures commands once, preserves raw/canonical text and distinguishes cancelled decisions', async () => {
+  const examples: TrainingExample[] = [];
+  const h = harness({}, { training: row => examples.push(row) });
+  try {
+    await h.session.begin('alice')!.complete(audio); assert.equal(examples.length, 0);
+    h.setText('Next'); const capture = h.session.begin('alice')!;
+    await capture.complete(audio); await capture.complete(audio);
+    assert.equal(examples.length, 1);
+    assert.equal(examples[0]?.state.message, 'Next'); assert.equal(examples[0]?.state.canonical_message, 'Следующий трек');
+    assert.deepEqual(examples[0]?.model_decision, { action: 'skip', confidence: 0.99 });
+    assert.equal(examples[0]?.outcome, 'changed'); assert.equal(examples[0]?.route, 'control');
+  } finally { h.session.disable(); }
+  let release!: (value: { action: 'skip'; confidence: number }) => void;
+  const cancelled = harness({ classify: async () => new Promise(resolve => { release = resolve; }) },
+    { training: row => examples.push(row) });
+  try {
+    await cancelled.session.begin('alice')!.complete(audio);
+    cancelled.setText('Next'); const processing = cancelled.session.begin('alice')!.complete(audio);
+    await Promise.resolve(); cancelled.session.cancel(); release({ action: 'skip', confidence: 1 }); await processing;
+    assert.equal(examples.at(-1)?.outcome, 'cancelled'); assert.equal(cancelled.actions.length, 0);
+  } finally { cancelled.session.disable(); }
+});
+
+test('music corpus retains search stages and records late cancellation without a false success', async () => {
+  for (const cancel of [false, true]) {
+    const examples: TrainingExample[] = [];
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const h = harness({}, { training: row => examples.push(row),
+      playMusic: async (_message, _user, _signal, valid, report) => {
+        report?.({ stage: 'search', candidates: 5, ms: 25 });
+        entered(); await new Promise<void>(resolve => { release = resolve; });
+        return valid();
+      } });
+    try {
+      await h.session.begin('alice')!.complete(audio);
+      h.setText('Включи Numb'); const capture = h.session.begin('alice')!;
+      const processing = capture.complete(audio); await started;
+      if (cancel) h.session.disable();
+      release(); await processing; await capture.complete(audio);
+      assert.equal(examples.length, 1);
+      assert.equal(examples[0]?.outcome, cancel ? 'cancelled' : 'changed');
+      assert.equal(examples[0]?.query, 'Numb');
+      assert.ok(examples[0]?.diagnostics.some(event => event.stage === 'search' && event.candidates === 5));
+      assert.equal(h.ducked, false);
+    } finally { release?.(); h.session.disable(); }
+  }
+});
+
+test('corpus callback failures do not change a successful command', async () => {
+  const h = harness({}, { training: () => { throw new Error('write failed'); } });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    h.setText('Next'); await h.session.begin('alice')!.complete(audio);
+    assert.deepEqual(h.actions, [{ action: 'skip' }]); assert.equal(h.ducked, false);
+  } finally { h.session.disable(); }
 });
 
 test('music requests, compound commands, negations and low confidence cannot control playback', () => {

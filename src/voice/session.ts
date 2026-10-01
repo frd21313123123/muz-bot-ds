@@ -1,5 +1,6 @@
-import { contextualCommand, isWakePhrase, normalizeSpeech, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
-import { extractMusicRequest, type MusicBackend, type MusicDiagnostic } from './music.js';
+import { contextualCommand, isWakePhrase, normalizeSpeech, playerControlRequest, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { extractMusicRequest, type MusicBackend, type MusicDiagnostic, type MusicPlayerState } from './music.js';
+import type { TrainingExample } from './training.js';
 
 export interface VoiceDiagnostic {
   stage: 'recognition' | 'rejected' | 'decision' | 'execution' | 'error' | 'timeout' | MusicDiagnostic['stage'];
@@ -38,10 +39,13 @@ export interface VoiceHost {
   wakeName(): string;
   present(userId: string): boolean;
   paused?(): boolean;
+  playerState?(): MusicPlayerState;
+  training?(example: TrainingExample): void;
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
   execute(intent: VoiceIntent, signal: AbortSignal): Promise<void | boolean>;
-  playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean): Promise<boolean>;
+  playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean,
+    diagnostic?: (event: VoiceDiagnostic) => void): Promise<boolean>;
   feedback?(key: 'unknown' | 'not_found', signal: AbortSignal): Promise<void>;
   diagnostic?(event: VoiceDiagnostic): void;
 }
@@ -133,6 +137,11 @@ export class VoiceSession {
         finished = true;
         this.capturing.delete(userId);
         const valid = (): boolean => !controller.signal.aborted && epoch === this.epoch && this.host.present(userId);
+        let example: TrainingExample | null = null;
+        const report = (event: VoiceDiagnostic): void => {
+          if (example && example.diagnostics.length < 32) example.diagnostics.push({ ...event });
+          this.host.diagnostic?.(event);
+        };
         try {
           if (command) { this.clearTimer(); this.phase = 'processing'; }
           if (!pcm.length || !valid()) return;
@@ -146,38 +155,67 @@ export class VoiceSession {
             (value) => { metrics = value; });
           const paused = this.host.paused?.() ?? false;
           const text = command ? contextualCommand(transcript, paused) : transcript;
-          if (!valid()) return;
-          const music = command ? extractMusicRequest(text, true) : null;
+          const explicitMusic = command ? extractMusicRequest(text) : null;
+          const music = explicitMusic ?? (command ? extractMusicRequest(text, true) : null);
           const unsupported = command && !music && unsupportedSpeech(text);
-          this.host.diagnostic?.({ stage: 'recognition', kind: command ? 'command' : 'wake',
+          if (command && this.host.training) example = {
+            state: { phase: 'request', message: transcript, canonical_message: text,
+              selected_track: null, player: this.host.playerState?.() ?? null },
+            route: music?.kind ?? (unsupported ? 'rejected' : 'control'), model_decision: null,
+            validated_intent: { action: 'unknown' }, query: music?.query ?? null,
+            outcome: 'cancelled', diagnostics: [],
+          };
+          if (!valid()) return;
+          report({ stage: 'recognition', kind: command ? 'command' : 'wake',
             audioMs: Math.round(pcm.length / 32), rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak, ...metrics,
             wakeDistance: command ? undefined : wakeDistance(text, this.host.wakeName()),
             ms: Math.round(performance.now() - asrStart), words: normalizeSpeech(transcript).split(' ').filter(Boolean).length,
             paused, canonicalized: text !== transcript, matched: !command && isWakePhrase(text, this.host.wakeName()),
             requestKind: command ? music?.kind ?? (unsupported ? 'rejected' : 'control') : undefined });
           if (command) {
-            if (music) {
-              this.recognizedMusic = true;
-              const changed = await this.host.playMusic(text, userId, controller.signal, valid);
-              this.host.diagnostic?.({ stage: 'execution', action: 'play', changed });
-              return;
-            }
+            // Bare titles first pass through control classification. Explicit
+            // play requests remain independent of model routing/artist labels.
+            this.recognizedMusic = Boolean(music);
             if (unsupported) {
-              this.host.diagnostic?.({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' });
+              if (example) example.outcome = 'rejected';
+              report({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' });
               if (valid()) await this.host.feedback?.('unknown', controller.signal);
               return;
             }
-            const decisionStart = performance.now();
-            const decision = await this.backend.classify(text, controller.signal);
-            if (!valid()) { this.host.diagnostic?.({ stage: 'rejected', reason: 'stale' }); return; }
-            const intent = validateIntent(text, decision);
-            const safeAction = ['skip', 'pause', 'resume', 'stop', 'volume_set', 'volume_up', 'volume_down', 'unknown'].includes(decision.action) ? decision.action : 'unknown';
-            this.host.diagnostic?.({ stage: 'decision', modelAction: safeAction, confidence: Number.isFinite(decision.confidence) ? decision.confidence : 0,
-              action: intent.action, ms: Math.round(performance.now() - decisionStart) });
+            let intent: VoiceIntent = { action: 'unknown' };
+            if (!explicitMusic) {
+              const decisionStart = performance.now();
+              try {
+                const decision = await this.backend.classify(text, controller.signal);
+                if (!valid()) { report({ stage: 'rejected', reason: 'stale' }); return; }
+                // A hallucinated high-confidence control cannot turn an artist
+                // name into a skip. Control words must support the decision.
+                intent = playerControlRequest(text) ? validateIntent(text, decision) : { action: 'unknown' };
+                const safeAction = ['skip', 'pause', 'resume', 'stop', 'volume_set', 'volume_up', 'volume_down', 'unknown'].includes(decision.action) ? decision.action : 'unknown';
+                const confidence = Number.isFinite(decision.confidence) ? decision.confidence : 0;
+                if (example) example.model_decision = { action: safeAction, confidence };
+                report({ stage: 'decision', modelAction: safeAction, confidence,
+                  action: intent.action, ms: Math.round(performance.now() - decisionStart) });
+              } catch {
+                controller.signal.throwIfAborted();
+                if (!music) throw new Error('Control classification failed');
+                report({ stage: 'fallback', reason: 'model' });
+              }
+            }
             if (intent.action !== 'unknown') {
+              if (example) { example.route = 'control'; example.validated_intent = intent; }
               const changed = await this.host.execute(intent, controller.signal);
-              this.host.diagnostic?.({ stage: 'execution', action: intent.action, changed: changed !== false });
-            } else if (valid()) await this.host.feedback?.('unknown', controller.signal);
+              if (example) example.outcome = changed === false ? (valid() ? 'no_op' : 'cancelled') : 'changed';
+              report({ stage: 'execution', action: intent.action, changed: changed !== false });
+            } else if (music && valid()) {
+              if (example) { example.route = music.kind; example.validated_intent = { action: 'play' }; }
+              const changed = await this.host.playMusic(text, userId, controller.signal, valid, report);
+              if (example) example.outcome = changed ? 'changed' : (valid() ? 'no_op' : 'cancelled');
+              report({ stage: 'execution', action: 'play', changed });
+            } else if (valid()) {
+              if (example) { example.route = 'rejected'; example.outcome = 'rejected'; }
+              await this.host.feedback?.('unknown', controller.signal);
+            }
           } else if (this.phase === 'idle' && isWakePhrase(text, this.host.wakeName())) {
             this.owner = userId;
             this.phase = 'signalling';
@@ -195,12 +233,16 @@ export class VoiceSession {
             this.timer = setTimeout(() => { this.host.diagnostic?.({ stage: 'timeout', reason: 'wait' }); this.cancel(); }, this.timings.waitMs);
           }
         } catch {
+          if (example) example.outcome = controller.signal.aborted ? 'cancelled' : 'failed';
           // Audio/text and model error payloads must never reach ordinary logs.
           if (!controller.signal.aborted) {
-            this.host.diagnostic?.({ stage: 'error', reason: 'pipeline' });
+            report({ stage: 'error', reason: 'pipeline' });
             if (epoch === this.epoch && (command || this.owner === userId)) this.cancel();
           }
         } finally {
+          if (example) {
+            try { this.host.training?.(example); } catch { /* Corpus errors cannot change playback. */ }
+          }
           forget();
           if (command && epoch === this.epoch) this.cancel();
         }

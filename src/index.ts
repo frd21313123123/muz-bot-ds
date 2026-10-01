@@ -7,6 +7,7 @@ import { requireFfmpeg } from './utils/stream.js';
 import { VoiceRuntime } from './voice/runtime.js';
 import { VoiceSettings } from './voice/settings.js';
 import { LocalTts } from './voice/tts.js';
+import { VoiceTrainingLog } from './voice/training.js';
 
 async function main(): Promise<void> {
   if (!process.env.DISCORD_TOKEN) throw new Error('Укажите DISCORD_TOKEN в .env');
@@ -20,6 +21,8 @@ async function main(): Promise<void> {
   client.voiceSettings = new VoiceSettings();
   await client.voiceSettings.load().catch(() => console.error('[Voice] Не удалось прочитать настройки имени.'));
   client.voiceRuntime = new VoiceRuntime();
+  client.voiceTrainingLog = new VoiceTrainingLog();
+  if (client.voiceTrainingLog.enabled) console.log('[NLI] Учебный журнал команд включён: .runtime/nli (текст, без аудио).');
   const tts = new LocalTts();
   client.voiceTts = tts;
   console.log(await tts.load() ? '[TTS] Piper готов.' : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
@@ -46,6 +49,7 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     await Promise.allSettled([...client.queues.values()].map((queue) => queue.stop()));
     client.voiceRuntime?.close();
+    await client.voiceTrainingLog?.flush();
     client.destroy();
   };
   process.once('SIGINT', () => void shutdown().then(() => { process.exitCode = 0; }));

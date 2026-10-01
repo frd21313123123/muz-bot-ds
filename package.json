@@ -16,7 +16,8 @@
     "setup:voice": "npm run build && node dist/src/setup-voice.js",
     "setup:tts": "npm run build && node dist/src/setup-tts.js",
     "test:tts": "npm run build && node dist/integration/tts.js",
-    "test:voice": "npm run build && node dist/integration/voice.js"
+    "test:voice": "npm run build && node dist/integration/voice.js",
+    "export:nli": "npm run build && node dist/src/export-nli.js"
   },
   "engines": {
     "node": ">=24.17.0"
