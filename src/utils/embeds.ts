@@ -1,6 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from 'discord.js';
 import type { Track } from '../types.js';
 import type { GuildQueue } from './GuildQueue.js';
+import { formatDuration, parseDuration } from './duration.js';
 
 const cut = (value: string, max: number): string => value.length > max ? `${value.slice(0, max - 1)}…` : value;
 
@@ -10,7 +11,8 @@ export function nowPlayingEmbed(track: Track, autoplay = false, speed = 1): Embe
     .setTitle(track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
     .setDescription(`**[${escapeMarkdown(cut(track.title, 200))}](${track.url})**`)
     .addFields(
-      { name: '⏱ Длительность', value: track.duration, inline: true },
+      { name: '⏱ Длительность', value: track.isLive ? '🔴 Прямой эфир'
+        : parseDuration(track.duration) === null ? 'Длительность неизвестна' : track.duration, inline: true },
       { name: '👤 Запросил', value: escapeMarkdown(cut(track.requestedBy, 100)), inline: true },
       { name: '⏩ Скорость', value: `${speed}×`, inline: true },
     );
@@ -34,20 +36,16 @@ export function queueEmbed(queue: GuildQueue, page = 1): EmbedBuilder {
   return embed.setFooter({ text: `Страница ${safePage}/${totalPages} • Бесконечное: ${queue.autoplay ? 'вкл' : 'выкл'}` });
 }
 
-function durationSeconds(value: string): number | null {
-  if (!/^\d+(?::\d{1,2}){1,2}$/.test(value)) return null;
-  return value.split(':').reduce((acc, part) => acc * 60 + Number(part), 0);
-}
-
 export function playerEmbed(queue: GuildQueue): EmbedBuilder {
   const track = queue.currentTrack;
   if (!track) return new EmbedBuilder().setColor(0x99aab5).setTitle('⏹ Ничего не играет');
   const paused = queue.isPaused;
-  const duration = durationSeconds(track.duration);
-  const progress = duration
-    ? '▰'.repeat(Math.min(12, Math.round(queue.getElapsedSeconds() / duration * 12)))
-      + '▱'.repeat(Math.max(0, 12 - Math.round(queue.getElapsedSeconds() / duration * 12)))
-    : '🔴 Прямой эфир / длительность неизвестна';
+  const duration = parseDuration(track.duration);
+  const elapsed = Math.max(0, queue.getElapsedSeconds());
+  const filled = duration ? Math.min(12, Math.round(elapsed / duration * 12)) : 0;
+  const progress = track.isLive ? '🔴 Прямой эфир' : duration
+    ? `${'▰'.repeat(filled)}${'▱'.repeat(12 - filled)}\n${formatDuration(Math.min(elapsed, duration))} / ${formatDuration(duration)}`
+    : `${formatDuration(elapsed)} / длительность неизвестна`;
   const embed = new EmbedBuilder()
     .setColor(paused ? 0x99aab5 : 0x1db954)
     .setTitle(paused ? '⏸ На паузе' : track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')

@@ -4,6 +4,7 @@ import { resolveQuery } from '../src/utils/resolve.js';
 import { createYtdlpStream, requireFfmpeg } from '../src/utils/stream.js';
 import { createAudioResource, StreamType, TransformerType } from '@discordjs/voice';
 import { configureMusicEncoder } from '../src/utils/audio.js';
+import { videoDuration, parseDuration } from '../src/utils/duration.js';
 
 async function main(): Promise<void> {
   requireFfmpeg();
@@ -11,9 +12,11 @@ async function main(): Promise<void> {
   const candidates = await ytdlp.searchCandidates('Linkin Park Numb', 5);
   if (candidates.length < 2 || candidates.length > 5) throw new Error('Поиск не вернул несколько кандидатов.');
   if (new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) throw new Error('Поиск вернул дубликаты.');
+  if (videoDuration(candidates[0]!) === null) throw new Error('Выбранная песня поиска не содержит длительность.');
   console.log(`Получено ${candidates.length} кандидатов поиска.`);
   const searched = await resolveQuery('Rick Astley Never Gonna Give You Up', 'Smoke', ytdlp);
   if (searched?.type !== 'single') throw new Error('Текстовый поиск не вернул видео.');
+  if (parseDuration(searched.track.duration) === null || searched.track.isLive) throw new Error('Песня поиска неверно определена как эфир или не имеет длительности.');
   console.log(`Поиск: ${searched.track.title}`);
   const result = await resolveQuery(process.env.SMOKE_VIDEO_URL || 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'Smoke', ytdlp);
   if (result?.type !== 'single') throw new Error('Не удалось получить метаданные видео.');

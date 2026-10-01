@@ -7,7 +7,7 @@ test('search uses only the YouTube Music songs section, keeps order and removes 
   class Stub extends YtdlpClient {
     override async json(args: string[]): Promise<VideoInfo> {
       calls.push(args);
-      return { entries: [{ id: 'bad', title: 'Bad' }, { id: 'aaaaaaaaaaa', title: 'First' },
+      return { entries: [{ id: 'bad', title: 'Bad' }, { id: 'aaaaaaaaaaa', title: 'First', duration: 180 },
         { id: 'aaaaaaaaaaa', title: 'Duplicate' }, { id: 'bbbbbbbbbbb', title: 'Second' },
         { id: 'ccccccccccc', title: ' ' }] };
     }
@@ -24,6 +24,45 @@ test('search uses only the YouTube Music songs section, keeps order and removes 
   assert.deepEqual(calls[1], ['--flat-playlist', '--playlist-end', '1', 'https://music.youtube.com/search?q=Numb#songs']);
   await client.searchCandidates('  Кино & live #1  ', 3);
   assert.equal(calls[2]?.[3], `https://music.youtube.com/search?q=${encodeURIComponent('Кино & live #1')}#songs`);
+});
+
+test('song search hydrates only the selected ID with full duration and live status', async () => {
+  const checked: string[] = [];
+  class Stub extends YtdlpClient {
+    override async json(): Promise<VideoInfo> {
+      return { entries: [{ id: '5FHjH3NBFDI', title: 'Не дано' }, { id: 'bbbbbbbbbbb', title: 'Another' }] };
+    }
+    override async video(url: string): Promise<VideoInfo> {
+      checked.push(url);
+      return { id: '5FHjH3NBFDI', title: 'Не дано', duration: 216, duration_string: '3:36', live_status: 'not_live' };
+    }
+  }
+  const client = new Stub({ command: 'unused', prefix: [] });
+  const candidates = await client.searchCandidates('Hi-Fi Не дано');
+  assert.deepEqual(checked, ['https://www.youtube.com/watch?v=5FHjH3NBFDI']);
+  assert.equal(candidates[0]?.duration, 216);
+  assert.equal(candidates[0]?.live_status, 'not_live');
+  assert.equal(candidates[1]?.id, 'bbbbbbbbbbb');
+  assert.equal((await client.search('Hi-Fi Не дано'))?.duration, 216);
+});
+
+test('failed or mismatched metadata keeps the selected song, but cancelled metadata cannot return a track', async () => {
+  const controller = new AbortController();
+  let mode: 'error' | 'mismatch' | 'abort' = 'error';
+  class Stub extends YtdlpClient {
+    override async json(): Promise<VideoInfo> { return { entries: [{ id: 'aaaaaaaaaaa', title: 'Selected' }] }; }
+    override async video(): Promise<VideoInfo> {
+      if (mode === 'error') throw new Error('temporary metadata failure');
+      if (mode === 'abort') controller.abort();
+      return { id: 'bbbbbbbbbbb', title: 'Wrong song', duration: 200 };
+    }
+  }
+  const client = new Stub({ command: 'unused', prefix: [] });
+  assert.equal((await client.search('Song'))?.id, 'aaaaaaaaaaa');
+  mode = 'mismatch';
+  assert.equal((await client.search('Song'))?.id, 'aaaaaaaaaaa');
+  mode = 'abort';
+  await assert.rejects(client.searchCandidates('Song', 5, controller.signal));
 });
 
 test('radio recommendations skip the current video and duplicate entries', async () => {

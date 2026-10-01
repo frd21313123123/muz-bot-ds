@@ -14,6 +14,7 @@ export interface Track {
   thumbnail: string | null;
   requestedBy: string;
   isAutoplay?: boolean;
+  isLive?: boolean;
 }
 
 export interface MusicClient extends Client {

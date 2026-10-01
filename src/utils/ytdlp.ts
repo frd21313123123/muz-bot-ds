@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { Track } from '../types.js';
+import { formatDuration, videoDuration } from './duration.js';
 
 const execFileAsync = promisify(execFile);
 const VENV_DIR = path.resolve('.runtime', 'yt-dlp');
@@ -134,11 +135,26 @@ export class YtdlpClient {
     const result = await this.json(['--flat-playlist', '--playlist-end', String(limit), url], 20_000, signal);
     signal?.throwIfAborted();
     const seen = new Set<string>();
-    return (result.entries ?? (result.id ? [result] : [])).filter((entry) => {
+    const candidates = (result.entries ?? (result.id ? [result] : [])).filter((entry) => {
       if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id)) return false;
       seen.add(entry.id);
       return true;
     }).slice(0, limit);
+    // YouTube Music flat results contain IDs and titles, but no duration.
+    // Runtime selects the first song: hydrate that exact ID, not a new search.
+    const selected = candidates[0];
+    if (selected && videoDuration(selected) === null && !isLiveVideo(selected)) {
+      try {
+        const full = await this.video(`https://www.youtube.com/watch?v=${selected.id}`, signal);
+        signal?.throwIfAborted();
+        if (full.id === selected.id) candidates[0] = { ...selected, ...full };
+      } catch {
+        signal?.throwIfAborted();
+        // Keep the selected song if metadata is temporarily unavailable;
+        // the player will display unknown duration without labelling it live.
+      }
+    }
+    return candidates;
   }
 
   async related(videoId: string, limit = 25): Promise<Track[]> {
@@ -189,9 +205,8 @@ export function toTrack(info: VideoInfo, requestedBy: string, isAutoplay = false
   if (!info.id || !/^[\w-]{11}$/.test(info.id)) {
     throw new Error('YouTube не вернул корректный идентификатор видео.');
   }
-  const seconds = Number.isFinite(info.duration) ? Math.floor(info.duration ?? 0) : 0;
-  const duration = info.duration_string || (seconds > 0
-    ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '?');
+  const seconds = videoDuration(info);
+  const duration = seconds === null ? '?' : formatDuration(seconds);
   return {
     url: `https://www.youtube.com/watch?v=${info.id}`,
     videoId: info.id,
@@ -200,5 +215,10 @@ export function toTrack(info: VideoInfo, requestedBy: string, isAutoplay = false
     thumbnail: info.thumbnail || `https://img.youtube.com/vi/${info.id}/hqdefault.jpg`,
     requestedBy,
     isAutoplay,
+    isLive: isLiveVideo(info),
   };
+}
+
+function isLiveVideo(info: VideoInfo): boolean {
+  return info.live_status === 'is_live' || (info.live_status === undefined && info.is_live === true);
 }

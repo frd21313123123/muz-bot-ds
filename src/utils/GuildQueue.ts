@@ -192,7 +192,7 @@ export class GuildQueue {
     this.player.play(resource);
     oldStream?.destroy();
     void this.playerMessage.update();
-    console.log(`[Queue:${this.guildId}] ▶ ${track.title}`);
+    console.log(`[Queue:${this.guildId}] ▶ ${track.title} [${track.videoId}] • ${track.isLive ? 'live' : track.duration}`);
   }
 
   private async advance(): Promise<void> {
