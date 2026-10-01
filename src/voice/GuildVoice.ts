@@ -4,6 +4,7 @@ import type { GuildQueue } from '../utils/GuildQueue.js';
 import { VoiceSession, type SpeechCapture, type VoiceDiagnostic } from './session.js';
 import type { VoiceRuntime } from './runtime.js';
 import { resolveMusicRequest } from './music.js';
+import type { Confirmation } from './tts.js';
 
 export class GuildVoice {
   readonly session: VoiceSession;
@@ -43,31 +44,75 @@ export class GuildVoice {
       cue: (signal) => this.queue.playVoiceCue(signal),
       duck: (enabled) => this.queue.setVoiceDucking(enabled),
       diagnostic,
-      playMusic: async (message, userId, signal, valid) => {
+      playerState: () => ({ connected: Boolean(this.queue.connection),
+        playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
+        paused: this.queue.player.state.status === AudioPlayerStatus.Paused,
+        autoplay: this.queue.autoplay, queue_length: this.queue.tracks.length }),
+      training: this.queue.client.voiceTrainingLog?.enabled ? (example) => this.queue.client.voiceTrainingLog?.append(example,
+        { stt: this.runtime.sttModelName ?? null, nli: this.runtime.modelName ?? null }) : undefined,
+      feedback: (key, signal) => this.confirm(key, signal),
+      playMusic: async (message, userId, signal, valid, report = diagnostic) => {
         const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
         const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
-        const track = await resolveMusicRequest(message, requestedBy, this.runtime, this.queue.client.ytdlp, signal, diagnostic, {
+        const track = await resolveMusicRequest(message, requestedBy, this.runtime, this.queue.client.ytdlp, signal, report, {
           connected: Boolean(this.queue.connection), playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
           paused: this.queue.player.state.status === AudioPlayerStatus.Paused, autoplay: this.queue.autoplay,
           queue_length: this.queue.tracks.length,
         });
-        if (!track || !valid() || this.queue.closed) return false;
+        if (!valid() || this.queue.closed) return false;
+        if (!track) { await this.confirm('not_found', signal); return false; }
+        const queued = Boolean(this.queue.currentTrack || this.queue.tracks.length);
         await this.queue.addTrack(track);
+        if (valid() && !this.queue.closed) await this.confirm(queued ? 'queued' : 'play', signal);
         return true;
       },
-      execute: async (intent) => {
+      execute: async (intent, signal) => {
+        signal.throwIfAborted();
+        let changed: boolean;
         switch (intent.action) {
-          case 'skip': return this.queue.skip();
-          case 'pause': return this.queue.pause();
-          case 'resume': return this.queue.resume();
-          case 'stop': await this.queue.stop(); return true;
-          case 'volume_set': this.queue.setVolume(intent.level); return true;
-          case 'volume_up': this.queue.setVolume(Math.round(this.queue.volume * 100) + 10); return true;
-          case 'volume_down': this.queue.setVolume(Math.round(this.queue.volume * 100) - 10); return true;
+          case 'skip':
+            if (!this.queue.currentTrack) return false;
+            // Finish the confirmation before skip's fade/advance replaces the
+            // music resource. Cancellation must not trigger a delayed skip.
+            await this.confirm('skip', signal);
+            signal.throwIfAborted();
+            return this.queue.skip();
+          case 'pause': changed = this.queue.pause(); break;
+          case 'resume': changed = this.queue.resume(); break;
+          case 'stop':
+            await this.confirm('stop', signal);
+            signal.throwIfAborted();
+            await this.queue.stop(); return true;
+          case 'volume_set': this.queue.setVolume(intent.level); changed = true; break;
+          case 'volume_up': {
+            const before = this.queue.volume;
+            this.queue.setVolume(Math.round(before * 100) + 10);
+            changed = this.queue.volume !== before; break;
+          }
+          case 'volume_down': {
+            const before = this.queue.volume;
+            this.queue.setVolume(Math.round(before * 100) - 10);
+            changed = this.queue.volume !== before; break;
+          }
           case 'unknown': return false;
         }
+        if (changed) await this.confirm(intent.action, signal);
+        return changed;
       },
     });
+  }
+
+  private async confirm(key: Confirmation, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const pcm = this.queue.client.voiceTts?.audio(key);
+    if (!pcm || this.queue.closed) return;
+    try { await this.queue.playVoiceAudio(pcm, signal); }
+    catch {
+      // Playback/model failures must not undo a successful player action.
+      // Explicit session cancellation must still prevent delayed skip/stop.
+      signal.throwIfAborted();
+      if (process.env.VOICE_DEBUG === '1') console.log(`[TTS:${this.queue.guildId}] playback failed`);
+    }
   }
 
   attach(connection: VoiceConnection): void {

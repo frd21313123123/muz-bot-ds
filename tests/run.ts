@@ -11,3 +11,5 @@ import './voiceRuntime.test.js';
 import './GuildVoice.test.js';
 import './music.test.js';
 import './decoder.test.js';
+import './tts.test.js';
+import './training.test.js';

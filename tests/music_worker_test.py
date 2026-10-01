@@ -57,6 +57,15 @@ class V3Agent:
 
 
 class MusicWorkerTests(unittest.TestCase):
+    def test_stt_upgrade_defaults_and_existing_manifests_keep_the_wake_model_explicit(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(worker.whisper_names({}, True), ('large-v3-turbo', 'small'))
+        with patch.dict(os.environ, {'WHISPER_MODEL': 'large-v3', 'WHISPER_WAKE_MODEL': 'base'}):
+            self.assertEqual(worker.whisper_names({}, True), ('large-v3', 'base'))
+            self.assertEqual(worker.whisper_names({'whisper': 'small'}), ('small', 'small'))
+            self.assertEqual(worker.whisper_names({'whisper': 'large-v3-turbo', 'whisper_wake': 'small'}),
+                             ('large-v3-turbo', 'small'))
+
     def test_v3_route_uses_parsed_request_and_real_player_state(self):
         agent = V3Agent()
         state = {"message": "включи Numb", "selected_track": None,

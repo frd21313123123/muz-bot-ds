@@ -6,6 +6,8 @@ import { prepareYtdlp } from './utils/ytdlp.js';
 import { requireFfmpeg } from './utils/stream.js';
 import { VoiceRuntime } from './voice/runtime.js';
 import { VoiceSettings } from './voice/settings.js';
+import { LocalTts } from './voice/tts.js';
+import { VoiceTrainingLog } from './voice/training.js';
 
 async function main(): Promise<void> {
   if (!process.env.DISCORD_TOKEN) throw new Error('Укажите DISCORD_TOKEN в .env');
@@ -19,8 +21,13 @@ async function main(): Promise<void> {
   client.voiceSettings = new VoiceSettings();
   await client.voiceSettings.load().catch(() => console.error('[Voice] Не удалось прочитать настройки имени.'));
   client.voiceRuntime = new VoiceRuntime();
+  client.voiceTrainingLog = new VoiceTrainingLog();
+  if (client.voiceTrainingLog.enabled) console.log('[NLI] Учебный журнал команд включён: .runtime/nli (текст, без аудио).');
+  const tts = new LocalTts();
+  client.voiceTts = tts;
+  console.log(await tts.load() ? '[TTS] Piper готов.' : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
   const voiceReady = await client.voiceRuntime.start().catch(() => false);
-  console.log(voiceReady ? `[Voice] Whisper + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
+  console.log(voiceReady ? `[Voice] Whisper ${client.voiceRuntime.sttModelName ?? '?'} (wake: ${client.voiceRuntime.wakeModelName ?? '?'}) + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; повторное включение через /voice on.'));
   client.once(Events.ClientReady, () => {
     console.log('[Bot] Ready');
@@ -42,6 +49,7 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     await Promise.allSettled([...client.queues.values()].map((queue) => queue.stop()));
     client.voiceRuntime?.close();
+    await client.voiceTrainingLog?.flush();
     client.destroy();
   };
   process.once('SIGINT', () => void shutdown().then(() => { process.exitCode = 0; }));

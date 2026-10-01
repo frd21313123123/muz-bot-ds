@@ -9,8 +9,10 @@ import { GuildVoice } from '../src/voice/GuildVoice.js';
 import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { VoiceRuntime } from '../src/voice/runtime.js';
 import type { MusicClient } from '../src/types.js';
-import type { MusicDecision } from '../src/voice/music.js';
+import type { MusicDecision, MusicResultPolicy } from '../src/voice/music.js';
 import { toTrack } from '../src/utils/ytdlp.js';
+import type { VoiceDecision } from '../src/voice/intents.js';
+import type { Confirmation } from '../src/voice/tts.js';
 
 const waitFor = async (condition: () => boolean): Promise<void> => {
   const end = Date.now() + 2000;
@@ -35,10 +37,10 @@ function musicHarness() {
   } as unknown as MusicClient;
   const runtime = Object.assign(new EventEmitter(), { ready: true,
     transcribe: async () => text,
-    classify: async () => { throw new Error('Music must not reach player classifier'); },
+    classify: async (_text: string): Promise<VoiceDecision> => ({ action: 'unknown', confidence: 1 }),
     decideMusic: async (): Promise<MusicDecision> => ({ next_tool: 'youtube_music_search', query_source: 'message', search_result_policy: 'rerank_results', confidence: 1 }),
     rerankMusic: async () => ({ best_track: 1, confidence: 1 }),
-    decideMusicResults: async () => ({ search_result_policy: 'rerank_results' as const, confidence: 1 }),
+    decideMusicResults: async (): Promise<MusicResultPolicy> => ({ search_result_policy: 'rerank_results', confidence: 1 }),
   });
   const connection = { state: { status: VoiceConnectionStatus.Ready }, joinConfig: {},
     receiver: { speaking: new EventEmitter() }, rejoin: () => true,
@@ -52,9 +54,9 @@ function musicHarness() {
   client.queues.set('music', queue);
   const voice = new GuildVoice(queue, runtime as unknown as VoiceRuntime); queue.voice = voice;
   voice.attach(connection);
-  return { queue, voice, runtime, metadata, states, async command() {
+  return { queue, voice, runtime, metadata, states, async command(message = 'включи Numb live') {
     text = 'Муза'; await voice.session.begin('alice')!.complete(Buffer.from([0, 0]));
-    text = 'включи Numb live'; const capture = voice.session.begin('alice')!;
+    text = message; const capture = voice.session.begin('alice')!;
     return { capture, processing: capture.complete(Buffer.from([0, 0])) };
   } };
 }
@@ -66,7 +68,7 @@ test('voice music starts an empty queue, attributes the speaker, and preserves b
       if (busy) await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
       const { capture, processing } = await h.command();
       await processing; await capture.complete(Buffer.from([0, 0]));
-      assert.equal(h.queue.currentTrack?.videoId, busy ? 'ccccccccccc' : 'bbbbbbbbbbb');
+      assert.equal(h.queue.currentTrack?.videoId, busy ? 'ccccccccccc' : 'aaaaaaaaaaa');
       const requested = busy ? h.queue.tracks[0] : h.queue.currentTrack;
       assert.equal(requested?.requestedBy, 'Alice');
       assert.equal(h.queue.tracks.length, busy ? 1 : 0);
@@ -75,10 +77,55 @@ test('voice music starts an empty queue, attributes the speaker, and preserves b
   }
 });
 
+test('a plain Moscow request starts or queues once despite a model that would reject the search results', async () => {
+  for (const busy of [false, true]) {
+    const h = musicHarness();
+    let policies = 0;
+    h.runtime.decideMusic = async () => ({ next_tool: 'youtube_music_search', query_source: 'message',
+      search_result_policy: 'play_first_result', defer_result_policy: true, confidence: 1 });
+    h.runtime.decideMusicResults = async () => { policies++; return { search_result_policy: 'no_result', confidence: 0.9966 }; };
+    h.metadata.searchCandidates = async () => [{ id: 'aaaaaaaaaaa', title: 'DJ SMASH — MOSCOW NEVER SLEEPS' }];
+    try {
+      if (busy) await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
+      const { capture, processing } = await h.command('Включи Moscow never sleep');
+      await processing; await capture.complete(Buffer.from([0, 0]));
+      const requested = busy ? h.queue.tracks[0] : h.queue.currentTrack;
+      assert.equal(requested?.title, 'DJ SMASH — MOSCOW NEVER SLEEPS');
+      assert.equal(requested?.requestedBy, 'Alice');
+      assert.equal(h.queue.tracks.length, busy ? 1 : 0);
+      assert.equal(policies, 0);
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('a song-from request reaches search from conversational and ASR forms and restores volume', async () => {
+  for (const message of ['включи песню из Лунтика', 'Вот включи песню из Лунтика',
+    'Включи, песню из Лунтика', 'Включить песню из Лунтика']) {
+    const h = musicHarness();
+    let searches = 0;
+    h.metadata.searchCandidates = async (query?: string) => {
+      searches++; assert.equal(query, 'песня из Лунтика');
+      return [{ id: 'aaaaaaaaaaa', title: 'Песня из Лунтика' }];
+    };
+    try {
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.from([0, 0]));
+      assert.equal(searches, 1, message);
+      assert.equal(h.queue.currentTrack?.title, 'Песня из Лунтика');
+      assert.equal(h.queue.currentTrack?.requestedBy, 'Alice');
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
 test('worker failure after recognition keeps music fallback alive and detaches listening', async () => {
   const h = musicHarness();
-  h.runtime.decideMusic = async () => {
-    h.runtime.ready = false; h.runtime.emit('unavailable'); throw new Error('worker stopped');
+  h.metadata.searchCandidates = async () => {
+    h.runtime.ready = false; h.runtime.emit('unavailable');
+    return [{ id: 'aaaaaaaaaaa', title: 'Numb' }];
   };
   try {
     await (await h.command()).processing;
@@ -88,20 +135,18 @@ test('worker failure after recognition keeps music fallback alive and detaches l
   } finally { await h.queue.stop(); }
 });
 
-test('leaving, voice off, stop and reset during search, policy or reranking prevent enqueue', async () => {
-  for (const stage of ['search', 'policy', 'rerank']) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
+test('leaving, voice off, stop and reset during recognition or search prevent enqueue', async () => {
+  for (const stage of ['recognition', 'search']) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
     const h = musicHarness();
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const deferred = async () => { entered(); await new Promise<void>((resolve) => { release = resolve; }); };
     if (stage === 'search') h.metadata.searchCandidates = async () => { await deferred(); return [{ id: 'aaaaaaaaaaa', title: 'Numb' }]; };
-    else if (stage === 'policy') {
-      h.runtime.decideMusic = async () => ({ next_tool: 'youtube_music_search', query_source: 'message',
-        search_result_policy: 'play_first_result', defer_result_policy: true, confidence: 1 });
-      h.runtime.decideMusicResults = async () => { await deferred(); return { search_result_policy: 'rerank_results', confidence: 1 }; };
+    else {
+      const transcribe = h.runtime.transcribe;
+      h.runtime.transcribe = async () => { const text = await transcribe(); if (text !== 'Муза') await deferred(); return text; };
     }
-    else h.runtime.rerankMusic = async () => { await deferred(); return { best_track: 1, confidence: 1 }; };
     try {
       const { capture, processing } = await h.command(); await started;
       if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
@@ -112,6 +157,155 @@ test('leaving, voice off, stop and reset during search, policy or reranking prev
       assert.equal(h.queue.currentTrack, null); assert.equal(h.queue.tracks.length, 0);
       assert.equal(h.voice.session.phase, cancel === 'stop' ? 'disabled' : 'idle');
     } finally { release?.(); await h.queue.stop(); }
+  }
+});
+
+test('short next aliases skip a busy queue exactly once without searching or enqueueing', async () => {
+  for (const message of ['Следующее', 'Далее', 'Next', 'Skip', 'Переключи']) {
+    const h = musicHarness();
+    let skips = 0;
+    h.runtime.classify = async text => {
+      assert.equal(text, 'Следующий трек');
+      return { action: 'skip', confidence: 0.99 };
+    };
+    h.metadata.searchCandidates = async () => { assert.fail('Skip must not search'); };
+    h.queue.skip = () => { skips++; return true; };
+    try {
+      await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
+      await h.queue.addTrack(toTrack({ id: 'ddddddddddd', title: 'Already queued' }, 'Bob'));
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(skips, 1);
+      assert.equal(h.queue.tracks.length, 1);
+      assert.equal(h.queue.tracks[0]?.title, 'Already queued');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('bare artist fallback survives a classifier failure after successful recognition', async () => {
+  const h = musicHarness();
+  h.runtime.classify = async () => {
+    h.runtime.ready = false; h.runtime.emit('unavailable');
+    throw new Error('Classifier unavailable');
+  };
+  try {
+    await (await h.command('Монеточка')).processing;
+    assert.equal(h.queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.equal(h.voice.enabled, false);
+    assert.equal(h.voice.session.phase, 'idle');
+    assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+  } finally { await h.queue.stop(); }
+});
+
+test('artist requests and bare names search once without music model approval in a voice session', async () => {
+  for (const message of ['Включи Монеточку', 'Вот, включи Монеточку', 'Монеточка', 'Поставь Кино', 'песни Монеточки']) {
+    const h = musicHarness();
+    let searches = 0;
+    h.runtime.decideMusic = async () => { assert.fail('Must bypass model routing'); };
+    h.metadata.searchCandidates = async () => { searches++; return [{ id: 'aaaaaaaaaaa', title: 'First artist result' }]; };
+    try {
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(searches, 1);
+      assert.equal(h.queue.currentTrack?.title, 'First artist result');
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('failed search and unsupported requests speak feedback without changing the queue', async () => {
+  for (const [message, reply] of [['Включи Монеточку', 'not_found'], ['Включи эту', 'unknown'], ['Не включи Кино', 'unknown']] as const) {
+    const h = musicHarness();
+    const replies: Confirmation[] = [];
+    h.metadata.searchCandidates = async () => [];
+    h.runtime.classify = async () => ({ action: 'unknown', confidence: 1 });
+    h.queue.client.voiceTts = { audio: key => { replies.push(key); return Buffer.alloc(4); } };
+    h.queue.playVoiceAudio = async () => {};
+    try {
+      await (await h.command(message)).processing;
+      assert.deepEqual(replies, [reply]);
+      assert.equal(h.queue.currentTrack, null);
+      assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('successful voice actions speak the matching confirmation once, with a separate queued reply', async () => {
+  const h = musicHarness();
+  const replies: Confirmation[] = [];
+  const pcm = Buffer.alloc(4800);
+  h.queue.client.voiceTts = { audio: (key) => { replies.push(key); return pcm; } };
+  h.queue.playVoiceAudio = async (audio, signal) => { assert.equal(audio, pcm); assert.equal(signal.aborted, false); };
+  try {
+    await (await h.command('включи Numb live')).processing;
+    await (await h.command('включи песню из Лунтика')).processing;
+    assert.deepEqual(replies, ['play', 'queued']);
+    h.queue.pause = () => true; h.queue.resume = () => true; h.queue.skip = () => true;
+    for (const [message, action] of [['Поставь на паузу', 'pause'], ['Продолжи музыку', 'resume'],
+      ['Следующий трек', 'skip'], ['Громкость 70', 'volume_set'], ['Громче', 'volume_up'], ['Тише', 'volume_down']] as const) {
+      h.runtime.classify = async () => ({ action, confidence: 1 });
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(replies.at(-1), action);
+    }
+    h.queue.pause = () => false;
+    const count = replies.length;
+    h.runtime.classify = async () => ({ action: 'pause', confidence: 1 });
+    await (await h.command('Поставь на паузу')).processing;
+    assert.equal(replies.length, count, 'no successful-action reply for a no-op');
+    h.runtime.classify = async () => ({ action: 'stop', confidence: 1 });
+    await (await h.command('Останови музыку')).processing;
+    assert.equal(replies.at(-1), 'stop');
+    assert.equal(h.queue.closed, true);
+    assert.equal(h.voice.session.phase, 'disabled');
+  } finally { await h.queue.stop(); }
+});
+
+test('TTS playback failure does not discard accepted music or prevent a stop', async () => {
+  const h = musicHarness();
+  h.queue.client.voiceTts = { audio: () => Buffer.alloc(4) };
+  h.queue.playVoiceAudio = async () => { throw new Error('TTS unavailable'); };
+  try {
+    await (await h.command()).processing;
+    assert.equal(h.queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.equal(h.voice.session.phase, 'idle');
+    assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    h.runtime.classify = async () => ({ action: 'stop', confidence: 1 });
+    await (await h.command('Останови музыку')).processing;
+    assert.equal(h.queue.closed, true);
+  } finally { await h.queue.stop(); }
+});
+
+test('leaving, voice off, stop and reset during spoken confirmation cancel audio and any delayed action', async () => {
+  for (const action of ['play', 'skip', 'stop'] as const) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
+    const h = musicHarness();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    h.queue.client.voiceTts = { audio: () => Buffer.alloc(4) };
+    h.queue.playVoiceAudio = async (_pcm, signal) => {
+      entered();
+      await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+    };
+    let skips = 0;
+    h.queue.skip = () => { skips++; return true; };
+    h.runtime.classify = async () => ({ action: action === 'play' ? 'unknown' : action, confidence: 1 });
+    try {
+      if (action !== 'play') await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
+      const { capture, processing } = await h.command(action === 'play' ? 'включи Numb' : action === 'skip' ? 'Следующий трек' : 'Останови музыку');
+      await started;
+      if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
+      else if (cancel === 'off') h.voice.setEnabled(false);
+      else if (cancel === 'stop') await h.queue.stop(); else h.voice.reset();
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(capture.signal.aborted, true);
+      assert.equal(skips, 0);
+      assert.equal(h.queue.closed, cancel === 'stop', 'cancelled voice stop must not execute later');
+      assert.equal(h.queue.tracks.length, 0, 'a cancelled confirmation must not enqueue again');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
   }
 });
 

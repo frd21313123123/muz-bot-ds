@@ -1,5 +1,5 @@
 import type { Track } from '../types.js';
-import { normalizeSpeech } from './intents.js';
+import { commandLeadIn, normalizeSpeech, playerControlRequest } from './intents.js';
 import { toTrack, type VideoInfo } from '../utils/ytdlp.js';
 
 export type MusicVariant = 'live' | 'remix' | 'cover' | 'acoustic' | 'instrumental';
@@ -29,14 +29,14 @@ export interface MusicMetadata {
   video(url: string, signal: AbortSignal): Promise<VideoInfo>;
 }
 export interface MusicDiagnostic {
-  stage: 'routing' | 'search' | 'policy' | 'selection' | 'fallback';
+  stage: 'routing' | 'search' | 'policy' | 'selection' | 'fallback' | 'rejected';
   ms?: number;
   candidates?: number;
   bestTrack?: number;
   confidence?: number;
   nextTool?: MusicDecision['next_tool'];
   policy?: MusicResultPolicy['search_result_policy'];
-  reason?: 'model' | 'selection' | 'empty' | 'metadata';
+  reason?: 'model' | 'selection' | 'empty' | 'metadata' | 'no_result' | 'no_match' | 'routing' | 'confidence';
 }
 export type MusicRequest = { kind: 'search' | 'video'; query: string };
 
@@ -59,16 +59,38 @@ export function musicState(message: string, request: MusicRequest, player?: Musi
 
 // Extract from the original transcript: speech normalization would destroy URLs
 // and punctuation in song titles. Only command boundaries are interpreted here.
-export function extractMusicRequest(message: string): MusicRequest | null {
+export function extractMusicRequest(message: string, allowBare = false): MusicRequest | null {
   if (message.length > 1000) return null;
-  const match = /^(?:включи|поставь|сыграй|воспроизведи)\s+(.+)$/iu.exec(message.trim());
-  if (!match) return null;
-  const query = match[1]!.replace(/^(?:песню|трек)\s+/iu, '').trim();
+  // Conversational lead-ins and punctuation inserted by ASR are not part of
+  // the title. Stay anchored: never fish a command out of a longer sentence.
+  const cleaned = commandLeadIn(message);
+  if (playerControlRequest(cleaned)) return null;
+  // ASR can lose the quiet initial consonant in "включи". Interpret this
+  // leading command form only; never rewrite words inside the query.
+  const match = /^(?:(?:можешь|можете)\s+)?(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть|хочу послушать|послушаем)(?:\s*[,:\u2014-]\s*|\s+)(.+)$/iu.exec(cleaned);
+  if (!match && !allowBare) return null;
+  if (!match) {
+    const bare = normalizeSpeech(cleaned);
+    // Only the speaker's command window permits a bare title/artist. Do not
+    // turn conversations, negations, questions or incomplete commands into music.
+    if (!bare || bare.split(' ').length > 35 || cleaned.includes('?')
+      || /^(?:не|нет|если|сначала|потом|затем|как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|я|мы|ты|вы|он|она|мне нравится|добавь|найди|очисти|not|no|never|don t|dont|do not|please don t)(?: |$)/u.test(bare)
+      || /(?:^| )(?:next|skip|pause|resume|stop|louder|quieter)(?: |$)/u.test(bare)
+      || /(?:^| )(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть)(?: |$)/u.test(bare)) return null;
+  }
+  const target = (match?.[1] ?? cleaned).trim();
+  if (/^(?:песню|трек)\s+из[.!…]*$/iu.test(target)) return null;
+  // "Song from Luntik" needs its music noun: searching only "from Luntik"
+  // predominantly returns cartoon episodes, unlike an explicit song title.
+  const query = /^(?:песню|трек)\s+из\s+/iu.test(target)
+    ? target.replace(/^песню\s+/iu, 'песня ')
+    : target.replace(/^(?:песню|трек)\s+/iu, '').trim();
   const words = normalizeSpeech(query);
-  if (!words || /^(?:на паузу|паузу|музыку(?: снова| обратно| дальше)?|снова|обратно|дальше|песню|трек|эту(?: песню)?|этот(?: трек)?|ее|его|это|ту|тот|первую|первый|следующую(?: песню| музыку)?|следующий(?: трек)?)$/u.test(words)) return null;
+  if (!words || /^(?:на паузу|паузу|музыку(?: снова| обратно| дальше)?|музыка|воспроизведение|снова|обратно|дальше|песню|песни|песня|трек|эту(?: песню)?|этот(?: трек)?|ее|его|это|то|ту|тот|первую|первый|следующую(?: песню| музыку)?|следующий(?: трек)?)$/u.test(words)) return null;
   // Conjunctions in names (e.g. "Numb и Encore") are valid. A second command
   // verb after a command separator is not a song name.
-  if (/(?:^|\s)(?:и|или|потом|затем)\s+(?:не\s+)?(?:включ\p{L}*|постав\p{L}*|сыгра\p{L}*|воспроизвед\p{L}*|останов\p{L}*|останавли\p{L}*|выключ\p{L}*|пропуст\p{L}*|продолж\p{L}*|возобнов\p{L}*|сдела\p{L}*|пауза|следующий|громче|тише|стоп)(?:\s|$)/iu.test(words)) return null;
+  if (/(?:^|\s)(?:и|или|потом|затем)\s+(?:не\s+)?(?:включ\p{L}*|ключи\p{L}*|постав\p{L}*|сыгра\p{L}*|воспроизвед\p{L}*|запуст\p{L}*|проигра\p{L}*|останов\p{L}*|останавли\p{L}*|выключ\p{L}*|пропуст\p{L}*|продолж\p{L}*|возобнов\p{L}*|сдела\p{L}*|пауза|следующий|громче|тише|стоп)(?:\s|$)/iu.test(words)) return null;
+  if (/[,;.!]\s*(?:не\s+)?(?:включ\p{L}*|ключи\p{L}*|постав\p{L}*|сыгра\p{L}*|воспроизвед\p{L}*|запуст\p{L}*|проигра\p{L}*|останов\p{L}*|выключ\p{L}*|пропуст\p{L}*|продолж\p{L}*|возобнов\p{L}*|сдела\p{L}*|пауза|следующий|громче|тише|стоп)(?:\s|$)/iu.test(query)) return null;
   if (/https?:\/\//iu.test(query)) {
     let url: URL;
     try { url = new URL(query.replace(/[.!…]+$/u, '')); } catch { return null; }
@@ -85,29 +107,17 @@ export function validConfidence(value: number): boolean {
   return Number.isFinite(value) && value >= 0.6 && value <= 1;
 }
 
-export async function resolveMusicRequest(message: string, requestedBy: string, backend: MusicBackend,
+export async function resolveMusicRequest(message: string, requestedBy: string, _backend: MusicBackend,
   metadata: MusicMetadata, signal: AbortSignal, diagnostic?: (event: MusicDiagnostic) => void,
-  player?: MusicPlayerState): Promise<Track | null> {
-  const request = extractMusicRequest(message);
+  _player?: MusicPlayerState): Promise<Track | null> {
+  const request = extractMusicRequest(message, true);
   if (!request) return null;
   signal.throwIfAborted();
-  let policy: MusicDecision['search_result_policy'] = 'play_first_result';
-  let deferredPolicy = false;
-  const started = performance.now();
-  try {
-    const decision = await backend.decideMusic(musicState(message, request, player), signal);
-    signal.throwIfAborted();
-    diagnostic?.({ stage: 'routing', ms: Math.round(performance.now() - started),
-      nextTool: decision.next_tool, policy: decision.search_result_policy, confidence: decision.confidence });
-    if (!validConfidence(decision.confidence) || decision.next_tool === 'unknown' || decision.next_tool === 'player_control') return null;
-    // The model selects a route; code verifies that it matches the actual input.
-    if (decision.next_tool !== (request.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search')) return null;
-    policy = decision.search_result_policy;
-    deferredPolicy = decision.defer_result_policy === true;
-  } catch {
-    signal.throwIfAborted();
-    diagnostic?.({ stage: 'fallback', reason: 'model' });
-  }
+  // A parsed music request is a search query, not a label the model must know.
+  // Laya is reserved for player controls; artist/title queries go straight to
+  // YouTube with its own spelling correction and relevance order.
+  diagnostic?.({ stage: 'routing', ms: 0, nextTool: request.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search',
+    policy: 'play_first_result' });
   let candidates: VideoInfo[];
   const searchStart = performance.now();
   try {
@@ -131,46 +141,8 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
   diagnostic?.({ stage: 'search', candidates: usable.length, ms: Math.round(performance.now() - searchStart),
     ...(usable.length ? {} : { reason: 'empty' as const }) });
   if (!usable.length) return null;
-  const selectionCandidates = usable.map(({ info, track }, i) => ({
-    index: i, title: track.title.slice(0, 240), artist: (info.artist || info.channel || info.uploader || '').slice(0, 120),
-    duration: track.duration.slice(0, 32),
-  }));
-  if (request.kind === 'search' && deferredPolicy) {
-    const policyStart = performance.now();
-    try {
-      if (!backend.decideMusicResults) throw new Error('Result policy unavailable');
-      const decision = await backend.decideMusicResults(request.query, selectionCandidates, signal);
-      signal.throwIfAborted();
-      diagnostic?.({ stage: 'policy', policy: decision.search_result_policy, confidence: decision.confidence,
-        ms: Math.round(performance.now() - policyStart) });
-      if (!validConfidence(decision.confidence)) throw new Error('Weak result policy');
-      if (decision.search_result_policy === 'no_result') return null;
-      // The voice product takes the first candidate for a plain title. Model
-      // reranking is available when the request explicitly qualifies a version.
-      policy = musicVariant(request.query) ? decision.search_result_policy : 'play_first_result';
-    } catch {
-      signal.throwIfAborted();
-      diagnostic?.({ stage: 'fallback', reason: 'model' });
-      policy = 'play_first_result';
-    }
-  }
-  let index = 0;
-  if (request.kind === 'search' && policy === 'rerank_results' && usable.length > 1) {
-    const selectionStart = performance.now();
-    try {
-      const selection = await backend.rerankMusic(request.query, selectionCandidates, signal);
-      signal.throwIfAborted();
-      if (selection.no_match === true && selection.best_track === -1 && validConfidence(selection.confidence)) return null;
-      if (!Number.isInteger(selection.best_track) || !usable[selection.best_track] || !validConfidence(selection.confidence)) {
-        throw new Error('Invalid selection');
-      }
-      index = selection.best_track;
-    } catch {
-      signal.throwIfAborted();
-      diagnostic?.({ stage: 'fallback', reason: 'selection' });
-    }
-    diagnostic?.({ stage: 'selection', bestTrack: index, ms: Math.round(performance.now() - selectionStart) });
-  }
+  // YouTube's relevance order is authoritative, including for live/remix/etc.
+  // Neither routing nor candidates need a model decision for a parsed query.
   signal.throwIfAborted();
-  return usable[index]!.track;
+  return usable[0]!.track;
 }

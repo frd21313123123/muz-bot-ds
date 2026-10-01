@@ -36,6 +36,7 @@ test('v3 worker exposes its model identity, deferred policy and explicit no-matc
   const runtime = fake(['--v3', '--none']);
   try {
     assert.equal(await runtime.start(), true); assert.equal(runtime.modelName, 'laya-muz-bot-ds-v3');
+    assert.equal(runtime.sttModelName, 'large-v3-turbo'); assert.equal(runtime.wakeModelName, 'small');
     const signal = new AbortController().signal;
     const candidates = [{ index: 0, title: 'Numb', artist: 'Linkin Park', duration: '3:00' }];
     assert.equal((await runtime.decideMusic({ message: 'включи Numb live', selected_track: null }, signal)).defer_result_policy, true);
@@ -43,6 +44,7 @@ test('v3 worker exposes its model identity, deferred policy and explicit no-matc
     assert.deepEqual(await runtime.rerankMusic('Numb live', candidates, signal), { best_track: -1, no_match: true, confidence: 0.99 });
   } finally { runtime.close(); }
   assert.equal(runtime.modelName, null);
+  assert.equal(runtime.sttModelName, null); assert.equal(runtime.wakeModelName, null);
 });
 
 test('persistent worker starts once, prioritizes commands and drops cancelled queued audio', async () => {

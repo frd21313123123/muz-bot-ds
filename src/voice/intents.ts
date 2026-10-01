@@ -44,17 +44,43 @@ export function wakeDistance(text: string, name: string): number {
   return previous[expected.length]!;
 }
 
+export function commandLeadIn(text: string): string {
+  return text.trim().replace(/^(?:(?:вот|ну|пожалуйста|слушай|давай)[\s,.:;!—-]+){1,3}/iu, '');
+}
+
+function controlAlias(text: string): string | null {
+  if (text.includes('?')) return null;
+  const words = normalizeSpeech(commandLeadIn(text)).replace(/ (?:пожалуйста|please)$/u, '');
+  if (/^(?:следующ(?:ий|ая|ее|ую)|следущий|следующе|далее|дальше|переключи|переключись|скип|скипни|некст|next|skip)(?: (?:трек|песню|песня|track|song))?$|^пропусти$/u.test(words)) return 'Следующий трек';
+  if (/^(?:pause|пауза|паузу)$/u.test(words)) return 'Поставь на паузу';
+  if (/^(?:resume|continue)$/u.test(words)) return 'Продолжи музыку';
+  if (/^(?:stop)$/u.test(words)) return 'Стоп';
+  if (/^(?:louder)$/u.test(words)) return 'Сделай громче';
+  if (/^(?:quieter)$/u.test(words)) return 'Сделай тише';
+  return null;
+}
+
+// Closed control prefixes take priority over a free-form YouTube query.
+export function playerControlRequest(text: string): boolean {
+  const words = normalizeSpeech(controlAlias(text) ?? commandLeadIn(text));
+  return /^(?:следующ\p{L}*|пропуст\p{L}*|скип\p{L}*|пауз\p{L}*|продолж\p{L}*|возобнов\p{L}*|приостанов\p{L}*|останов\p{L}*|стоп|выключ\p{L}*|отключ\p{L}*|выйди|выйти|громк\p{L}*|громче|тише|погромче|потише|установ\p{L}*|увелич\p{L}*|уменьш\p{L}*|сдела\p{L}*)(?: |$)/u.test(words)
+    || /^(?:поставь|поставить) (?:(?:на )?паузу|громкость|звук)(?: |$)|^сними с паузы(?: |$)|^хватит играть(?: |$)|^на паузу(?: |$)|^музыка на паузе(?: |$)/u.test(words);
+}
+
 // Generic "turn it on" means resume only when an existing track is paused.
 // Keep song titles and any extra words outside this closed set.
 export function contextualCommand(text: string, paused: boolean): string {
-  const words = normalizeSpeech(text);
+  const cleaned = commandLeadIn(text);
+  const alias = controlAlias(cleaned);
+  if (alias) return alias;
+  const words = normalizeSpeech(cleaned);
   if (paused && !text.includes('?') && (
     /^(включи|включить|включай)( музыку| воспроизведение)?( снова| обратно| дальше)?$/.test(words)
     || /^(продолжай|продолжи|продолжить|возобнови|возобновить)( музыку| воспроизведение| играть)?$/.test(words)
   )) {
     return 'Продолжи музыку';
   }
-  return text;
+  return cleaned;
 }
 
 // A closed decision model cannot supply arbitrary arguments. Parse numbers in code.
@@ -92,7 +118,8 @@ export function parseVolume(text: string): number | null {
 export function unsupportedSpeech(text: string): boolean {
   const words = normalizeSpeech(text).split(' ');
   if (!words[0] || words.length > 35
-    || words.some((word) => /^(не|нет|если|потом|затем|сначала|и|или|но)$/.test(word))) return true;
+    || words.some((word) => /^(не|нет|если|потом|затем|сначала|и|или|но|not|no|never|dont|and|or|then|but)$/.test(word))
+    || /^(?:don t|do not|please don t)(?: |$)/u.test(words.join(' '))) return true;
   if (/\?/u.test(text) || /^(как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|мне нравится|музыка на паузе)(?: |$)/u.test(words.join(' '))) return true;
   if (words.some((word) => /^(добавь|найди|поиск|сыграй|воспроизведи|очисти|плейлист|песн\p{L}*)$/u.test(word))) return true;
   if (words.includes('включи') || words.includes('включить')) return true;
