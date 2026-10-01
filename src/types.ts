@@ -3,6 +3,7 @@ import type { GuildQueue } from './utils/GuildQueue.js';
 import type { YtdlpClient } from './utils/ytdlp.js';
 import type { VoiceRuntime } from './voice/runtime.js';
 import type { VoiceSettings } from './voice/settings.js';
+import type { VoiceTts } from './voice/tts.js';
 
 export interface Track {
   url: string;
@@ -19,6 +20,7 @@ export interface MusicClient extends Client {
   ytdlp: YtdlpClient;
   voiceRuntime?: VoiceRuntime;
   voiceSettings?: VoiceSettings;
+  voiceTts?: VoiceTts;
 }
 
 export interface Command {

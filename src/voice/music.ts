@@ -99,14 +99,12 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
   const request = extractMusicRequest(message);
   if (!request) return null;
   signal.throwIfAborted();
-  let policy: MusicDecision['search_result_policy'] = 'play_first_result';
-  let deferredPolicy = false;
   const started = performance.now();
   try {
     const decision = await backend.decideMusic(musicState(message, request, player), signal);
     signal.throwIfAborted();
     diagnostic?.({ stage: 'routing', ms: Math.round(performance.now() - started),
-      nextTool: decision.next_tool, policy: decision.search_result_policy, confidence: decision.confidence });
+      nextTool: decision.next_tool, policy: 'play_first_result', confidence: decision.confidence });
     if (!validConfidence(decision.confidence)) {
       diagnostic?.({ stage: 'rejected', reason: 'confidence' });
       return null;
@@ -120,8 +118,6 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
       diagnostic?.({ stage: 'rejected', reason: 'routing' });
       return null;
     }
-    policy = decision.search_result_policy;
-    deferredPolicy = decision.defer_result_policy === true;
   } catch {
     signal.throwIfAborted();
     diagnostic?.({ stage: 'fallback', reason: 'model' });
@@ -149,55 +145,8 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
   diagnostic?.({ stage: 'search', candidates: usable.length, ms: Math.round(performance.now() - searchStart),
     ...(usable.length ? {} : { reason: 'empty' as const }) });
   if (!usable.length) return null;
-  const selectionCandidates = usable.map(({ info, track }, i) => ({
-    index: i, title: track.title.slice(0, 240), artist: (info.artist || info.channel || info.uploader || '').slice(0, 120),
-    duration: track.duration.slice(0, 32),
-  }));
-  // Plain titles follow the product rule: play the first usable search result.
-  // A second model call can wrongly reject valid titles (including ASR spelling
-  // variations). Only an explicit version requires judging the candidates.
-  const variant = request.kind === 'search' ? musicVariant(request.query) : null;
-  if (request.kind === 'search' && !variant) policy = 'play_first_result';
-  if (request.kind === 'search' && deferredPolicy && variant) {
-    const policyStart = performance.now();
-    try {
-      if (!backend.decideMusicResults) throw new Error('Result policy unavailable');
-      const decision = await backend.decideMusicResults(request.query, selectionCandidates, signal);
-      signal.throwIfAborted();
-      diagnostic?.({ stage: 'policy', policy: decision.search_result_policy, confidence: decision.confidence,
-        ms: Math.round(performance.now() - policyStart) });
-      if (!validConfidence(decision.confidence)) throw new Error('Weak result policy');
-      if (decision.search_result_policy === 'no_result') {
-        diagnostic?.({ stage: 'rejected', reason: 'no_result' });
-        return null;
-      }
-      policy = decision.search_result_policy;
-    } catch {
-      signal.throwIfAborted();
-      diagnostic?.({ stage: 'fallback', reason: 'model' });
-      policy = 'play_first_result';
-    }
-  }
-  let index = 0;
-  if (request.kind === 'search' && policy === 'rerank_results' && usable.length > 1) {
-    const selectionStart = performance.now();
-    try {
-      const selection = await backend.rerankMusic(request.query, selectionCandidates, signal);
-      signal.throwIfAborted();
-      if (selection.no_match === true && selection.best_track === -1 && validConfidence(selection.confidence)) {
-        diagnostic?.({ stage: 'rejected', reason: 'no_match' });
-        return null;
-      }
-      if (!Number.isInteger(selection.best_track) || !usable[selection.best_track] || !validConfidence(selection.confidence)) {
-        throw new Error('Invalid selection');
-      }
-      index = selection.best_track;
-    } catch {
-      signal.throwIfAborted();
-      diagnostic?.({ stage: 'fallback', reason: 'selection' });
-    }
-    diagnostic?.({ stage: 'selection', bestTrack: index, ms: Math.round(performance.now() - selectionStart) });
-  }
+  // YouTube's relevance order is authoritative, including for live/remix/etc.
+  // Laya only routes the request; candidates never return to the model.
   signal.throwIfAborted();
-  return usable[index]!.track;
+  return usable[0]!.track;
 }

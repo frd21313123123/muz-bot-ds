@@ -6,6 +6,7 @@ import { prepareYtdlp } from './utils/ytdlp.js';
 import { requireFfmpeg } from './utils/stream.js';
 import { VoiceRuntime } from './voice/runtime.js';
 import { VoiceSettings } from './voice/settings.js';
+import { LocalTts } from './voice/tts.js';
 
 async function main(): Promise<void> {
   if (!process.env.DISCORD_TOKEN) throw new Error('Укажите DISCORD_TOKEN в .env');
@@ -19,6 +20,9 @@ async function main(): Promise<void> {
   client.voiceSettings = new VoiceSettings();
   await client.voiceSettings.load().catch(() => console.error('[Voice] Не удалось прочитать настройки имени.'));
   client.voiceRuntime = new VoiceRuntime();
+  const tts = new LocalTts();
+  client.voiceTts = tts;
+  console.log(await tts.load() ? '[TTS] Piper готов.' : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
   const voiceReady = await client.voiceRuntime.start().catch(() => false);
   console.log(voiceReady ? `[Voice] Whisper + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; повторное включение через /voice on.'));

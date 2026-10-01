@@ -14,6 +14,8 @@
     "normalize:audio": "npm run build && node dist/src/normalize-audio.js",
     "update:ytdlp": "npm run build && node dist/src/update-ytdlp.js",
     "setup:voice": "npm run build && node dist/src/setup-voice.js",
+    "setup:tts": "npm run build && node dist/src/setup-tts.js",
+    "test:tts": "npm run build && node dist/integration/tts.js",
     "test:voice": "npm run build && node dist/integration/voice.js"
   },
   "engines": {

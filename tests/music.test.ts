@@ -69,14 +69,14 @@ test('conversational and ASR command forms retain a song-from request without ac
     'Включить Numb или сыграть Sonne']) assert.equal(extractMusicRequest(text), null, text);
 });
 
-test('plain requests take first result and version requests rerank', async () => {
+test('plain and version requests preserve search order without calling a selector', async () => {
   const plain = harness();
   assert.equal((await plain.resolve('включи Numb'))?.videoId, 'aaaaaaaaaaa');
   assert.deepEqual(plain.calls, ['route', 'search:Numb']);
   const live = harness();
   const track = await live.resolve('включи Numb live');
-  assert.equal(track?.videoId, 'bbbbbbbbbbb'); assert.equal(track?.requestedBy, 'Alice');
-  assert.deepEqual(live.calls, ['route', 'search:Numb live', 'rerank']);
+  assert.equal(track?.videoId, 'aaaaaaaaaaa'); assert.equal(track?.requestedBy, 'Alice');
+  assert.deepEqual(live.calls, ['route', 'search:Numb live']);
   assert.equal(JSON.stringify(live.events).includes('Numb'), false);
 });
 
@@ -91,20 +91,18 @@ test('v3 state contains the parsed original query and canonical video URL', () =
   assert.equal(musicVariant('Numb акустическая версия'), 'acoustic');
 });
 
-test('v3 policy receives real candidates only for an explicit version; plain titles take the first', async () => {
-  for (const query of ['Numb', 'Numb live']) {
+test('v3 candidate policy and reranking are bypassed for every version qualifier', async () => {
+  for (const query of ['Numb', 'Numb live', 'Numb remix', 'Numb cover', 'Numb acoustic',
+    'Numb instrumental', 'Numb концертная версия', 'Numb ремикс', 'Numb кавер']) {
     let policyCalls = 0;
     const h = harness({ decideMusic: deferredRoute,
-      decideMusicResults: async (actualQuery, candidates) => {
-        policyCalls++; assert.equal(actualQuery, query); assert.equal(candidates.length, 2);
-        assert.equal(candidates[1]!.title, entries[1]!.title);
-        return { search_result_policy: 'rerank_results', confidence: 0.99 };
-      } });
-    assert.equal((await h.resolve(`включи ${query}`))?.videoId, query === 'Numb' ? 'aaaaaaaaaaa' : 'bbbbbbbbbbb');
-    assert.equal(policyCalls, query === 'Numb' ? 0 : 1);
-    assert.equal(h.calls.includes('rerank'), query !== 'Numb');
+      decideMusicResults: async () => { policyCalls++; throw new Error('Must not call'); },
+      rerankMusic: async () => { assert.fail('Must not compare candidates'); } });
+    assert.equal((await h.resolve(`включи ${query}`))?.videoId, 'aaaaaaaaaaa');
+    assert.equal(policyCalls, 0);
+    assert.equal(h.calls.includes('rerank'), false);
     assert.deepEqual(h.events.filter((event) => ['search', 'policy'].includes(event.stage)).map((event) => event.stage),
-      query === 'Numb' ? ['search'] : ['search', 'policy']);
+      ['search']);
   }
 });
 
@@ -128,26 +126,18 @@ test('Moscow never sleep and speech spelling variants cannot be vetoed by a seco
   assert.equal(original.calls.includes('rerank'), false);
 });
 
-test('v3 explicit no-result and no-match decisions abstain; weak or failed decisions fall back', async () => {
+test('obsolete candidate decisions cannot veto or replace the first search result', async () => {
   for (const confidence of [0.99, 0.59]) {
     const noResults = harness({ decideMusic: deferredRoute,
       decideMusicResults: async () => ({ search_result_policy: 'no_result', confidence }) });
-    assert.equal((await noResults.resolve('включи Numb live'))?.videoId ?? null, confidence >= 0.6 ? null : 'aaaaaaaaaaa');
-    assert.equal(noResults.events.some(event => event.reason === 'no_result'), confidence >= 0.6);
+    assert.equal((await noResults.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');
+    assert.equal(noResults.events.some(event => event.reason === 'no_result'), false);
     const noMatch = harness({ rerankMusic: async () => ({ best_track: -1, no_match: true, confidence }) });
-    assert.equal((await noMatch.resolve('включи Numb live'))?.videoId ?? null, confidence >= 0.6 ? null : 'aaaaaaaaaaa');
-    assert.equal(noMatch.events.some(event => event.reason === 'no_match'), confidence >= 0.6);
+    assert.equal((await noMatch.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');
+    assert.equal(noMatch.events.some(event => event.reason === 'no_match'), false);
   }
   const failed = harness({ decideMusic: deferredRoute, decideMusicResults: async () => { throw new Error('worker failed'); } });
   assert.equal((await failed.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');
-});
-
-test('abort during v3 policy never falls back or returns a track', async () => {
-  const h = harness({ decideMusic: deferredRoute, decideMusicResults: async () => {
-    h.controller.abort(); throw new Error('cancelled');
-  } });
-  await assert.rejects(h.resolve('включи Numb live'));
-  assert.equal(h.events.some((event) => event.stage === 'fallback'), false);
 });
 
 test('direct route never searches or reranks', async () => {
@@ -167,13 +157,13 @@ test('failed routing falls back but explicit unknown and weak decisions abstain'
   }
 });
 
-test('invalid reranking and inference errors fall back to first candidate', async () => {
+test('obsolete invalid indices and candidate inference errors never affect search order', async () => {
   for (const selection of [{ best_track: -1, confidence: 1 }, { best_track: 9, confidence: 1 },
     { best_track: 0.5, confidence: 1 }, { best_track: 1, confidence: 0.59 },
     { best_track: 1, confidence: NaN }, { best_track: 1, confidence: 2 }]) {
     const h = harness({ rerankMusic: async () => selection });
     assert.equal((await h.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');
-    assert.ok(h.events.some((event) => event.reason === 'selection'));
+    assert.equal(h.events.some((event) => event.reason === 'selection'), false);
   }
   const h = harness({ rerankMusic: async () => { throw new Error('unavailable'); } });
   assert.equal((await h.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');
@@ -184,15 +174,15 @@ test('empty or failed searches do not create a track; invalid entries and duplic
     assert.equal(await harness({}, { searchCandidates }).resolve('включи Numb'), null);
   }
   const h = harness({}, { searchCandidates: async () => [{ id: 'bad' }, entries[0]!, entries[0]!, entries[1]!] });
-  assert.equal((await h.resolve('включи Numb live'))?.videoId, 'bbbbbbbbbbb');
+  assert.equal((await h.resolve('включи Numb live'))?.videoId, 'aaaaaaaaaaa');
   assert.equal(h.events.find((event) => event.stage === 'search')?.candidates, 2);
 });
 
-test('aborts in routing, search and reranking never fall back or return a track', async () => {
-  for (const stage of ['route', 'search', 'rerank']) {
+test('aborts in routing and search never fall back or return a track', async () => {
+  for (const stage of ['route', 'search']) {
     const h = harness(
       stage === 'route' ? { decideMusic: async () => { h.controller.abort(); throw new Error('cancel'); } }
-        : stage === 'rerank' ? { rerankMusic: async () => { h.controller.abort(); return { best_track: 1, confidence: 1 }; } } : {},
+        : {},
       stage === 'search' ? { searchCandidates: async () => { h.controller.abort(); return entries; } } : {},
     );
     await assert.rejects(h.resolve('включи Numb live'));

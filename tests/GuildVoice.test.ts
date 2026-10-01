@@ -11,6 +11,8 @@ import type { VoiceRuntime } from '../src/voice/runtime.js';
 import type { MusicClient } from '../src/types.js';
 import type { MusicDecision, MusicResultPolicy } from '../src/voice/music.js';
 import { toTrack } from '../src/utils/ytdlp.js';
+import type { VoiceDecision } from '../src/voice/intents.js';
+import type { Confirmation } from '../src/voice/tts.js';
 
 const waitFor = async (condition: () => boolean): Promise<void> => {
   const end = Date.now() + 2000;
@@ -35,7 +37,7 @@ function musicHarness() {
   } as unknown as MusicClient;
   const runtime = Object.assign(new EventEmitter(), { ready: true,
     transcribe: async () => text,
-    classify: async () => { throw new Error('Music must not reach player classifier'); },
+    classify: async (): Promise<VoiceDecision> => { throw new Error('Music must not reach player classifier'); },
     decideMusic: async (): Promise<MusicDecision> => ({ next_tool: 'youtube_music_search', query_source: 'message', search_result_policy: 'rerank_results', confidence: 1 }),
     rerankMusic: async () => ({ best_track: 1, confidence: 1 }),
     decideMusicResults: async (): Promise<MusicResultPolicy> => ({ search_result_policy: 'rerank_results', confidence: 1 }),
@@ -66,7 +68,7 @@ test('voice music starts an empty queue, attributes the speaker, and preserves b
       if (busy) await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
       const { capture, processing } = await h.command();
       await processing; await capture.complete(Buffer.from([0, 0]));
-      assert.equal(h.queue.currentTrack?.videoId, busy ? 'ccccccccccc' : 'bbbbbbbbbbb');
+      assert.equal(h.queue.currentTrack?.videoId, busy ? 'ccccccccccc' : 'aaaaaaaaaaa');
       const requested = busy ? h.queue.tracks[0] : h.queue.currentTrack;
       assert.equal(requested?.requestedBy, 'Alice');
       assert.equal(h.queue.tracks.length, busy ? 1 : 0);
@@ -132,20 +134,15 @@ test('worker failure after recognition keeps music fallback alive and detaches l
   } finally { await h.queue.stop(); }
 });
 
-test('leaving, voice off, stop and reset during search, policy or reranking prevent enqueue', async () => {
-  for (const stage of ['search', 'policy', 'rerank']) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
+test('leaving, voice off, stop and reset during routing or search prevent enqueue', async () => {
+  for (const stage of ['route', 'search']) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
     const h = musicHarness();
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const deferred = async () => { entered(); await new Promise<void>((resolve) => { release = resolve; }); };
     if (stage === 'search') h.metadata.searchCandidates = async () => { await deferred(); return [{ id: 'aaaaaaaaaaa', title: 'Numb' }]; };
-    else if (stage === 'policy') {
-      h.runtime.decideMusic = async () => ({ next_tool: 'youtube_music_search', query_source: 'message',
-        search_result_policy: 'play_first_result', defer_result_policy: true, confidence: 1 });
-      h.runtime.decideMusicResults = async () => { await deferred(); return { search_result_policy: 'rerank_results', confidence: 1 }; };
-    }
-    else h.runtime.rerankMusic = async () => { await deferred(); return { best_track: 1, confidence: 1 }; };
+    else h.runtime.decideMusic = async () => { await deferred(); return { next_tool: 'youtube_music_search', query_source: 'message', search_result_policy: 'rerank_results', confidence: 1 }; };
     try {
       const { capture, processing } = await h.command(); await started;
       if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
@@ -156,6 +153,82 @@ test('leaving, voice off, stop and reset during search, policy or reranking prev
       assert.equal(h.queue.currentTrack, null); assert.equal(h.queue.tracks.length, 0);
       assert.equal(h.voice.session.phase, cancel === 'stop' ? 'disabled' : 'idle');
     } finally { release?.(); await h.queue.stop(); }
+  }
+});
+
+test('successful voice actions speak the matching confirmation once, with a separate queued reply', async () => {
+  const h = musicHarness();
+  const replies: Confirmation[] = [];
+  const pcm = Buffer.alloc(4800);
+  h.queue.client.voiceTts = { audio: (key) => { replies.push(key); return pcm; } };
+  h.queue.playVoiceAudio = async (audio, signal) => { assert.equal(audio, pcm); assert.equal(signal.aborted, false); };
+  try {
+    await (await h.command('включи Numb live')).processing;
+    await (await h.command('включи песню из Лунтика')).processing;
+    assert.deepEqual(replies, ['play', 'queued']);
+    h.queue.pause = () => true; h.queue.resume = () => true; h.queue.skip = () => true;
+    for (const [message, action] of [['Поставь на паузу', 'pause'], ['Продолжи музыку', 'resume'],
+      ['Следующий трек', 'skip'], ['Громкость 70', 'volume_set'], ['Громче', 'volume_up'], ['Тише', 'volume_down']] as const) {
+      h.runtime.classify = async () => ({ action, confidence: 1 });
+      const { capture, processing } = await h.command(message);
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(replies.at(-1), action);
+    }
+    h.queue.pause = () => false;
+    const count = replies.length;
+    h.runtime.classify = async () => ({ action: 'pause', confidence: 1 });
+    await (await h.command('Поставь на паузу')).processing;
+    assert.equal(replies.length, count, 'no successful-action reply for a no-op');
+    h.runtime.classify = async () => ({ action: 'stop', confidence: 1 });
+    await (await h.command('Останови музыку')).processing;
+    assert.equal(replies.at(-1), 'stop');
+    assert.equal(h.queue.closed, true);
+    assert.equal(h.voice.session.phase, 'disabled');
+  } finally { await h.queue.stop(); }
+});
+
+test('TTS playback failure does not discard accepted music or prevent a stop', async () => {
+  const h = musicHarness();
+  h.queue.client.voiceTts = { audio: () => Buffer.alloc(4) };
+  h.queue.playVoiceAudio = async () => { throw new Error('TTS unavailable'); };
+  try {
+    await (await h.command()).processing;
+    assert.equal(h.queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.equal(h.voice.session.phase, 'idle');
+    assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    h.runtime.classify = async () => ({ action: 'stop', confidence: 1 });
+    await (await h.command('Останови музыку')).processing;
+    assert.equal(h.queue.closed, true);
+  } finally { await h.queue.stop(); }
+});
+
+test('leaving, voice off, stop and reset during spoken confirmation cancel audio and any delayed action', async () => {
+  for (const action of ['play', 'skip', 'stop'] as const) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
+    const h = musicHarness();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    h.queue.client.voiceTts = { audio: () => Buffer.alloc(4) };
+    h.queue.playVoiceAudio = async (_pcm, signal) => {
+      entered();
+      await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+    };
+    let skips = 0;
+    h.queue.skip = () => { skips++; return true; };
+    h.runtime.classify = async () => ({ action: action === 'play' ? 'unknown' : action, confidence: 1 });
+    try {
+      if (action !== 'play') await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
+      const { capture, processing } = await h.command(action === 'play' ? 'включи Numb' : action === 'skip' ? 'Следующий трек' : 'Останови музыку');
+      await started;
+      if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
+      else if (cancel === 'off') h.voice.setEnabled(false);
+      else if (cancel === 'stop') await h.queue.stop(); else h.voice.reset();
+      await processing; await capture.complete(Buffer.alloc(2));
+      assert.equal(capture.signal.aborted, true);
+      assert.equal(skips, 0);
+      assert.equal(h.queue.closed, cancel === 'stop', 'cancelled voice stop must not execute later');
+      assert.equal(h.queue.tracks.length, 0, 'a cancelled confirmation must not enqueue again');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
   }
 });
 

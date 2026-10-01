@@ -7,7 +7,7 @@ import { performance } from 'node:perf_hooks';
 import { VoiceRuntime } from '../src/voice/runtime.js';
 import { contextualCommand, isWakePhrase, validateIntent, type VoiceAction } from '../src/voice/intents.js';
 import { requireFfmpeg } from '../src/utils/stream.js';
-import { extractMusicRequest, musicState, musicVariant, resolveMusicRequest, validConfidence, type MusicDecision } from '../src/voice/music.js';
+import { extractMusicRequest, musicState, resolveMusicRequest, validConfidence, type MusicDecision } from '../src/voice/music.js';
 
 const cases: [string, VoiceAction, boolean?][] = [
   ['Следующий трек', 'skip'], ['Пропусти текущую музыку', 'skip'],
@@ -103,17 +103,12 @@ try {
     console.log(`Music route ${index + 1}: ${decision.next_tool}, ${decision.search_result_policy}, confidence=${decision.confidence.toFixed(3)} (${Math.round(performance.now() - start)} ms)`);
     assert.equal(decision.next_tool, route, `Music route ${index + 1}`);
     assert.ok(validConfidence(decision.confidence), `Music confidence ${index + 1}`);
-    if (decision.defer_result_policy && musicVariant(request.query)) {
-      const results = [message.replace(/^(включи|поставь|сыграй|воспроизведи)\s+/iu, ''), 'Linkin Park - Numb Lyrics']
-        .map((title, i) => ({ index: i, title, artist: 'Linkin Park', duration: '3:00' }));
-      const resultPolicy = await runtime.decideMusicResults(request.query, results, signal);
-      assert.ok(validConfidence(resultPolicy.confidence), `Music result policy confidence ${index + 1}`);
-      assert.notEqual(resultPolicy.search_result_policy, 'no_result', `Music result policy ${index + 1}`);
-      if (policy === 'rerank_results') assert.equal(resultPolicy.search_result_policy, policy, `Music result policy ${index + 1}`);
-    } else if (!decision.defer_result_policy) assert.equal(decision.search_result_policy, policy, `Music policy ${index + 1}`);
+    // The trained routing head may still suggest reranking; the bot deliberately
+    // ignores that field and always keeps the search order.
   }
   for (const message of ['Включи Moscow never sleep', 'Включи Moscow Never Sleeps',
-    'Вот включи песню из Лунтика', 'Включи, песню из Лунтика', 'Включить песню из Лунтика']) {
+    'Вот включи песню из Лунтика', 'Включи, песню из Лунтика', 'Включить песню из Лунтика',
+    'включи Numb live', 'включи Numb remix', 'включи Numb кавер']) {
     const expectedQuery = message.includes('Лунтика') ? 'песня из Лунтика' : extractMusicRequest(message)!.query;
     const track = await resolveMusicRequest(message, 'Voice check', {
       decideMusic: (state, signal) => runtime.decideMusic(state, signal),
@@ -121,43 +116,11 @@ try {
       rerankMusic: async () => { assert.fail('Plain song requests must bypass reranking'); },
     }, { searchCandidates: async (query) => {
       assert.equal(query, expectedQuery);
-      return [{ id: 'aaaaaaaaaaa', title: 'Music pipeline fixture' }];
+      return [{ id: 'aaaaaaaaaaa', title: 'First search result' }, { id: 'bbbbbbbbbbb', title: 'Other candidate' }];
     },
       video: async () => { assert.fail('Song title must use search'); } }, signal);
     assert.equal(track?.videoId, 'aaaaaaaaaaa');
-    console.log('Plain voice request pipeline: PASS');
-  }
-  for (const [index, version] of ['Live in Texas', 'Remix', 'Cover', 'Acoustic', 'Instrumental'].entries()) {
-    const query = `Linkin Park Numb ${version}`;
-    const otherVersion = version === 'Remix' ? 'Instrumental' : 'Remix';
-    const candidates = ['Linkin Park - Numb', `Linkin Park - Numb ${version}`, 'Linkin Park - Numb Lyrics',
-      'Linkin Park - Numb Official Music Video', `Linkin Park - Numb ${otherVersion}`].map((title, i) => ({
-      index: i, title, artist: 'Linkin Park', duration: '3:00',
-    }));
-    const start = performance.now();
-    const selected = await runtime.rerankMusic(query, candidates, signal);
-    console.log(`Music selection ${index + 1}: index=${selected.best_track}, confidence=${selected.confidence.toFixed(3)} (${Math.round(performance.now() - start)} ms)`);
-    assert.equal(selected.best_track, 1, `Music selection ${index + 1}`);
-    assert.ok(validConfidence(selected.confidence), `Music selection confidence ${index + 1}`);
-  }
-  if (runtime.modelName === 'laya-muz-bot-ds-v3') {
-    for (const version of ['live', 'remix', 'cover', 'acoustic', 'instrumental']) {
-      const candidates = ['Linkin Park - Numb', 'Linkin Park - Numb Lyrics', 'Linkin Park - Numb Official Music Video',
-        `Linkin Park - Numb ${version === 'remix' ? 'instrumental' : 'remix'}`, `Linkin Park - Numb ${version}`]
-        .map((title, index) => ({ index, title, artist: 'Linkin Park', duration: '3:00' }));
-      const selection = await runtime.rerankMusic(`Linkin Park Numb ${version}`, candidates, signal);
-      assert.equal(selection.best_track, 4, `Last candidate ${version}`);
-      assert.ok(validConfidence(selection.confidence), `Last candidate confidence ${version}`);
-      console.log(`V3 last candidate ${version}: index=${selection.best_track}, confidence=${selection.confidence.toFixed(3)}`);
-    }
-    const candidates = ['Rammstein - Sonne', 'Linkin Park - Numb live', 'Rammstein - Sonne Lyrics',
-      'Rammstein - Sonne remix', 'Rammstein - Sonne live'].map((title, index) => ({
-      index, title, artist: index === 1 ? 'Linkin Park' : 'Rammstein', duration: '3:00',
-    }));
-    const selection = await runtime.rerankMusic('Rammstein Sonne live', candidates, signal);
-    assert.equal(selection.best_track, 4, 'Artist among two live candidates');
-    assert.ok(validConfidence(selection.confidence), 'Artist selection confidence');
-    console.log(`V3 artist among live candidates: index=${selection.best_track}, confidence=${selection.confidence.toFixed(3)}`);
+    console.log('First search result pipeline: PASS');
   }
   // Optional local WAV fixtures: [{file, action}] or [{file, wakeName}]. Never print the transcript.
   const manifest = process.env.VOICE_TEST_FIXTURES;

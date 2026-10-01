@@ -39,7 +39,7 @@ export interface VoiceHost {
   paused?(): boolean;
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
-  execute(intent: VoiceIntent): Promise<void | boolean>;
+  execute(intent: VoiceIntent, signal: AbortSignal): Promise<void | boolean>;
   playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean): Promise<boolean>;
   diagnostic?(event: VoiceDiagnostic): void;
 }
@@ -166,7 +166,7 @@ export class VoiceSession {
             this.host.diagnostic?.({ stage: 'decision', modelAction: safeAction, confidence: Number.isFinite(decision.confidence) ? decision.confidence : 0,
               action: intent.action, ms: Math.round(performance.now() - decisionStart) });
             if (intent.action !== 'unknown') {
-              const changed = await this.host.execute(intent);
+              const changed = await this.host.execute(intent, controller.signal);
               this.host.diagnostic?.({ stage: 'execution', action: intent.action, changed: changed !== false });
             }
           } else if (this.phase === 'idle' && isWakePhrase(text, this.host.wakeName())) {

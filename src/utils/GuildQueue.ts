@@ -83,10 +83,6 @@ export class GuildQueue {
   }
 
   async playVoiceCue(signal: AbortSignal): Promise<void> {
-    const connection = this.connection;
-    if (this.closed || !connection || connection.state.status !== VoiceConnectionStatus.Ready || signal.aborted) throw new Error('Cue cancelled');
-    this.cueState?.finish();
-    const player = createAudioPlayer();
     // 220 ms sine tone with a short envelope, raw 48 kHz stereo PCM.
     const samples = 10_560;
     const pcm = Buffer.alloc(samples * 4);
@@ -95,7 +91,17 @@ export class GuildQueue {
       const value = Math.round(Math.sin(2 * Math.PI * 880 * i / 48_000) * 6000 * envelope);
       pcm.writeInt16LE(value, i * 4); pcm.writeInt16LE(value, i * 4 + 2);
     }
-    const resource = createAudioResource(Readable.from([pcm]), { inputType: StreamType.Raw });
+    await this.playVoiceAudio(pcm, signal, 2000);
+  }
+
+  async playVoiceAudio(pcm: Buffer, signal: AbortSignal, timeoutMs = 15000): Promise<void> {
+    const connection = this.connection;
+    if (this.closed || !connection || connection.state.status !== VoiceConnectionStatus.Ready || signal.aborted) throw new Error('Cue cancelled');
+    if (!pcm.length || pcm.length % 4 || pcm.length > 48000 * 4 * 12) throw new Error('Invalid voice audio');
+    this.cueState?.finish();
+    const player = createAudioPlayer();
+    const resource = createAudioResource(Readable.from([Buffer.from(pcm)]), { inputType: StreamType.Raw, inlineVolume: true });
+    resource.volume?.setVolume(this.volume);
     configureMusicEncoder(resource);
     const wasPlaying = this.player.state.status === AudioPlayerStatus.Playing;
     if (wasPlaying) { this.pausedAt = Date.now(); this.player.pause(); }
@@ -119,7 +125,7 @@ export class GuildQueue {
         }
         if (error || signal.aborted) reject(error ?? new Error('Cue cancelled')); else resolve();
       };
-      const timer = setTimeout(() => finish(new Error('Cue timeout')), 2000);
+      const timer = setTimeout(() => finish(new Error('Cue timeout')), timeoutMs);
       this.cueState = { resumeAfter: wasPlaying, finish };
       signal.addEventListener('abort', abort, { once: true });
       player.once(AudioPlayerStatus.Idle, () => finish());
