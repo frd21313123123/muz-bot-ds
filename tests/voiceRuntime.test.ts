@@ -5,9 +5,69 @@ import os from 'node:os';
 import { once } from 'node:events';
 import { mkdtemp, rm, rmdir } from 'node:fs/promises';
 import { VoiceRuntime } from '../src/voice/runtime.js';
+import { voiceProfile, voiceDirectory } from '../src/voice/profile.js';
 
-const fake = (extra: string[] = [], options: { autoRestart?: boolean; recoveryDelayMs?: number; requestTimeoutMs?: number } = {}) => new VoiceRuntime({ command: process.execPath,
-  args: [path.resolve('tests/fixtures/voice-worker.mjs'), ...extra], prepared: true, requestTimeoutMs: 300, ...options });
+const fake = (extra: string[] = [], options: { autoRestart?: boolean; recoveryDelayMs?: number; requestTimeoutMs?: number; idleTimeoutMs?: number } = {}) => new VoiceRuntime({ command: process.execPath,
+  args: [path.resolve('tests/fixtures/voice-worker.mjs'), ...extra], prepared: true, profile: 'heavy', requestTimeoutMs: 300, ...options });
+
+test('light profile defaults to a separate environment and rejects invalid profile names', () => {
+  assert.equal(voiceProfile(''), 'light'); assert.equal(voiceProfile(' HEAVY '), 'heavy');
+  assert.notEqual(voiceDirectory('light'), voiceDirectory('heavy'));
+  assert.throws(() => voiceProfile('gpu'));
+});
+
+test('light controls and song selection work without starting any model process', async () => {
+  const runtime = new VoiceRuntime({ profile: 'light', prepared: false, command: 'nonexistent-worker' });
+  const signal = new AbortController().signal;
+  const candidates = [{ index: 0, title: 'Radio Ga Ga', artist: 'Queen', duration: '5:00' }];
+  assert.equal((await runtime.classify('Сделай громче', signal)).action, 'volume_up');
+  assert.equal((await runtime.classify('Не пропускай', signal)).action, 'unknown');
+  assert.equal((await runtime.decideMusic({ message: 'Включи песню Radio Ga Ga', selected_track: null }, signal)).next_tool, 'youtube_music_search');
+  assert.equal((await runtime.decideMusic({ message: 'Поставь на паузу', selected_track: null }, signal)).next_tool, 'player_control');
+  assert.equal((await runtime.decideMusicResults('Radio Ga Ga', candidates, signal)).search_result_policy, 'play_first_result');
+  assert.equal((await runtime.rerankMusic('Radio Ga Ga', candidates, signal)).best_track, 0);
+  const aborted = new AbortController(); aborted.abort();
+  await assert.rejects(runtime.classify('Следующий', aborted.signal));
+  assert.equal(runtime.ready, false); runtime.close();
+});
+
+test('voice worker stays loaded for all owners, unloads after the last one and can reload', async () => {
+  const runtime = fake([], { idleTimeoutMs: 35 });
+  const first = {}, second = {}; let launches = 0;
+  runtime.on('available', () => { launches++; });
+  try {
+    assert.deepEqual(await Promise.all([runtime.acquire(first), runtime.acquire(second)]), [true, true]);
+    runtime.release(first); await new Promise(resolve => setTimeout(resolve, 70));
+    assert.equal(runtime.ready, true, 'another guild is still listening');
+    const unloaded = once(runtime, 'unavailable'); runtime.release(second); await unloaded;
+    assert.equal(runtime.ready, false);
+    assert.equal(await runtime.acquire(first), true); assert.equal(launches, 2);
+    runtime.release(first);
+  } finally { runtime.close(); }
+});
+
+test('unloading waits for active ASR and disabling while loading does not retain models', async () => {
+  const runtime = fake([], { idleTimeoutMs: 15 }); const owner = {};
+  try {
+    const loading = runtime.acquire(owner); runtime.release(owner);
+    assert.equal(await loading, true);
+    const unloaded = once(runtime, 'unavailable');
+    const reply = await runtime.transcribe(Buffer.from([1, 0]), new AbortController().signal, false);
+    assert.equal(reply, '1', 'the idle timer must not interrupt ASR');
+    await unloaded; assert.equal(runtime.ready, false);
+  } finally { runtime.close(); }
+});
+
+test('disabling the last listener cancels recovery of an unused failed worker', async () => {
+  const runtime = fake(['--hang'], { autoRestart: true, recoveryDelayMs: 80, requestTimeoutMs: 30 });
+  const owner = {}; let launches = 0; runtime.on('available', () => { launches++; });
+  try {
+    assert.equal(await runtime.acquire(owner), true);
+    await assert.rejects(runtime.classify('Следующий', new AbortController().signal));
+    runtime.release(owner); await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(launches, 1); assert.equal(runtime.ready, false);
+  } finally { runtime.close(); }
+});
 
 test('ASR diagnostics expose only numeric speech metrics', async () => {
   const runtime = fake(['--metrics']);

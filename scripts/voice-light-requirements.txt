@@ -1,0 +1,7 @@
+# CPU-only recognition; no PyTorch, Transformers or Laya.
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+huggingface-hub==1.33.0
+onnxruntime==1.30.0
+numpy==2.2.6; python_version < '3.12'
+numpy==2.5.3; python_version >= '3.12'

@@ -1,6 +1,7 @@
 import { contextualCommand, isWakePhrase, modeCommand, normalizeSpeech, playerControlRequest, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
 import { extractMusicRequest, type MusicBackend, type MusicDiagnostic, type MusicPlayerState } from './music.js';
 import type { TrainingExample } from './training.js';
+import { extractRadioRequest, type RadioStation } from '../utils/radio.js';
 
 export interface VoiceDiagnostic {
   stage: 'recognition' | 'rejected' | 'decision' | 'execution' | 'error' | 'timeout' | MusicDiagnostic['stage'];
@@ -17,10 +18,10 @@ export interface VoiceDiagnostic {
   matched?: boolean;
   paused?: boolean;
   canonicalized?: boolean;
-  requestKind?: 'search' | 'video' | 'control' | 'rejected';
+  requestKind?: 'search' | 'video' | 'radio' | 'control' | 'rejected';
   modelAction?: VoiceAction;
   confidence?: number;
-  action?: VoiceAction | 'play';
+  action?: VoiceAction | 'play' | 'radio_play';
   candidates?: number;
   bestTrack?: number;
   nextTool?: MusicDiagnostic['nextTool'];
@@ -39,6 +40,7 @@ export interface VoiceHost {
   wakeName(): string;
   present(userId: string): boolean;
   paused?(): boolean;
+  radio?(): boolean;
   playerState?(): MusicPlayerState;
   training?(example: TrainingExample): void;
   cue(signal: AbortSignal): Promise<void>;
@@ -46,7 +48,8 @@ export interface VoiceHost {
   execute(intent: VoiceIntent, signal: AbortSignal): Promise<void | boolean>;
   playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean,
     diagnostic?: (event: VoiceDiagnostic) => void): Promise<boolean>;
-  feedback?(key: 'unknown' | 'not_found', signal: AbortSignal): Promise<void>;
+  playRadio?(station: RadioStation, userId: string, signal: AbortSignal, valid: () => boolean): Promise<boolean>;
+  feedback?(key: 'unknown' | 'not_found' | 'radio_unsupported', signal: AbortSignal): Promise<void>;
   diagnostic?(event: VoiceDiagnostic): void;
 }
 export interface SpeechCapture {
@@ -155,15 +158,16 @@ export class VoiceSession {
           const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName(),
             (value) => { metrics = value; });
           const paused = this.host.paused?.() ?? false;
-          const text = command ? contextualCommand(transcript, paused) : transcript;
+          const text = command ? contextualCommand(transcript, paused, this.host.radio?.() ?? false) : transcript;
           const direct = command ? modeCommand(text) : null;
-          const explicitMusic = command ? extractMusicRequest(text) : null;
-          const music = explicitMusic ?? (command ? extractMusicRequest(text, true) : null);
+          const radio = command ? extractRadioRequest(text, true) : null;
+          const explicitMusic = command && !radio ? extractMusicRequest(text) : null;
+          const music = explicitMusic ?? (command && !radio ? extractMusicRequest(text, true) : null);
           const unsupported = command && !music && unsupportedSpeech(text);
           if (command && this.host.training) example = {
             state: { phase: 'request', message: transcript, canonical_message: text,
               selected_track: null, player: this.host.playerState?.() ?? null },
-            route: music?.kind ?? (unsupported ? 'rejected' : 'control'), model_decision: null,
+            route: radio?.kind === 'station' ? 'radio' : music?.kind ?? (unsupported ? 'rejected' : 'control'), model_decision: null,
             validated_intent: { action: 'unknown' }, query: music?.query ?? null,
             outcome: 'cancelled', diagnostics: [],
           };
@@ -173,11 +177,23 @@ export class VoiceSession {
             wakeDistance: command ? undefined : wakeDistance(text, this.host.wakeName()),
             ms: Math.round(performance.now() - asrStart), words: normalizeSpeech(transcript).split(' ').filter(Boolean).length,
             paused, canonicalized: text !== transcript, matched: !command && isWakePhrase(text, this.host.wakeName()),
-            requestKind: command ? music?.kind ?? (unsupported ? 'rejected' : 'control') : undefined });
+            requestKind: command ? (radio?.kind === 'station' ? 'radio' : music?.kind ?? (unsupported ? 'rejected' : 'control')) : undefined });
           if (command) {
             // Bare titles first pass through control classification. Explicit
             // play requests remain independent of model routing/artist labels.
-            this.recognizedMusic = Boolean(music);
+            this.recognizedMusic = Boolean(music || radio?.kind === 'station');
+            if (radio) {
+              if (radio.kind === 'station' && this.host.playRadio && valid()) {
+                if (example) { example.validated_intent = { action: 'radio_play' }; example.query = radio.station.id; }
+                const changed = await this.host.playRadio(radio.station, userId, controller.signal, valid);
+                if (example) example.outcome = changed ? 'changed' : (valid() ? 'no_op' : 'cancelled');
+                report({ stage: 'execution', action: 'radio_play', changed });
+              } else {
+                if (example) { example.route = 'rejected'; example.outcome = 'rejected'; }
+                if (valid()) await this.host.feedback?.(radio.kind === 'unsupported' ? 'radio_unsupported' : 'unknown', controller.signal);
+              }
+              return;
+            }
             if (unsupported) {
               if (example) example.outcome = 'rejected';
               report({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' });

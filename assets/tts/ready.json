@@ -1,0 +1,29 @@
+{
+  "engine": "bundled",
+  "voice": "short-ru/xenia",
+  "sampleRate": 48000,
+  "channels": 2,
+  "phrases": {
+    "autoplay_on": "Автоплей включён.",
+    "autoplay_off": "Автоплей выключен.",
+    "loop_on": "Повтор включён.",
+    "loop_off": "Повтор выключен.",
+    "queue_clear": "Очередь очищена.",
+    "voice_on": "Слушаю.",
+    "voice_off": "Прослушивание выключено.",
+    "play": "Включаю.",
+    "queued": "В очереди.",
+    "radio_play": "Радио включено.",
+    "radio_not_found": "Эфир недоступен.",
+    "radio_unsupported": "Станция не поддерживается.",
+    "pause": "Пауза.",
+    "resume": "Продолжаю.",
+    "skip": "Следующий.",
+    "stop": "Останавливаю.",
+    "volume_set": "Громкость изменена.",
+    "volume_up": "Громче.",
+    "volume_down": "Тише.",
+    "unknown": "Не поняла.",
+    "not_found": "Трек не найден."
+  }
+}

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import phrases from './confirmations.json' with { type: 'json' };
+import { gunzipSync } from 'node:zlib';
 
 export type Confirmation = keyof typeof phrases;
 export interface VoiceTts { audio(key: Confirmation): Buffer | null }
@@ -15,14 +16,23 @@ export class LocalTts implements VoiceTts {
     this.clips.clear();
     this.voice = '';
     if (process.env.VOICE_TTS === '0') return false;
+    if (await this.loadCache(directory)) return true;
+    return directory === path.resolve('.runtime/tts') ? this.loadCache(path.resolve('assets/tts')) : false;
+  }
+  private async loadCache(directory: string): Promise<boolean> {
     try {
       const manifest = JSON.parse(await readFile(path.join(directory, 'ready.json'), 'utf8'));
-      if (!['piper', 'silero'].includes(manifest.engine) || typeof manifest.voice !== 'string'
+      // Adding radio replies must not disable an existing valid music cache.
+      // setup:tts fills the three new clips; unchanged old phrases stay usable.
+      const legacyPhrases = Object.fromEntries(Object.entries(phrases).filter(([key]) => !key.startsWith('radio_')));
+      const actualPhrases = JSON.stringify(manifest.phrases);
+      if (!['bundled', 'piper', 'silero'].includes(manifest.engine) || typeof manifest.voice !== 'string'
         || manifest.sampleRate !== 48000 || manifest.channels !== 2
-        || JSON.stringify(manifest.phrases) !== JSON.stringify(phrases)) return false;
+        || (actualPhrases !== JSON.stringify(phrases) && actualPhrases !== JSON.stringify(legacyPhrases))) return false;
       const loaded = new Map<Confirmation, Buffer>();
-      for (const key of Object.keys(phrases) as Confirmation[]) {
-        const pcm = await readFile(path.join(directory, `${key}.pcm`));
+      for (const key of Object.keys(manifest.phrases) as Confirmation[]) {
+        const bytes = await readFile(path.join(directory, `${key}.pcm${manifest.engine === 'bundled' ? '.gz' : ''}`));
+        const pcm = manifest.engine === 'bundled' ? gunzipSync(bytes, { maxOutputLength: 48000 * 4 * 12 }) : bytes;
         if (!pcm.length || pcm.length % 4 || pcm.length > 48000 * 4 * 12) return false;
         loaded.set(key, pcm);
       }

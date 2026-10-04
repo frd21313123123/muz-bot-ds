@@ -6,9 +6,8 @@ import type { VoiceSettings } from './voice/settings.js';
 import type { VoiceTts } from './voice/tts.js';
 import type { VoiceTrainingLog } from './voice/training.js';
 
-export interface Track {
+interface TrackInfo {
   url: string;
-  videoId: string;
   title: string;
   duration: string;
   thumbnail: string | null;
@@ -16,6 +15,21 @@ export interface Track {
   isAutoplay?: boolean;
   isLive?: boolean;
 }
+
+export interface YoutubeTrack extends TrackInfo {
+  source?: 'youtube';
+  videoId: string;
+}
+
+export interface RadioTrack extends TrackInfo {
+  source: 'radio';
+  videoId?: never;
+  stationId: string;
+  streamUrl: string;
+  isLive: true;
+}
+
+export type Track = YoutubeTrack | RadioTrack;
 
 export interface MusicClient extends Client {
   queues: Map<string, GuildQueue>;

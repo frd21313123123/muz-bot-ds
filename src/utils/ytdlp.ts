@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { Track } from '../types.js';
+import type { Track, YoutubeTrack } from '../types.js';
 import { formatDuration, videoDuration } from './duration.js';
 
 const execFileAsync = promisify(execFile);
@@ -201,7 +201,7 @@ export function isSong(info: VideoInfo): boolean {
     || Boolean(info.track?.trim() && (info.artist?.trim() || info.artists?.some((artist) => artist.trim())));
 }
 
-export function toTrack(info: VideoInfo, requestedBy: string, isAutoplay = false): Track {
+export function toTrack(info: VideoInfo, requestedBy: string, isAutoplay = false): YoutubeTrack {
   if (!info.id || !/^[\w-]{11}$/.test(info.id)) {
     throw new Error('YouTube не вернул корректный идентификатор видео.');
   }

@@ -8,7 +8,7 @@ const cut = (value: string, max: number): string => value.length > max ? `${valu
 export function nowPlayingEmbed(track: Track, autoplay = false, speed = 1): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setColor(track.isAutoplay ? 0x57f287 : 0x1db954)
-    .setTitle(track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
+    .setTitle(track.source === 'radio' ? '📻 Радио' : track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
     .setDescription(`**[${escapeMarkdown(cut(track.title, 200))}](${track.url})**`)
     .addFields(
       { name: '⏱ Длительность', value: track.isLive ? '🔴 Прямой эфир'
@@ -27,7 +27,7 @@ export function queueEmbed(queue: GuildQueue, page = 1): EmbedBuilder {
   const start = (safePage - 1) * 10;
   const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📋 Очередь воспроизведения');
   if (queue.currentTrack) {
-    embed.addFields({ name: '▶ Сейчас играет', value: `[${escapeMarkdown(cut(queue.currentTrack.title, 160))}](${queue.currentTrack.url})` });
+    embed.addFields({ name: '▶ Сейчас играет', value: `[${escapeMarkdown(cut(queue.currentTrack.title, 160))}](${queue.currentTrack.url})${queue.isRadio ? ' — 🔴 Прямой эфир' : ''}` });
   }
   const lines = queue.tracks.slice(start, start + 10)
     .map((track, i) => `\`${start + i + 1}.\` [${escapeMarkdown(cut(track.title, 100))}](${track.url}) — ${track.duration}`);
@@ -48,7 +48,7 @@ export function playerEmbed(queue: GuildQueue): EmbedBuilder {
     : `${formatDuration(elapsed)} / длительность неизвестна`;
   const embed = new EmbedBuilder()
     .setColor(paused ? 0x99aab5 : 0x1db954)
-    .setTitle(paused ? '⏸ На паузе' : track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
+    .setTitle(paused ? '⏸ На паузе' : track.source === 'radio' ? '📻 Радио' : track.isAutoplay ? '🤖 Автовоспроизведение' : '▶ Сейчас играет')
     .setDescription(`**[${escapeMarkdown(cut(track.title, 200))}](${track.url})**\n\n${progress}`)
     .addFields(
       { name: '🔊 Громкость', value: `${Math.round(queue.volume * 100)}%`, inline: true },
@@ -68,8 +68,8 @@ export function playerActionRow(queue: GuildQueue): ActionRowBuilder<ButtonBuild
     new ButtonBuilder().setCustomId('player_skip').setEmoji('⏭').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('player_stop').setEmoji('⏹').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('player_autoplay').setEmoji('♾️')
-      .setLabel(queue.autoplay ? 'Беск: Вкл' : 'Беск: Выкл').setStyle(ButtonStyle.Secondary),
+      .setLabel(queue.autoplay ? 'Беск: Вкл' : 'Беск: Выкл').setStyle(ButtonStyle.Secondary).setDisabled(queue.isRadio),
     new ButtonBuilder().setCustomId('player_loop').setEmoji('🔂')
-      .setLabel(queue.loopCurrent ? '1 трек: Вкл' : '1 трек: Выкл').setStyle(ButtonStyle.Secondary),
+      .setLabel(queue.loopCurrent ? '1 трек: Вкл' : '1 трек: Выкл').setStyle(ButtonStyle.Secondary).setDisabled(queue.isRadio),
   );
 }

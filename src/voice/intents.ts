@@ -53,7 +53,9 @@ export function commandLeadIn(text: string): string {
 // extraction; a model trained only on player controls cannot supply these labels.
 export function modeCommand(text: string): VoiceIntent | null {
   const words = normalizeSpeech(commandLeadIn(text)).replace(/ (?:пожалуйста|please)$/u, '');
-  const on = '(?:включи|включить|включай|ключи|ключить|запусти|запустить|поставь|поставить|активируй|enable|turn on)';
+  // Small Whisper sometimes spells the quiet initial consonant as "хлючи".
+  // Accept it only with a complete, known mode target below.
+  const on = '(?:включи|включить|включай|ключи|ключить|хлючи|запусти|запустить|поставь|поставить|активируй|enable|turn on)';
   const off = '(?:выключи|выключить|отключи|отключить|отключай|деактивируй|убери|останови|disable|turn off)';
   const auto = '(?:бесконечный режим(?: воспроизведения)?|режим (?:бесконечного воспроизведения|автоподбора|автоплея|рекомендаций)|бесконечное воспроизведение|бесконечную музыку|музыку бесконечно|'
     + 'авто ?плей|автопли|автоплэй|автоподбор(?: песен| музыки)?|автовоспроизведение|автоматический подбор(?: песен| музыки)?|'
@@ -113,11 +115,12 @@ export function playerControlRequest(text: string): boolean {
 
 // Generic "turn it on" means resume only when an existing track is paused.
 // Keep song titles and any extra words outside this closed set.
-export function contextualCommand(text: string, paused: boolean): string {
+export function contextualCommand(text: string, paused: boolean, radio = false): string {
   const cleaned = commandLeadIn(text);
   const alias = controlAlias(cleaned);
   if (alias) return alias;
   const words = normalizeSpeech(cleaned);
+  if (radio && !text.includes('?') && /^(?:останови|остановить|выключи|выключить) радио(?: пожалуйста)?$/u.test(words)) return 'Останови музыку';
   if (paused && !text.includes('?') && (
     /^(включи|включить|включай)( музыку| воспроизведение)?( снова| обратно| дальше)?$/.test(words)
     || /^(продолжай|продолжи|продолжить|возобнови|возобновить)( музыку| воспроизведение| играть)?$/.test(words)
@@ -207,4 +210,30 @@ export function validateIntent(text: string, decision: VoiceDecision, threshold 
   }
   if ((decision.action === 'volume_up' || decision.action === 'volume_down') && hasNumber) return { action: 'unknown' };
   return { action: decision.action };
+}
+
+// Complete commands only: a title containing "stop" or an arbitrary extra
+// word must never become a player action. Light mode needs no NLI model.
+export function ruleIntent(text: string): VoiceIntent {
+  const canonical = contextualCommand(text, false);
+  const direct = modeCommand(canonical);
+  if (direct) return direct;
+  const words = normalizeSpeech(canonical).replace(/ (?:пожалуйста|please)$/u, '');
+  if (canonical.includes('?') || /(?:^| )(?:не|нет|если|и|или|потом|затем|но|not|no|never|dont|and|or|then|but)(?: |$)/u.test(words)) return { action: 'unknown' };
+  const target = '(?:музыку|воспроизведение|песню|трек)';
+  if (/^(?:следующий трек|следующая песня|пропусти(?: (?:текущий |текущую )?(?:трек|песню|музыку))?|переключи(?: (?:трек|песню))?)$/u.test(words)) return { action: 'skip' };
+  if (new RegExp(`^(?:поставь(?: на)? паузу|на паузу|пауза|приостанови(?: ${target})?)$`, 'u').test(words)) return { action: 'pause' };
+  if (new RegExp(`^(?:сними с паузы|(?:продолжи|продолжай|возобнови)(?: ${target}| играть)?)$`, 'u').test(words)) return { action: 'resume' };
+  if (/^(?:стоп|останови(?: (?:музыку|воспроизведение|бота))?|выключи (?:музыку|бота)|отключись(?: от канала)?|выйди(?: из канала)?|хватит играть)$/u.test(words)) return { action: 'stop' };
+  if (/^(?:сделай (?:громче|погромче)|громче|погромче|(?:увеличь|повысь) (?:громкость|звук))$/u.test(words)) return { action: 'volume_up' };
+  if (/^(?:сделай (?:тише|потише)|тише|потише|(?:уменьши|снизь) (?:громкость|звук))$/u.test(words)) return { action: 'volume_down' };
+  const volume = /^(?:громкость|(?:установи|поставь|сделай) громкость|(?:увеличь|уменьши) громкость до) (?:на )?(.+?)(?: процентов| процента| процент)?$/u.exec(words);
+  if (volume) {
+    const tokens = volume[1]!.split(' ');
+    if (tokens.every(token => /^\d+$/u.test(token) || ONES[token] !== undefined)) {
+      const level = parseVolume(canonical);
+      if (level !== null) return { action: 'volume_set', level };
+    }
+  }
+  return { action: 'unknown' };
 }

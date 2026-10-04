@@ -1,0 +1,29 @@
+[Unit]
+Description=Discord music and radio bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=muzbot
+Group=muzbot
+WorkingDirectory=/srv/muz-bot-ds
+Environment=PATH=/srv/muz-bot-ds/.runtime/node/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=192
+ExecStart=/srv/muz-bot-ds/.runtime/node/bin/node /srv/muz-bot-ds/dist/src/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+MemoryAccounting=true
+CPUAccounting=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/muz-bot-ds/.runtime
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

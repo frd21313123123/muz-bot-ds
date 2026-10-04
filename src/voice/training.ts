@@ -5,10 +5,10 @@ import type { VoiceDecision, VoiceIntent } from './intents.js';
 import type { MusicPlayerState } from './music.js';
 import type { VoiceDiagnostic } from './session.js';
 
-export type TrainingIntent = VoiceIntent['action'] | 'play';
+export type TrainingIntent = VoiceIntent['action'] | 'play' | 'radio_play';
 export const NLI_QUESTIONS = { intent: { type: 'choice',
   instructions: 'Определи одно действие музыкального бота. Непонятная, отрицательная или составная просьба: unknown.',
-  criteria: { play: 'Найти и включить песню или исполнителя', skip: 'Пропустить трек, включить следующий',
+  criteria: { play: 'Найти и включить песню или исполнителя', radio_play: 'Включить прямой эфир радиостанции', skip: 'Пропустить трек, включить следующий',
     pause: 'Поставить на паузу', resume: 'Продолжить после паузы', stop: 'Остановить и отключиться',
     volume_set: 'Установить громкость в процентах', volume_up: 'Сделать громче',
     volume_down: 'Сделать тише', autoplay_on: 'Включить рекомендации YouTube', autoplay_off: 'Выключить рекомендации YouTube',
@@ -18,9 +18,9 @@ export const NLI_QUESTIONS = { intent: { type: 'choice',
 
 export interface TrainingExample {
   state: { phase: 'request'; message: string; canonical_message: string; selected_track: null; player: MusicPlayerState | null };
-  route: 'control' | 'search' | 'video' | 'rejected';
+  route: 'control' | 'search' | 'video' | 'radio' | 'rejected';
   model_decision: VoiceDecision | null;
-  validated_intent: VoiceIntent | { action: 'play' };
+  validated_intent: VoiceIntent | { action: 'play' | 'radio_play' };
   query: string | null;
   outcome: 'changed' | 'no_op' | 'rejected' | 'cancelled' | 'failed';
   diagnostics: VoiceDiagnostic[];

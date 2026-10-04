@@ -11,6 +11,8 @@
     "deploy": "npm run build && node dist/src/deploy-commands.js",
     "test": "npm run build && node dist/tests/run.js",
     "test:integration": "npm run build && node dist/integration/smoke.js",
+    "test:radio": "npm run build && node dist/integration/radio.js",
+    "test:radio:voice": "npm run build && node dist/integration/radio-voice.js",
     "normalize:audio": "npm run build && node dist/src/normalize-audio.js",
     "update:ytdlp": "npm run build && node dist/src/update-ytdlp.js",
     "setup:voice": "npm run build && node dist/src/setup-voice.js",

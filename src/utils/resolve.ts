@@ -1,4 +1,4 @@
-import type { Track } from '../types.js';
+import type { YoutubeTrack } from '../types.js';
 import { toTrack, type VideoInfo } from './ytdlp.js';
 
 export interface MetadataClient {
@@ -7,8 +7,8 @@ export interface MetadataClient {
   search(query: string): Promise<VideoInfo | null>;
 }
 
-export type ResolveResult = { type: 'single'; track: Track }
-  | { type: 'playlist'; name: string; tracks: Track[] } | null;
+export type ResolveResult = { type: 'single'; track: YoutubeTrack }
+  | { type: 'playlist'; name: string; tracks: YoutubeTrack[] } | null;
 
 const HOSTS = new Set(['youtube.com', 'www.youtube.com', 'music.youtube.com', 'm.youtube.com', 'youtu.be']);
 

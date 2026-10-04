@@ -4,8 +4,10 @@ import {
   type AudioPlayer, type VoiceConnection,
 } from '@discordjs/voice';
 import type { Message, VoiceBasedChannel } from 'discord.js';
-import type { MusicClient, Track } from '../types.js';
-import { createYtdlpStream, type ManagedAudioStream } from './stream.js';
+import type { MusicClient, Track, RadioTrack } from '../types.js';
+import { createRadioStream, createYtdlpStream, waitForAudio, type ManagedAudioStream } from './stream.js';
+import { radioStations, radioTrack, type RadioStation } from './radio.js';
+import { setTimeout as delay } from 'node:timers/promises';
 import { TrackQueue } from './TrackQueue.js';
 import { PlayerMessage } from './PlayerMessage.js';
 import { Readable } from 'node:stream';
@@ -13,6 +15,8 @@ import { GuildVoice } from '../voice/GuildVoice.js';
 import { configureMusicEncoder, validateSpeed, type MusicPlaybackOptions } from './audio.js';
 
 const IDLE_MS = 5 * 60_000;
+const AUTOPLAY_HISTORY_LIMIT = 500;
+const AUTOPLAY_SEED_LIMIT = 3;
 
 export class GuildQueue {
   readonly player: AudioPlayer = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
@@ -42,10 +46,20 @@ export class GuildQueue {
   private readonly mediaFactory: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream;
   private voiceDucking = false;
   private cueState: { resumeAfter: boolean; finish(): void } | null = null;
+  private radioRequest: { controller: AbortController; userId?: string } | null = null;
+  private radioRecovery: AbortController | null = null;
+  private playbackEpoch = 0;
+  private readonly recentTrackIds: string[] = [];
+  private readonly recentTrackIdSet = new Set<string>();
+  private readonly radioFactory: (url: string) => ManagedAudioStream;
+  private voiceWanted = true;
 
   constructor(readonly guildId: string, readonly client: MusicClient,
-    mediaFactory?: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream) {
+    mediaFactory?: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream,
+    private readonly radioOptions: { factory?: (url: string) => ManagedAudioStream;
+      startupTimeoutMs?: number; retryDelays?: readonly number[] } = {}) {
     this.mediaFactory = mediaFactory ?? ((url, options) => createYtdlpStream(client.ytdlp, url, options));
+    this.radioFactory = radioOptions.factory ?? createRadioStream;
     this.playerMessage = new PlayerMessage(client, this);
     this.player.on(AudioPlayerStatus.Idle, (oldState) => {
       if (oldState.status !== AudioPlayerStatus.Idle && oldState.resource === this.activeResource) {
@@ -63,6 +77,7 @@ export class GuildQueue {
 
   get tracks(): Track[] { return this.pending.items; }
   get isPaused(): boolean { return this.pauseRequested || this.player.state.status === AudioPlayerStatus.Paused; }
+  get isRadio(): boolean { return this.currentTrack?.source === 'radio'; }
   get wakeName(): string {
     return this.client.voiceSettings?.get(this.guildId)
       ?? this.client.guilds.cache.get(this.guildId)?.members.me?.displayName
@@ -70,10 +85,12 @@ export class GuildQueue {
   }
 
   async setVoiceEnabled(enabled: boolean): Promise<boolean> {
-    if (!enabled) { this.voice?.setEnabled(false); return true; }
+    this.voiceWanted = enabled;
+    if (!enabled) { this.voice?.setEnabled(false); this.client.voiceRuntime?.release?.(this); return true; }
     const runtime = this.client.voiceRuntime;
-    if (!runtime || !this.connection || !await runtime.start()) return false;
-    if (this.closed || !this.connection) return false;
+    if (!runtime || !this.connection) return false;
+    if (!await (runtime.acquire?.(this) ?? runtime.start())) return false;
+    if (this.closed || !this.connection || !this.voiceWanted) { runtime.release?.(this); return false; }
     if (!this.voice) this.voice = new GuildVoice(this, runtime);
     this.voice.setEnabled(true);
     return true;
@@ -167,9 +184,11 @@ export class GuildQueue {
     this.activeStream = null;
   }
 
-  private playTrack(track: Track, startSeconds = 0, paused = false, speed = this.speed): void {
+  private playTrack(track: Track, startSeconds = 0, paused = false, speed = this.speed,
+    preparedMedia?: ManagedAudioStream): void {
     this.cueState?.finish();
-    const media = this.mediaFactory(track.url, { speed, startSeconds });
+    const media = preparedMedia ?? (track.source === 'radio' ? this.radioFactory(track.streamUrl)
+      : this.mediaFactory(track.url, { speed, startSeconds }));
     let resource;
     try {
       resource = createAudioResource(media.stream, { inputType: media.type, inlineVolume: true });
@@ -185,6 +204,7 @@ export class GuildQueue {
     this.activeResource = resource;
     resource.volume?.setVolume(this.volume * (this.voiceDucking ? 0.2 : 1));
     this.currentTrack = track;
+    if (track.source !== 'radio') this.rememberTrack(track.videoId);
     this.trackOffset = startSeconds;
     this.trackSpeed = speed;
     this.pauseRequested = paused;
@@ -192,28 +212,147 @@ export class GuildQueue {
     this.player.play(resource);
     oldStream?.destroy();
     void this.playerMessage.update();
-    console.log(`[Queue:${this.guildId}] ▶ ${track.title} [${track.videoId}] • ${track.isLive ? 'live' : track.duration}`);
+    console.log(`[Queue:${this.guildId}] ▶ ${track.title} [${track.source === 'radio' ? track.stationId : track.videoId}] • ${track.isLive ? 'live' : track.duration}`);
+  }
+
+  private rememberTrack(videoId: string): void {
+    const previousIndex = this.recentTrackIds.indexOf(videoId);
+    if (previousIndex >= 0) this.recentTrackIds.splice(previousIndex, 1);
+    else this.recentTrackIdSet.add(videoId);
+    this.recentTrackIds.push(videoId);
+    if (this.recentTrackIds.length > AUTOPLAY_HISTORY_LIMIT) {
+      const expired = this.recentTrackIds.shift();
+      if (expired) this.recentTrackIdSet.delete(expired);
+    }
+  }
+
+  private async findAutoplayTracks(videoId: string, epoch: number): Promise<Track[]> {
+    const seeds = [videoId, ...this.recentTrackIds.slice().reverse().filter((id) => id !== videoId)]
+      .slice(0, AUTOPLAY_SEED_LIMIT);
+    for (const seed of seeds) {
+      try {
+        const related = await this.client.ytdlp.related(seed);
+        if (this.closed || !this.autoplay || epoch !== this.playbackEpoch) return [];
+        const excluded = new Set(this.recentTrackIdSet);
+        for (const track of this.pending.items) {
+          if (track.source !== 'radio') excluded.add(track.videoId);
+        }
+        const fresh: Track[] = [];
+        for (const track of related) {
+          if (track.source === 'radio' || excluded.has(track.videoId)) continue;
+          excluded.add(track.videoId);
+          fresh.push(track);
+        }
+        if (fresh.length) return fresh;
+      } catch (error) {
+        console.error(`[Queue:${this.guildId}] recommendations from ${seed}:`, error);
+        if (this.closed || !this.autoplay || epoch !== this.playbackEpoch) return [];
+      }
+    }
+    return [];
+  }
+
+  cancelRadioRequest(userId?: string): void {
+    if (!userId || this.radioRequest?.userId === userId) this.radioRequest?.controller.abort();
+  }
+
+  private cancelRadioRecovery(): void {
+    this.radioRecovery?.abort(); this.radioRecovery = null;
+  }
+
+  private async openRadio(station: RadioStation, requestedBy: string, signal: AbortSignal): Promise<{ track: RadioTrack; media: ManagedAudioStream }> {
+    for (const url of station.streams) {
+      signal.throwIfAborted();
+      const media = this.radioFactory(url);
+      try {
+        await waitForAudio(media, signal, this.radioOptions.startupTimeoutMs);
+        return { track: radioTrack(station, requestedBy, url), media };
+      } catch {
+        media.destroy(); signal.throwIfAborted();
+      }
+    }
+    throw new Error('Эфир радиостанции недоступен. Попробуйте другую станцию.');
+  }
+
+  async playRadio(station: RadioStation, requestedBy: string,
+    options: { signal?: AbortSignal; valid?: () => boolean; userId?: string } = {}): Promise<boolean> {
+    this.cancelRadioRequest();
+    const controller = new AbortController();
+    const request = { controller, userId: options.userId };
+    this.radioRequest = request;
+    const abort = (): void => controller.abort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) controller.abort();
+    let prepared: { track: RadioTrack; media: ManagedAudioStream } | null = null;
+    try {
+      if (this.closed || options.valid?.() === false) return false;
+      prepared = await this.openRadio(station, requestedBy, controller.signal);
+      if (this.closed || controller.signal.aborted || options.valid?.() === false) return false;
+      // Only commit after audio exists. Installation retires the old resource
+      // atomically; failed station requests leave playback and the queue intact.
+      this.playTrack(prepared.track, 0, false, 1, prepared.media);
+      prepared = null;
+      this.playbackEpoch++;
+      this.advancePending = false;
+      this.cancelRadioRecovery();
+      this.clearFade(); this.pending.clear();
+      this.autoplay = false; this.loopCurrent = false; this.speed = 1;
+      void this.playerMessage.update();
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted || this.closed) return false;
+      throw error;
+    } finally {
+      prepared?.media.destroy();
+      options.signal?.removeEventListener('abort', abort);
+      if (this.radioRequest === request) this.radioRequest = null;
+    }
+  }
+
+  private async recoverRadio(track: RadioTrack, controller: AbortController, immediate = false): Promise<boolean> {
+    const station = radioStations.find(item => item.id === track.stationId);
+    if (!station) return false;
+    const waits = immediate ? [0, ...(this.radioOptions.retryDelays ?? [1000, 2000, 4000])]
+      : this.radioOptions.retryDelays ?? [1000, 2000, 4000];
+    for (const ms of waits) {
+      try {
+        await delay(ms, undefined, { signal: controller.signal });
+        const prepared = await this.openRadio(station, track.requestedBy, controller.signal);
+        if (controller.signal.aborted || this.closed || this.currentTrack !== track) { prepared.media.destroy(); return false; }
+        this.playTrack(prepared.track, 0, false, 1, prepared.media);
+        return true;
+      } catch {
+        if (controller.signal.aborted || this.closed) return false;
+      }
+    }
+    console.error(`[Queue:${this.guildId}] Эфир ${track.stationId} недоступен после повторных подключений.`);
+    return false;
   }
 
   private async advance(): Promise<void> {
     if (this.closed || this.advancing) return;
     this.advancing = true;
     this.advancePending = false;
+    const epoch = this.playbackEpoch;
     this.activeResource = null;
     this.clearFade();
     this.destroyStream();
     try {
+      if (this.currentTrack?.source === 'radio') {
+        if (this.pauseRequested) return;
+        const controller = new AbortController(); this.radioRecovery = controller;
+        try { if (await this.recoverRadio(this.currentTrack, controller)) return; }
+        finally { if (this.radioRecovery === controller) this.radioRecovery = null; }
+        if (controller.signal.aborted || epoch !== this.playbackEpoch || this.closed) return;
+      }
       let next = this.loopCurrent && this.currentTrack ? this.currentTrack : this.pending.shift();
-      if (!next && this.autoplay && this.currentTrack) {
-        try {
-          const related = await this.client.ytdlp.related(this.currentTrack.videoId);
-          if (!this.closed && this.autoplay) this.pending.addMany(related);
-        } catch (error) {
-          console.error(`[Queue:${this.guildId}] recommendations:`, error);
-        }
+      if (!next && this.autoplay && this.currentTrack && this.currentTrack.source !== 'radio') {
+        const related = await this.findAutoplayTracks(this.currentTrack.videoId, epoch);
+        if (!this.closed && this.autoplay && epoch === this.playbackEpoch) this.pending.addMany(related);
+        if (epoch !== this.playbackEpoch) return;
         next = this.pending.shift();
       }
-      while (next && !this.closed) {
+      while (next && !this.closed && epoch === this.playbackEpoch) {
         try { this.playTrack(next); return; }
         catch (error) {
           console.error(`[Queue:${this.guildId}] track setup:`, error);
@@ -272,6 +411,7 @@ export class GuildQueue {
         connection.subscribe(this.player);
         if (!this.voice && this.client.voiceRuntime?.ready) this.voice = new GuildVoice(this, this.client.voiceRuntime);
         this.voice?.attach(connection);
+        if (this.voiceWanted && this.client.voiceRuntime) void this.setVoiceEnabled(true).catch(() => {});
         connection.on('stateChange', (oldState, newState) => {
           if (this.closed || this.connection !== connection) return;
           if (newState.status === VoiceConnectionStatus.Ready && oldState.status !== VoiceConnectionStatus.Ready) this.voice?.attach(connection);
@@ -308,20 +448,36 @@ export class GuildQueue {
   }
 
   async addTrack(track: Track): Promise<void> {
+    this.cancelRadioRequest();
     this.pending.add(track);
+    if (this.isRadio) this.leaveRadio();
     if (!this.currentTrack) await this.advance();
     void this.playerMessage.update();
   }
 
   async addTracks(tracks: Track[]): Promise<void> {
+    this.cancelRadioRequest();
     this.pending.addMany(tracks);
+    if (this.isRadio) this.leaveRadio();
     if (!this.currentTrack) await this.advance();
     void this.playerMessage.update();
   }
 
+  private leaveRadio(): void {
+    this.playbackEpoch++;
+    this.cancelRadioRecovery();
+    this.activeResource = null;
+    this.clearFade(); this.destroyStream();
+    this.currentTrack = null; this.pauseRequested = false;
+    this.player.stop(true);
+    void this.playerMessage.update();
+  }
+
   skip(): boolean {
+    this.cancelRadioRequest();
     this.cueState?.finish();
     if (!this.currentTrack) return false;
+    if (this.isRadio) { this.leaveRadio(); this.requestAdvance(); return true; }
     this.loopCurrent = false;
     const fading = Boolean(this.fadeTimer);
     this.clearFade();
@@ -347,6 +503,13 @@ export class GuildQueue {
   }
 
   pause(): boolean {
+    if (this.isRadio && !this.pauseRequested) {
+      this.cueState?.finish();
+      this.pauseRequested = true;
+      this.cancelRadioRecovery();
+      this.activeResource = null; this.destroyStream(); this.player.stop(true);
+      void this.playerMessage.update(); return true;
+    }
     if (this.cueState) { const wasPlaying = this.cueState.resumeAfter; this.cueState.resumeAfter = false; return wasPlaying; }
     if ((this.player.state.status !== AudioPlayerStatus.Playing && this.player.state.status !== AudioPlayerStatus.Buffering)
       || this.pauseRequested) return false;
@@ -357,6 +520,18 @@ export class GuildQueue {
   }
 
   resume(): boolean {
+    if (this.currentTrack?.source === 'radio' && this.pauseRequested) {
+      this.cueState?.finish();
+      const track = this.currentTrack;
+      this.pauseRequested = false;
+      const controller = new AbortController(); this.radioRecovery = controller;
+      void this.recoverRadio(track, controller, true).then(ok => {
+        if (!ok && !controller.signal.aborted && this.currentTrack === track && !this.closed) {
+          this.leaveRadio(); this.requestAdvance();
+        }
+      }).finally(() => { if (this.radioRecovery === controller) this.radioRecovery = null; });
+      void this.playerMessage.update(); return true;
+    }
     if (this.cueState) { const wasPaused = !this.cueState.resumeAfter; this.cueState.resumeAfter = true; return wasPaused; }
     if (this.player.state.status !== AudioPlayerStatus.Paused
       && !(this.player.state.status === AudioPlayerStatus.Buffering && this.pauseRequested)) return false;
@@ -377,6 +552,7 @@ export class GuildQueue {
 
   setSpeed(speed: number): void {
     validateSpeed(speed);
+    if (this.isRadio) throw new Error('Скорость прямого эфира всегда 1×.');
     if (this.closed) throw new Error('Очередь уже остановлена.');
     if (speed === this.speed) return;
     if (this.fadeTimer) throw new Error('Подождите завершения переключения трека.');
@@ -397,6 +573,7 @@ export class GuildQueue {
   }
 
   setAutoplay(value: boolean): boolean {
+    if (this.isRadio && value) throw new Error('Рекомендации недоступны во время радио.');
     this.autoplay = value;
     if (value) this.loopCurrent = false;
     void this.playerMessage.update();
@@ -407,6 +584,7 @@ export class GuildQueue {
     return this.setLoop(!this.loopCurrent);
   }
   setLoop(value: boolean): boolean {
+    if (this.isRadio && value) throw new Error('Повтор недоступен во время радио.');
     this.loopCurrent = value;
     if (value) this.autoplay = false;
     void this.playerMessage.update();
@@ -421,7 +599,10 @@ export class GuildQueue {
   async stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.closed = true;
+    this.playbackEpoch++;
+    this.cancelRadioRequest(); this.cancelRadioRecovery();
     this.stopping = (async () => {
+      this.voiceWanted = false; this.client.voiceRuntime?.release?.(this);
       this.voice?.destroy();
       this.voice = null;
       this.cueState?.finish();

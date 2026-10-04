@@ -2,10 +2,15 @@ import { MessageFlags, type Interaction } from 'discord.js';
 import type { MusicClient } from '../types.js';
 import { commands } from '../commands.js';
 import { canControl } from '../utils/voiceAccess.js';
+import { radioSuggestions } from '../utils/radio.js';
 
 const byName = new Map(commands.map((command) => [command.data.name, command]));
 
 export async function onInteraction(interaction: Interaction, client: MusicClient): Promise<void> {
+  if (interaction.isAutocomplete() && interaction.commandName === 'radio') {
+    await interaction.respond(radioSuggestions(interaction.options.getFocused())).catch(() => {});
+    return;
+  }
   if (interaction.isChatInputCommand()) {
     const command = byName.get(interaction.commandName);
     if (!command) return;
@@ -46,9 +51,11 @@ export async function onInteraction(interaction: Interaction, client: MusicClien
         await queue.stop();
         break;
       case 'player_autoplay':
+        if (queue.isRadio) { await interaction.reply({ content: 'ℹ️ Рекомендации недоступны во время радио.', flags: MessageFlags.Ephemeral }); break; }
         await interaction.reply({ content: `♾ Бесконечное воспроизведение ${queue.toggleAutoplay() ? 'включено' : 'выключено'}.`, flags: MessageFlags.Ephemeral });
         break;
       case 'player_loop':
+        if (queue.isRadio) { await interaction.reply({ content: 'ℹ️ Повтор недоступен во время радио.', flags: MessageFlags.Ephemeral }); break; }
         await interaction.reply({ content: `🔂 Повтор трека ${queue.toggleLoop() ? 'включён' : 'выключен'}.`, flags: MessageFlags.Ephemeral });
         break;
       default:

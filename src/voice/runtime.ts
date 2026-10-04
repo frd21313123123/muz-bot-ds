@@ -6,9 +6,13 @@ import path from 'node:path';
 import type { VoiceBackend, SpeechMetrics } from './session.js';
 import type { VoiceDecision } from './intents.js';
 import type { MusicCandidate, MusicDecision, MusicSelection, MusicState, MusicResultPolicy } from './music.js';
+import { extractMusicRequest } from './music.js';
+import { playerControlRequest } from './intents.js';
+import { ruleIntent } from './intents.js';
+import { voiceDirectory, voiceProfile, type VoiceProfile } from './profile.js';
 
 export const VOICE_DIR = path.resolve('.runtime/voice');
-export const voicePython = (): string => path.join(VOICE_DIR, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+export const voicePython = (profile = voiceProfile()): string => path.join(voiceDirectory(profile), process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 
 interface Request {
   id: number;
@@ -28,6 +32,7 @@ export interface VoiceFailure {
 }
 
 export class VoiceRuntime extends EventEmitter implements VoiceBackend {
+  readonly profile: VoiceProfile;
   ready = false;
   modelName: string | null = null;
   sttModelName: string | null = null;
@@ -43,26 +48,60 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
   private stopped = false;
   private recoveryTimer: NodeJS.Timeout | null = null;
   private recoveryAttempts = 0;
+  private owners = new Set<object>();
+  private unloadTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: { command?: string; args?: string[]; prepared?: boolean;
-    requestTimeoutMs?: number; autoRestart?: boolean; recoveryDelayMs?: number } = {}) { super(); }
+    requestTimeoutMs?: number; startupTimeoutMs?: number; autoRestart?: boolean; recoveryDelayMs?: number;
+    profile?: VoiceProfile; idleTimeoutMs?: number } = {}) { super(); this.profile = options.profile ?? voiceProfile(); }
+
+  get prepared(): boolean {
+    return this.options.prepared ?? (existsSync(voicePython(this.profile)) && existsSync(path.join(voiceDirectory(this.profile), 'ready.json')));
+  }
+
+  async acquire(owner: object): Promise<boolean> {
+    this.owners.add(owner); this.clearUnload();
+    const ready = await this.start();
+    if (!ready) this.release(owner);
+    return ready;
+  }
+  release(owner: object): void {
+    this.owners.delete(owner);
+    if (!this.owners.size && this.recoveryTimer && !this.ready) {
+      clearTimeout(this.recoveryTimer); this.recoveryTimer = null; this.stopped = true;
+    }
+    this.scheduleUnload();
+  }
+  private clearUnload(): void { if (this.unloadTimer) clearTimeout(this.unloadTimer); this.unloadTimer = null; }
+  private scheduleUnload(): void {
+    this.clearUnload();
+    const timeout = this.options.idleTimeoutMs ?? 60_000;
+    // Let a pending load settle first; start() arms this again on completion.
+    if (this.owners.size || this.stopped || !timeout || !this.ready) return;
+    this.unloadTimer = setTimeout(() => {
+      this.unloadTimer = null;
+      if (this.owners.size) return;
+      if (this.active || this.waiting.length) this.scheduleUnload(); else this.close();
+    }, timeout);
+    this.unloadTimer.unref();
+  }
 
   async start(): Promise<boolean> {
     this.stopped = false;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
-    if (this.ready) return true;
+    if (this.ready) { this.scheduleUnload(); return true; }
     if (this.starting) return this.starting;
     this.starting = this.launch();
-    try { return await this.starting; } finally { this.starting = null; }
+    try { return await this.starting; } finally { this.starting = null; this.scheduleUnload(); }
   }
 
   private async launch(): Promise<boolean> {
-    const prepared = this.options.prepared ?? (existsSync(voicePython()) && existsSync(path.join(VOICE_DIR, 'ready.json')));
-    if (!prepared) return false;
-    const child = spawn(this.options.command ?? voicePython(), this.options.args ?? ['-u', path.resolve('scripts/voice_worker.py')], {
+    const directory = voiceDirectory(this.profile);
+    if (!this.prepared) return false;
+    const child = spawn(this.options.command ?? voicePython(this.profile), this.options.args ?? ['-u', path.resolve('scripts/voice_worker.py')], {
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', HF_HOME: path.join(VOICE_DIR, 'cache'),
+      env: { ...process.env, VOICE_PROFILE: this.profile, PYTHONIOENCODING: 'utf-8', HF_HOME: path.join(directory, 'cache'),
         HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', USE_TF: '0', TOKENIZERS_PARALLELISM: 'false' },
     });
     this.child = child;
@@ -71,7 +110,7 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     return new Promise<boolean>((resolve) => {
       let settled = false;
       const finish = (ok: boolean): void => { if (!settled) { settled = true; clearTimeout(timer); resolve(ok); } };
-      const timer = setTimeout(() => { if (this.child === child) this.fail('startup_timeout'); finish(false); }, 90_000);
+      const timer = setTimeout(() => { if (this.child === child) this.fail('startup_timeout'); finish(false); }, this.options.startupTimeoutMs ?? 90_000);
       const lines = createInterface({ input: child.stdout });
       lines.on('line', (line) => {
         if (this.child !== child) return;
@@ -125,7 +164,13 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     this.timeout = null;
     const child = this.child;
     this.child = null;
-    child?.kill();
+    if (child && child.exitCode === null && !child.killed) {
+      if (process.platform === 'win32' && child.pid) {
+        // Windows venv launchers have a Python child; terminate our whole tree.
+        spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+          .once('error', () => child.kill());
+      } else child.kill();
+    }
     for (const request of [this.active, ...this.waiting]) {
       if (request) { request.cleanup(); request.reject(new Error('Голосовой обработчик недоступен.')); }
     }
@@ -151,6 +196,7 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   close(): void {
     this.stopped = true;
+    this.owners.clear(); this.clearUnload();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     this.fail('closed');
@@ -168,6 +214,7 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   private request(payload: Record<string, unknown>, signal: AbortSignal, priority: boolean): Promise<unknown> {
     if (!this.ready || signal.aborted) return Promise.reject(new Error('Голосовой запрос отменён.'));
+    this.scheduleUnload();
     return new Promise((resolve, reject) => {
       const abort = (): void => {
         const index = this.waiting.indexOf(request);
@@ -212,6 +259,8 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
   }
 
   async classify(text: string, signal: AbortSignal): Promise<VoiceDecision> {
+    signal.throwIfAborted();
+    if (this.profile === 'light') return { action: ruleIntent(text).action, confidence: 1 };
     const result = await this.request({ op: 'classify', text: text.slice(0, 1000) }, signal, true);
     if (!result || typeof result !== 'object') throw new Error('Invalid decision');
     const decision = result as VoiceDecision;
@@ -221,6 +270,13 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   async decideMusic(state: MusicState, signal: AbortSignal): Promise<MusicDecision> {
     if (state.message.length > 1000 || state.selected_track !== null) throw new Error('Invalid music state');
+    signal.throwIfAborted();
+    if (this.profile === 'light') {
+      const parsed = extractMusicRequest(state.message, true);
+      return { next_tool: parsed?.kind === 'video' ? 'direct_youtube_video' : parsed ? 'youtube_music_search'
+        : playerControlRequest(state.message) ? 'player_control' : 'unknown',
+      query_source: 'message', search_result_policy: 'play_first_result', confidence: 1 };
+    }
     const result = await this.request({ op: 'music_route', state }, signal, true);
     if (!result || typeof result !== 'object') throw new Error('Invalid music decision');
     const decision = result as MusicDecision;
@@ -235,6 +291,8 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   async rerankMusic(query: string, candidates: MusicCandidate[], signal: AbortSignal): Promise<MusicSelection> {
     this.validateCandidates(query, candidates);
+    signal.throwIfAborted();
+    if (this.profile === 'light') return { best_track: 0, confidence: 1 };
     const result = await this.request({ op: 'music_rerank', query, candidates }, signal, true);
     if (!result || typeof result !== 'object') throw new Error('Invalid music selection');
     const selection = result as MusicSelection;
@@ -254,6 +312,8 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   async decideMusicResults(query: string, candidates: MusicCandidate[], signal: AbortSignal): Promise<MusicResultPolicy> {
     this.validateCandidates(query, candidates);
+    signal.throwIfAborted();
+    if (this.profile === 'light') return { search_result_policy: 'play_first_result', confidence: 1 };
     const result = await this.request({ op: 'music_policy', query, candidates }, signal, true);
     if (!result || typeof result !== 'object') throw new Error('Invalid music policy');
     const policy = result as MusicResultPolicy;

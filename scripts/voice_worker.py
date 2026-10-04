@@ -8,7 +8,11 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
-RUNTIME = ROOT / ".runtime" / "voice"
+PROFILE = os.environ.get('VOICE_PROFILE', 'light').strip().lower()
+if PROFILE not in ('light', 'heavy'):
+    raise ValueError('VOICE_PROFILE must be light or heavy')
+RUNTIME = ROOT / '.runtime' / ('voice-light' if PROFILE == 'light' else 'voice')
+WHISPER_CACHE = ROOT / '.runtime' / 'voice' / 'whisper'
 DEFAULT_LAYA_MODEL = "convaiinnovations/laya-multilingual"
 os.environ.setdefault("HF_HOME", str(RUNTIME / "cache"))
 os.environ.setdefault("USE_TF", "0")
@@ -29,7 +33,9 @@ def laya_source(manifest, prepare=False):
 COMMAND_PROMPT = ("Музыкальный плеер: включи, выключи, бесконечный режим, автоплей, повтор трека, "
                   "очисти очередь, голосовое управление, поставь на паузу, продолжи музыку, "
                   "следующий трек, останови музыку, громкость, сделай громче, сделай тише. "
-                  "Linkin Park, Numb, live, remix, cover. Монеточка, Земфира, Кино, Сплин, Баста, Би-2.")
+                  "Linkin Park, Numb, live, remix, cover. Монеточка, Земфира, Кино, Сплин, Баста, Би-2. "
+                  "Радио: Европа Плюс, Europa Plus, Ретро FM, Retro FM, Дорожное радио, Русское радио, "
+                  "Авторадио, DFM, Радио ENERGY, NRJ, Love Radio, Радио Дача, Наше радио.")
 
 # Give the short, ambiguous name competing spellings instead of telling the
 # recognizer that it must hear the bot's name. Similar words remain non-wakes.
@@ -282,30 +288,54 @@ def classify(agent, text):
 
 def whisper_names(manifest, prepare=False):
     if prepare:
+        if PROFILE == 'light':
+            name = os.environ.get('WHISPER_LIGHT_MODEL', 'small').strip()
+            if name not in ('tiny', 'base', 'small'):
+                raise ValueError('WHISPER_LIGHT_MODEL must be multilingual tiny, base or small')
+            return name, name
         return (os.environ.get("WHISPER_MODEL", "large-v3-turbo"),
                 os.environ.get("WHISPER_WAKE_MODEL", "small"))
     # Old installations used one model for both phases.
-    return manifest["whisper"], manifest.get("whisper_wake", manifest["whisper"])
+    name, wake = manifest['whisper'], manifest.get('whisper_wake', manifest['whisper'])
+    if PROFILE == 'light' and (manifest.get('profile') != 'light' or name not in ('tiny', 'base', 'small') or wake != name):
+        raise ValueError('Prepare the light profile with setup:voice')
+    return name, wake
+
+
+def light_whisper_path(manifest, prepare=False):
+    if PROFILE != 'light':
+        return None
+    configured = os.environ.get('WHISPER_LIGHT_MODEL_PATH', '').strip() if prepare else manifest.get('whisper_path')
+    if not configured:
+        return None
+    directory = Path(configured).expanduser()
+    if not directory.is_absolute():
+        directory = ROOT / directory
+    directory = directory.resolve()
+    if not all((directory / filename).is_file() for filename in ('model.bin', 'config.json', 'tokenizer.json')):
+        raise ValueError('WHISPER_LIGHT_MODEL_PATH must contain a complete CTranslate2 Whisper model')
+    return directory
 
 
 def models(prepare=False):
-    import torch
     # PyTorch's Windows wheel bundles the CUDA/cuDNN DLLs needed by CTranslate2.
     # Keep DLL-directory handles alive for the lifetime of the worker.
     dll_handles = []
-    if os.name == "nt":
-        torch_lib = str(Path(torch.__file__).parent / "lib")
-        os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
-        dll_handles.append(os.add_dll_directory(torch_lib))
-    import laya
+    if PROFILE == 'heavy':
+        import torch
+        import laya
+        if os.name == 'nt':
+            torch_lib = str(Path(torch.__file__).parent / 'lib')
+            os.environ['PATH'] = torch_lib + os.pathsep + os.environ.get('PATH', '')
+            dll_handles.append(os.add_dll_directory(torch_lib))
     from faster_whisper import WhisperModel
     import numpy as np
 
     class CommandWhisper(WhisperModel):
-        # Keep standard context for command recognition: truncating the larger
-        # encoder's window can make short utterances repeat. The small wake
-        # model retains its separately tested low-latency window.
-        encoder_frames = 3000
+        # Heavy models retain standard context: shorter windows can repeat
+        # words. Light commands pad short recordings to fifteen seconds and grow
+        # the window for longer recordings; wakes use their own window.
+        encoder_frames = 1500 if PROFILE == 'light' else 3000
         encoder_cache = None
 
         def detect_language(self, audio=None, features=None, **kwargs):
@@ -331,11 +361,11 @@ def models(prepare=False):
         def command(self, audio, prompt=None, diagnostic=False):
             self.encoder_cache = None
             frames = int(len(audio) / 16000 * 100) + 150
-            self.encoder_frames = 3000 if prompt is None else min(3000, max(600, (frames + 1) // 2 * 2))
+            self.encoder_frames = (min(3000, max(1500, (frames + 1) // 2 * 2)) if PROFILE == 'light' else 3000) if prompt is None else min(3000, max(600, (frames + 1) // 2 * 2))
             # Wake words keep the fast greedy pass. Song/artist names benefit
             # from comparing several hypotheses, without a fixed artist list.
             segments, info = self.transcribe(audio, language=None if prompt is None else "ru",
-                                          task="transcribe", beam_size=5 if prompt is None else 1, temperature=0,
+                                          task="transcribe", beam_size=5 if prompt is None and PROFILE == 'heavy' else 1, temperature=0,
                                           condition_on_previous_text=False, vad_filter=True,
                                           initial_prompt=COMMAND_PROMPT if prompt is None else prompt,
                                           without_timestamps=True, max_new_tokens=96)
@@ -348,8 +378,10 @@ def models(prepare=False):
                 return {"text": text, "metrics": {"vadMs": round(info.duration_after_vad * 1000),
                         "segments": len(segments), "rejectedSegments": len(segments) - len(accepted)}}
             return text
-    torch.set_num_threads(max(1, min(8, int(os.environ.get("VOICE_CPU_THREADS", "4")))))
-    device = os.environ.get("VOICE_DEVICE", "cpu").strip().lower()
+    threads = max(1, min(8, int(os.environ.get('VOICE_CPU_THREADS', '4'))))
+    if PROFILE == 'heavy':
+        torch.set_num_threads(threads)
+    device = 'cpu' if PROFILE == 'light' else os.environ.get("VOICE_DEVICE", "cpu").strip().lower()
     if device not in ("cpu", "cuda"):
         raise ValueError("VOICE_DEVICE must be cpu or cuda")
     if device == "cuda" and not torch.cuda.is_available():
@@ -359,33 +391,38 @@ def models(prepare=False):
     marker = RUNTIME / "ready.json"
     manifest = {} if prepare else json.loads(marker.read_text(encoding="utf-8"))
     name, wake_name = whisper_names(manifest, prepare)
+    custom_whisper = light_whisper_path(manifest, prepare)
     def load_whisper(model_name):
-        model = CommandWhisper(model_name, device=device, compute_type=compute_type, cpu_threads=torch.get_num_threads(),
-                               download_root=str(RUNTIME / "whisper"), local_files_only=not prepare)
+        model = CommandWhisper(str(custom_whisper) if custom_whisper else model_name, device=device, compute_type=compute_type, cpu_threads=threads,
+                               download_root=str(WHISPER_CACHE), local_files_only=not prepare)
         model.runtime_name = model_name
         return model
     whisper = load_whisper(name)
     wake_whisper = whisper if name == wake_name else load_whisper(wake_name)
-    laya_model, revision = laya_source(manifest, prepare)
-    if prepare and not Path(laya_model).is_dir():
-        from huggingface_hub import model_info
-        revision = model_info(laya_model).sha
-    agent = laya.load(laya_model, device=device, revision=revision)
-    agent._voice_dll_handles = dll_handles
-    print(f"Laya inference: {agent.device}", file=sys.stderr, flush=True)
+    agent, laya_model, revision = None, None, None
+    if PROFILE == 'heavy':
+        laya_model, revision = laya_source(manifest, prepare)
+        if prepare and not Path(laya_model).is_dir():
+            from huggingface_hub import model_info
+            revision = model_info(laya_model).sha
+        agent = laya.load(laya_model, device=device, revision=revision)
+        agent._voice_dll_handles = dll_handles
+        print(f'Laya inference: {agent.device}', file=sys.stderr, flush=True)
     # Warm encoder/decoder and VAD as well as Laya before the first real wake.
     for model in (whisper,) if whisper is wake_whisper else (whisper, wake_whisper):
-        model.encoder_frames = 3000 if model is whisper else 600
+        model.encoder_frames = (1500 if PROFILE == 'light' else 3000) if model is whisper else 600
         warm_segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="ru",
                                            beam_size=1, temperature=0, without_timestamps=True,
                                            max_new_tokens=8, condition_on_previous_text=False)
         list(warm_segments)
     whisper.command(np.zeros(16000, dtype=np.float32))
     wake_whisper.command(np.zeros(16000, dtype=np.float32), "")
-    agent.predict("Следующий трек", QUESTIONS)
+    if agent is not None:
+        agent.predict("Следующий трек", QUESTIONS)
     if prepare:
         temporary = marker.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps({"whisper": name, "whisper_wake": wake_name,
+        temporary.write_text(json.dumps({"profile": PROFILE, "whisper": name, "whisper_wake": wake_name,
+                                        "whisper_path": str(custom_whisper.relative_to(ROOT)) if custom_whisper and custom_whisper.is_relative_to(ROOT) else str(custom_whisper) if custom_whisper else None,
                                         "laya": laya_model, "laya_revision": revision}), encoding="utf-8")
         temporary.replace(marker)
     return whisper, wake_whisper, agent
@@ -397,7 +434,7 @@ def main():
         whisper, wake_whisper, agent = models(prepare)
     if prepare:
         return
-    print(json.dumps({"ready": True, "modelName": agent.cfg.get("model_name", "laya-multilingual"),
+    print(json.dumps({"ready": True, "modelName": agent.cfg.get("model_name", "laya-multilingual") if agent else 'rules',
                       "sttModelName": whisper.runtime_name,
                       "wakeModelName": wake_whisper.runtime_name,
                       "inferenceDevice": whisper.model.device}), flush=True)
@@ -420,6 +457,8 @@ def main():
                     prompt = WAKE_VOCABULARY.get(wake_name.strip().lower(), "") if isinstance(wake_name, str) and len(wake_name) <= 64 else None
                     model = whisper if prompt is None else wake_whisper
                     result = model.command(audio, prompt, diagnostic=True)
+                elif agent is None:
+                    raise ValueError('Light worker accepts only audio; actions are parsed in TypeScript')
                 elif request["op"] == "classify":
                     text = request["text"]
                     if not isinstance(text, str) or len(text) > 1000:

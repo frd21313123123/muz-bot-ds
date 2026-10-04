@@ -58,13 +58,23 @@ class V3Agent:
 
 class MusicWorkerTests(unittest.TestCase):
     def test_stt_upgrade_defaults_and_existing_manifests_keep_the_wake_model_explicit(self):
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.object(worker, 'PROFILE', 'heavy'), patch.dict(os.environ, {}, clear=True):
             self.assertEqual(worker.whisper_names({}, True), ('large-v3-turbo', 'small'))
-        with patch.dict(os.environ, {'WHISPER_MODEL': 'large-v3', 'WHISPER_WAKE_MODEL': 'base'}):
+        with patch.object(worker, 'PROFILE', 'heavy'), patch.dict(os.environ, {'WHISPER_MODEL': 'large-v3', 'WHISPER_WAKE_MODEL': 'base'}):
             self.assertEqual(worker.whisper_names({}, True), ('large-v3', 'base'))
             self.assertEqual(worker.whisper_names({'whisper': 'small'}), ('small', 'small'))
             self.assertEqual(worker.whisper_names({'whisper': 'large-v3-turbo', 'whisper_wake': 'small'}),
                              ('large-v3-turbo', 'small'))
+
+    def test_light_uses_one_cpu_model_and_ignores_heavy_overrides(self):
+        with patch.object(worker, 'PROFILE', 'light'), patch.dict(os.environ, {'WHISPER_MODEL': 'large-v3', 'VOICE_DEVICE': 'cuda'}, clear=True):
+            self.assertEqual(worker.whisper_names({}, True), ('small', 'small'))
+            for name in ('tiny', 'base', 'small'):
+                with patch.dict(os.environ, {'WHISPER_LIGHT_MODEL': name}):
+                    self.assertEqual(worker.whisper_names({}, True), (name, name))
+            with patch.dict(os.environ, {'WHISPER_LIGHT_MODEL': 'large-v3'}):
+                with self.assertRaises(ValueError):
+                    worker.whisper_names({}, True)
 
     def test_v3_route_uses_parsed_request_and_real_player_state(self):
         agent = V3Agent()
@@ -150,6 +160,30 @@ class MusicWorkerTests(unittest.TestCase):
                 worker.music_rerank(Agent(), "Numb live", items)
         with self.assertRaises(ValueError):
             worker.music_route(Agent(), {"message": "Numb", "selected_track": {"title": "Old"}})
+
+
+class PreparedWhisperTests(unittest.TestCase):
+    def test_runtime_uses_prepared_path_instead_of_a_new_environment_override(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(worker, 'PROFILE', 'light'):
+            directory = Path(temporary)
+            for name in ('model.bin', 'config.json', 'tokenizer.json'):
+                (directory / name).touch()
+            with patch.dict(os.environ, {'WHISPER_LIGHT_MODEL_PATH': '/missing-model'}):
+                self.assertEqual(worker.light_whisper_path({'whisper_path': temporary}), directory.resolve())
+                self.assertIsNone(worker.light_whisper_path({}))
+                with self.assertRaises(ValueError):
+                    worker.light_whisper_path({}, prepare=True)
+
+    def test_incomplete_model_fails_before_attempting_online_download(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(worker, 'PROFILE', 'light'):
+            (Path(temporary) / 'model.bin').touch()
+            with self.assertRaises(ValueError):
+                worker.light_whisper_path({'whisper_path': temporary})
+
+    def test_heavy_profile_ignores_light_model_override(self):
+        with patch.object(worker, 'PROFILE', 'heavy'), patch.dict(os.environ, {'WHISPER_LIGHT_MODEL_PATH': '/missing-model'}):
+            self.assertIsNone(worker.light_whisper_path({'whisper_path': '/missing-model'}))
+            self.assertIsNone(worker.light_whisper_path({}, prepare=True))
 
 
 if __name__ == "__main__":

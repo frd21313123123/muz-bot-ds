@@ -8,6 +8,50 @@ import { nowPlayingEmbed, playerActionRow, playerEmbed, queueEmbed } from './uti
 import { resolveQuery } from './utils/resolve.js';
 import { canControl, memberVoiceChannel } from './utils/voiceAccess.js';
 import { MIN_SPEED, MAX_SPEED } from './utils/audio.js';
+import { extractRadioRequest, findRadioStation, type RadioStation } from './utils/radio.js';
+
+async function startRadio(interaction: ChatInputCommandInteraction, client: MusicClient, station: RadioStation): Promise<unknown> {
+  if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
+  const channel = memberVoiceChannel(interaction);
+  if (!channel) return interaction.editReply('❌ Войдите в голосовой канал.');
+  const me = interaction.guild?.members.me ?? await interaction.guild?.members.fetchMe().catch(() => null);
+  const permissions = me && channel.permissionsFor(me);
+  if (!permissions?.has(PermissionsBitField.Flags.Connect) || !permissions.has(PermissionsBitField.Flags.Speak)) {
+    return interaction.editReply('❌ Нет прав на подключение и речь в этом канале.');
+  }
+  let queue = client.queues.get(interaction.guildId);
+  if (queue?.voiceChannel && queue.voiceChannel.id !== channel.id) {
+    return interaction.editReply('❌ Войдите в тот же голосовой канал, что и бот.');
+  }
+  const created = !queue;
+  if (!queue) { queue = new GuildQueue(interaction.guildId, client); client.queues.set(interaction.guildId, queue); }
+  try {
+    await queue.join(channel);
+    const valid = (): boolean => memberVoiceChannel(interaction)?.id === channel.id && !queue!.closed;
+    const requestedBy = interaction.member && 'displayName' in interaction.member
+      ? interaction.member.displayName : interaction.user.username;
+    const changed = await queue.playRadio(station, requestedBy, { valid, userId: interaction.user.id });
+    if (!changed) return interaction.editReply('ℹ️ Запрос радио отменён.');
+    queue.setPlayerChannel(interaction.channelId);
+    return interaction.editReply({ content: `📻 Включено **${escapeMarkdown(station.name)}** — прямой эфир. Очередь очищена.`,
+      allowedMentions: { parse: [] } });
+  } catch {
+    if (created && !queue.currentTrack && !queue.tracks.length) await queue.stop().catch(() => {});
+    return interaction.editReply('❌ Не удалось включить радио. Эфир недоступен; попробуйте другую станцию.');
+  }
+}
+
+const radio: Command = {
+  data: new SlashCommandBuilder().setName('radio').setDescription('📻 Включить прямой эфир радиостанции')
+    .addStringOption(option => option.setName('station').setDescription('Название радиостанции')
+      .setRequired(true).setAutocomplete(true).setMinLength(1).setMaxLength(100)),
+  async execute(interaction, client) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const station = findRadioStation(interaction.options.getString('station', true));
+    if (!station) return interaction.editReply('❌ Радиостанция не поддерживается. Выберите станцию из подсказок /radio.');
+    return startRadio(interaction, client, station);
+  },
+};
 
 const privateReply = (interaction: ChatInputCommandInteraction, content: string): Promise<unknown> =>
   interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
@@ -26,7 +70,8 @@ const voice: Command = {
     if (action === 'status') {
       const name = queue?.wakeName ?? client.voiceSettings?.get(interaction.guildId)
         ?? interaction.guild?.members.me?.displayName ?? client.user?.username ?? '';
-      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nМодели ${client.voiceRuntime?.ready ? 'готовы' : 'недоступны — выполните npm run setup:voice'}.`);
+      const runtime = client.voiceRuntime;
+      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nПрофиль: ${runtime?.profile ?? 'light'}. Модели ${runtime?.ready ? 'готовы' : runtime?.prepared ? 'разгружены; загрузятся при включении прослушивания' : 'не подготовлены — выполните npm run setup:voice'}.`);
     }
     if (!await requireController(interaction, queue)) return;
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -112,12 +157,16 @@ const join: Command = {
 };
 
 const play: Command = {
-  data: new SlashCommandBuilder().setName('play').setDescription('▶ Воспроизвести трек')
-    .addStringOption((option) => option.setName('query').setDescription('Ссылка YouTube или название')
+  data: new SlashCommandBuilder().setName('play').setDescription('▶ Воспроизвести трек или включить радио')
+    .addStringOption((option) => option.setName('query').setDescription('Ссылка YouTube, название песни или радиостанции')
       .setRequired(true).setMinLength(1).setMaxLength(500))
     .addBooleanOption((option) => option.setName('infinite').setDescription('Добавлять рекомендации после очереди')),
   async execute(interaction, client) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const radioRequest = extractRadioRequest(interaction.options.getString('query', true), true);
+    if (radioRequest?.kind === 'station') return startRadio(interaction, client, radioRequest.station);
+    if (radioRequest) return interaction.editReply(radioRequest.kind === 'unsupported'
+      ? '❌ Радиостанция не поддерживается. Выберите станцию из подсказок /radio.' : '❌ Укажите одну станцию или песню без отрицания.');
     if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
     const channel = memberVoiceChannel(interaction);
     if (!channel) return interaction.editReply('❌ Войдите в голосовой канал.');
@@ -145,17 +194,22 @@ const play: Command = {
         if (created) await queue.stop();
         return interaction.editReply('❌ Ничего не найдено.');
       }
-      if (infinite !== null) queue.setAutoplay(infinite);
+      if (memberVoiceChannel(interaction)?.id !== channel.id || queue.closed) {
+        if (created && !queue.closed && !queue.currentTrack && !queue.tracks.length) await queue.stop();
+        return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /play.');
+      }
       queue.setPlayerChannel(interaction.channelId);
-      const wasIdle = !queue.currentTrack && queue.tracks.length === 0;
+      const wasIdle = queue.isRadio || (!queue.currentTrack && queue.tracks.length === 0);
       if (result.type === 'playlist') {
         await queue.addTracks(result.tracks);
+        if (infinite !== null) queue.setAutoplay(infinite);
         return interaction.editReply({
           content: `✅ Добавлено ${result.tracks.length} треков из **${escapeMarkdown(result.name)}**${wasIdle ? ' — воспроизведение началось.' : '.'}`,
           allowedMentions: { parse: [] },
         });
       }
       await queue.addTrack(result.track);
+      if (infinite !== null) queue.setAutoplay(infinite);
       return interaction.editReply({
         content: `${wasIdle ? '▶ Воспроизведение началось' : '✅ Добавлено в очередь'}: **${escapeMarkdown(result.track.title)}**`,
         allowedMentions: { parse: [] },
@@ -235,6 +289,7 @@ const autoplay: Command = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId!);
     if (!await requireController(interaction, queue)) return;
+    if (queue!.isRadio) return privateReply(interaction, 'ℹ️ Рекомендации недоступны во время радио.');
     return privateReply(interaction, `♾ Бесконечное воспроизведение ${queue!.toggleAutoplay() ? 'включено' : 'выключено'}.`);
   },
 };
@@ -317,5 +372,5 @@ const watch: Command = {
 };
 
 export const commands: Command[] = [
-  join, play, skip, stop, pause, resume, clear, volume, speed, autoplay, nowplaying, queueCommand, player, watch, voice,
+  join, play, radio, skip, stop, pause, resume, clear, volume, speed, autoplay, nowplaying, queueCommand, player, watch, voice,
 ];

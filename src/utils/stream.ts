@@ -34,6 +34,53 @@ export interface ManagedAudioStream {
   destroy(): void;
 }
 
+export function createRadioStream(url: string): ManagedAudioStream {
+  const parsed = new URL(url);
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Некорректный адрес радио.');
+  const child = spawn(requireFfmpeg(), [
+    '-nostdin', '-hide_banner', '-loglevel', 'error',
+    '-tls_verify', '1', '-rw_timeout', '10000000', '-i', url,
+    ...musicPcmArguments(),
+  ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const output = child.stdout;
+  let closed = false;
+  const destroy = (): void => {
+    if (closed) return;
+    closed = true; child.kill(); output.destroy();
+  };
+  const fail = (): void => {
+    if (closed) return;
+    closed = true; child.kill(); output.destroy(new Error('Не удалось открыть эфир радиостанции.'));
+  };
+  // Never expose stream URLs, tokens or server error bodies in ordinary logs.
+  child.stderr.resume();
+  output.on('error', () => {});
+  child.once('error', fail);
+  child.once('close', code => { if (code !== 0) fail(); });
+  return { stream: output, type: StreamType.Raw, destroy };
+}
+
+// Leave the first PCM bytes buffered for createAudioResource. A successful
+// process spawn or HTTP response alone is not a playable broadcast.
+export async function waitForAudio(media: ManagedAudioStream, signal: AbortSignal, timeoutMs = 15_000): Promise<void> {
+  signal.throwIfAborted();
+  const stream = media.stream;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      clearTimeout(timer); signal.removeEventListener('abort', abort);
+      stream.off('readable', ready); stream.off('error', fail); stream.off('end', fail); stream.off('close', fail);
+    };
+    const fail = (): void => { cleanup(); reject(new Error('Эфир радиостанции недоступен.')); };
+    const abort = (): void => { cleanup(); reject(new Error('Запрос радио отменён.')); };
+    const ready = (): void => { if (stream.readableLength > 0) { cleanup(); resolve(); } };
+    const timer = setTimeout(fail, timeoutMs);
+    signal.addEventListener('abort', abort, { once: true });
+    stream.on('readable', ready); stream.once('error', fail); stream.once('end', fail); stream.once('close', fail);
+    if (stream.destroyed || stream.readableEnded) fail(); else ready();
+  });
+  signal.throwIfAborted();
+}
+
 export function createYtdlpStream(ytdlp: YtdlpClient, url: string, options: MusicPlaybackOptions = {}): ManagedAudioStream {
   const audioArgs = musicPcmArguments(options);
   const ffmpeg = requireFfmpeg();

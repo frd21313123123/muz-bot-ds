@@ -11,6 +11,7 @@ import type { VoiceRuntime } from '../src/voice/runtime.js';
 import type { MusicClient, Track } from '../src/types.js';
 import type { MusicDecision, MusicResultPolicy } from '../src/voice/music.js';
 import { toTrack } from '../src/utils/ytdlp.js';
+import type { ManagedAudioStream } from '../src/utils/stream.js';
 import type { VoiceDecision } from '../src/voice/intents.js';
 import type { Confirmation } from '../src/voice/tts.js';
 
@@ -22,7 +23,7 @@ const waitFor = async (condition: () => boolean): Promise<void> => {
   }
 };
 
-function musicHarness() {
+function musicHarness(radioFactory?: (url: string) => ManagedAudioStream) {
   let text = 'Муза';
   const members = new Map([['alice', { displayName: 'Alice' }]]);
   const states = new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }]]);
@@ -48,7 +49,7 @@ function musicHarness() {
   } as unknown as VoiceConnection;
   const queue = new GuildQueue('music', client, () => {
     const stream = new PassThrough(); return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
-  });
+  }, { factory: radioFactory, startupTimeoutMs: 30, retryDelays: [0, 0, 0] });
   queue.voiceChannel = { id: 'voice' } as VoiceBasedChannel;
   queue.connection = connection; queue.playVoiceCue = async () => {};
   client.queues.set('music', queue);
@@ -60,6 +61,24 @@ function musicHarness() {
     return { capture, processing: capture.complete(Buffer.from([0, 0])) };
   } };
 }
+
+test('voice off or stop during model loading cannot enable listening afterwards', async () => {
+  for (const cancel of ['off', 'stop']) {
+    const h = musicHarness(); let ready!: (value: boolean) => void;
+    const owners = new Set<object>();
+    h.queue.client.voiceRuntime = Object.assign(h.runtime, {
+      acquire: async (owner: object) => { owners.add(owner); return new Promise<boolean>(resolve => { ready = resolve; }); },
+      release: (owner: object) => { owners.delete(owner); },
+    }) as unknown as VoiceRuntime;
+    try {
+      const loading = h.queue.setVoiceEnabled(true);
+      if (cancel === 'off') await h.queue.setVoiceEnabled(false); else await h.queue.stop();
+      ready(true);
+      assert.equal(await loading, false); assert.equal(owners.size, 0);
+      assert.equal(h.queue.voice?.enabled ?? false, false);
+    } finally { await h.queue.stop(); }
+  }
+});
 
 test('voice music starts an empty queue, attributes the speaker, and preserves busy playback', async () => {
   for (const busy of [false, true]) {
@@ -447,4 +466,61 @@ test('receiver decodes real Opus, excludes other channels/bots, and releases sub
     assert.equal(runtime.listenerCount('unavailable'), 1);
   } finally { encoder.delete(); await queue.stop(); }
   assert.equal(runtime.listenerCount('unavailable'), 0);
+});
+
+
+test('voice radio requests bypass Laya and YouTube, switch stations and clear the music queue after the wake signal', async () => {
+  for (const message of ['Включи Европа Плюс', 'Включи Retro FM', 'Поставь Ретро ФМ', 'Europa Plus']) {
+    const h = musicHarness(() => {
+      const stream = new PassThrough(); stream.write(Buffer.alloc(3840 * 3));
+      return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+    });
+    h.runtime.classify = async () => { assert.fail('Radio must not depend on model labels'); };
+    h.metadata.searchCandidates = async () => { assert.fail('Radio must not search YouTube'); };
+    try {
+      await h.queue.addTracks([toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Bob'),
+        toTrack({ id: 'ddddddddddd', title: 'Pending' }, 'Bob')]);
+      const { processing } = await h.command(message); await processing;
+      assert.equal(h.queue.currentTrack?.source, 'radio');
+      assert.equal(h.queue.currentTrack?.requestedBy, 'Alice');
+      assert.equal(h.queue.tracks.length, 0); assert.equal(h.voice.session.phase, 'idle');
+      assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('unknown, negative and compound spoken radio requests never search or change playback', async () => {
+  for (const message of ['Включи радио неизвестное', 'Не включай Европа Плюс',
+    'Включи Retro FM?', 'Включи Европа Плюс и сделай громче']) {
+    const h = musicHarness(() => { assert.fail('Unsupported station must not start a process'); });
+    const replies: string[] = [];
+    h.runtime.classify = async () => { assert.fail('Unsafe radio must not ask the model'); };
+    h.metadata.searchCandidates = async () => { assert.fail('Unsupported radio must not become a song'); };
+    h.queue.client.voiceTts = { audio: key => { replies.push(key); return null; } };
+    try {
+      const current = toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Bob');
+      await h.queue.addTrack(current);
+      const { processing } = await h.command(message); await processing;
+      assert.equal(h.queue.currentTrack, current);
+      assert.deepEqual(replies, [message.includes('неизвестное') ? 'radio_unsupported' : 'unknown']);
+    } finally { await h.queue.stop(); }
+  }
+});
+
+test('leaving, voice off and reset while a radio stream is opening cannot clear music or execute late', async () => {
+  for (const mode of ['leave', 'off', 'reset']) {
+    const stream = new PassThrough();
+    const h = musicHarness(() => ({ stream, type: StreamType.Raw, destroy: () => stream.destroy() }));
+    try {
+      const current = toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Bob');
+      await h.queue.addTrack(current);
+      const { processing } = await h.command('Включи Европа Плюс');
+      await waitFor(() => stream.listenerCount('readable') > 0);
+      if (mode === 'leave') { h.states.set('alice', { channelId: 'other' }); h.voice.cancelUser('alice'); }
+      if (mode === 'off') h.voice.setEnabled(false);
+      if (mode === 'reset') h.voice.reset();
+      await processing;
+      assert.equal(h.queue.currentTrack, current); assert.equal(stream.destroyed, true);
+    } finally { await h.queue.stop(); }
+  }
 });

@@ -47,6 +47,7 @@ export class GuildVoice {
     return new VoiceSession(this.runtime, {
       wakeName: () => this.queue.wakeName,
       paused: () => this.queue.isPaused,
+      radio: () => this.queue.isRadio,
       present: (userId) => Boolean(!this.queue.closed && this.queue.voiceChannel
         && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(this.queue.client.user?.id ?? '')?.channelId === this.queue.voiceChannel.id
         && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(userId)?.channelId === this.queue.voiceChannel.id
@@ -61,6 +62,19 @@ export class GuildVoice {
       training: this.queue.client.voiceTrainingLog?.enabled ? (example) => this.queue.client.voiceTrainingLog?.append(example,
         { stt: this.runtime.sttModelName ?? null, nli: this.runtime.modelName ?? null }) : undefined,
       feedback: (key, signal) => this.confirm(key, signal),
+      playRadio: async (station, userId, signal, valid) => {
+        const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
+        const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
+        try {
+          const changed = await this.queue.playRadio(station, requestedBy, { signal, valid, userId });
+          if (changed && valid()) await this.confirm('radio_play', signal);
+          return changed;
+        } catch {
+          signal.throwIfAborted();
+          if (valid()) await this.confirm('radio_not_found', signal);
+          return false;
+        }
+      },
       playMusic: async (message, userId, signal, valid, report = diagnostic) => {
         const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
         const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
@@ -71,7 +85,7 @@ export class GuildVoice {
         });
         if (!valid() || this.queue.closed) return false;
         if (!track) { await this.confirm('not_found', signal); return false; }
-        const queued = Boolean(this.queue.currentTrack || this.queue.tracks.length);
+        const queued = !this.queue.isRadio && Boolean(this.queue.currentTrack || this.queue.tracks.length);
         await this.queue.addTrack(track);
         if (valid() && !this.queue.closed) await this.confirm(queued ? 'queued' : 'play', signal);
         return true;
@@ -82,6 +96,7 @@ export class GuildVoice {
         switch (intent.action) {
           case 'autoplay_on': case 'autoplay_off': {
             const enabled = intent.action === 'autoplay_on';
+            if (this.queue.isRadio && enabled) { await this.confirm('unknown', signal); return false; }
             changed = this.queue.autoplay !== enabled || (enabled && this.queue.loopCurrent);
             this.queue.setAutoplay(enabled);
             await this.confirm(intent.action, signal);
@@ -89,6 +104,7 @@ export class GuildVoice {
           }
           case 'loop_on': case 'loop_off': {
             const enabled = intent.action === 'loop_on';
+            if (this.queue.isRadio && enabled) { await this.confirm('unknown', signal); return false; }
             changed = this.queue.loopCurrent !== enabled || (enabled && this.queue.autoplay);
             this.queue.setLoop(enabled);
             await this.confirm(intent.action, signal);

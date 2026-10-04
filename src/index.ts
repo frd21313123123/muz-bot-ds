@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   client.ytdlp = ytdlp;
   client.voiceSettings = new VoiceSettings();
   await client.voiceSettings.load().catch(() => console.error('[Voice] Не удалось прочитать настройки имени.'));
-  client.voiceRuntime = new VoiceRuntime({ autoRestart: true });
+  client.voiceRuntime = new VoiceRuntime({ autoRestart: true, startupTimeoutMs: 180_000 });
   client.voiceRuntime.on('failure', (event) => console.error('[Voice] Сбой обработчика:', JSON.stringify({ at: new Date().toISOString(), ...event })));
   client.voiceRuntime.on('recovering', (event) => console.error('[Voice] Перезапуск обработчика:', JSON.stringify(event)));
   client.voiceTrainingLog = new VoiceTrainingLog();
@@ -28,8 +28,8 @@ async function main(): Promise<void> {
   const tts = new LocalTts();
   client.voiceTts = tts;
   console.log(await tts.load() ? `[TTS] ${tts.voice} готов.` : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
-  const voiceReady = await client.voiceRuntime.start().catch(() => false);
-  console.log(voiceReady ? `[Voice] Whisper ${client.voiceRuntime.sttModelName ?? '?'} (wake: ${client.voiceRuntime.wakeModelName ?? '?'}, device: ${client.voiceRuntime.inferenceDevice ?? '?'}) + Laya готовы (${client.voiceRuntime.modelName ?? 'Laya'}).` : '[Voice] Недоступно; выполните npm run setup:voice. Музыка работает без голосовых команд.');
+  console.log(`[Voice] Профиль ${client.voiceRuntime.profile}; модели загрузятся при подключении к голосовому каналу.`);
+  client.voiceRuntime.on('available', () => console.log(`[Voice] Whisper ${client.voiceRuntime!.sttModelName ?? '?'} (wake: ${client.voiceRuntime!.wakeModelName ?? '?'}, device: ${client.voiceRuntime!.inferenceDevice ?? '?'}) + ${client.voiceRuntime!.modelName ?? '?'} готовы.`));
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; прослушивание временно выключено. Музыка продолжает работать.'));
   client.once(Events.ClientReady, () => {
     console.log('[Bot] Ready');
@@ -39,6 +39,7 @@ async function main(): Promise<void> {
   client.on(Events.InteractionCreate, (interaction) => void onInteraction(interaction, client));
   client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     if (oldState.channelId !== newState.channelId) {
+      client.queues.get(oldState.guild.id)?.cancelRadioRequest(oldState.id === client.user?.id ? undefined : oldState.id);
       const voice = client.queues.get(oldState.guild.id)?.voice;
       if (oldState.id === client.user?.id) voice?.reset(); else voice?.cancelUser(oldState.id);
     }

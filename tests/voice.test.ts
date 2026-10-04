@@ -3,13 +3,33 @@ import test from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { contextualCommand, isWakePhrase, modeCommand, parseVolume, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
+import { contextualCommand, isWakePhrase, modeCommand, parseVolume, ruleIntent, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
 import { extractMusicRequest } from '../src/voice/music.js';
 import { VoiceSettings } from '../src/voice/settings.js';
 import { VoiceSession, type VoiceBackend, type VoiceDiagnostic, type VoiceHost } from '../src/voice/session.js';
 import type { TrainingExample } from '../src/voice/training.js';
 
 const audio = Buffer.from([0, 0]);
+test('light command rules cover controls and reject titles, negations and ambiguous requests', () => {
+  const cases: [string, VoiceIntent][] = [
+    ['next track', { action: 'skip' }], ['Вот, следующее пожалуйста', { action: 'skip' }],
+    ['Пропусти текущий трек', { action: 'skip' }], ['Поставь на паузу', { action: 'pause' }],
+    ['resume', { action: 'resume' }], ['Продолжи музыку', { action: 'resume' }],
+    ['Останови музыку', { action: 'stop' }], ['Выйди из канала', { action: 'stop' }],
+    ['Сделай громче', { action: 'volume_up' }], ['Уменьши громкость', { action: 'volume_down' }],
+    ['Громкость сто пятьдесят', { action: 'volume_set', level: 150 }],
+    ['Установи громкость 50 процентов', { action: 'volume_set', level: 50 }],
+    ['Включи повтор трека', { action: 'loop_on' }], ['Очисти очередь', { action: 'queue_clear' }],
+    ['Выключи голосовое управление', { action: 'voice_off' }],
+  ];
+  for (const [phrase, intent] of cases) assert.deepEqual(ruleIntent(phrase), intent, phrase);
+  for (const phrase of ['Не ставь на паузу', 'Stop?', 'Сделай громче и пропусти трек',
+    'Пропусти трек завтра', 'Включи песню Stop', 'Radio Ga Ga', 'Включи Европа Плюс',
+    'Громкость -10', 'Громкость 10.5', 'Громкость 0', 'Громкость 151', 'Громкость 50 60',
+    'Сделай громче на 20', 'Громкость пять пять', 'Останови вентилятор']) {
+    assert.deepEqual(ruleIntent(phrase), { action: 'unknown' }, phrase);
+  }
+});
 const modeCases: [string, VoiceIntent['action']][] = [
   ['Включи бесконечный режим', 'autoplay_on'], ['Выключи бесконечный режим', 'autoplay_off'],
   ['Включи автоплей', 'autoplay_on'], ['Отключи автоподбор песен', 'autoplay_off'],
@@ -20,6 +40,7 @@ const modeCases: [string, VoiceIntent['action']][] = [
   ['Поставь бесконечный режим', 'autoplay_on'], ['Включи музыку бесконечно', 'autoplay_on'],
   ['Включи режим повторения', 'loop_on'],
   ['Ключи повтор трека', 'loop_on'], ['Ключи автопли', 'autoplay_on'], ['Включи авто плей', 'autoplay_on'],
+  ['Хлючи бесконечный режим', 'autoplay_on'], ['Хлючи, повтор трека', 'loop_on'], ['Хлючи автоплей', 'autoplay_on'],
   ['Включи повтор трека', 'loop_on'], ['Отключи повтор этой песни', 'loop_off'],
   ['Зацикли этот трек', 'loop_on'], ['Перестань повторять эту песню', 'loop_off'],
   ['Включи режим повтора', 'loop_on'], ['Выключи зацикливание трека', 'loop_off'],
@@ -85,7 +106,8 @@ test('every explicit mode command executes once without model routing or a YouTu
 
 test('unknown, negated, compound and incomplete modes cannot change state or search', async () => {
   for (const phrase of ['Не включай бесконечный режим', 'Включи бесконечный режим и паузу',
-    'Включи бесконечный режим?', 'Выключи повтор и останови музыку', 'Включи ночной режим',
+    'Включи бесконечный режим?', 'Не хлючи автоплей', 'Хлючи повтор и останови музыку',
+    'Хлючи бесконечный режим?', 'Выключи повтор и останови музыку', 'Включи ночной режим',
     'Включи режим перемешивания', 'Автоплей', 'Повтор трека', 'Очисти очередь и включи Numb',
     'Включи бесконечный режим Metallica', 'Включи громкость']) {
     assert.equal(extractMusicRequest(phrase, true), null, phrase);
