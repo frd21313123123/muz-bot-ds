@@ -13,6 +13,8 @@ import { GuildVoice } from '../voice/GuildVoice.js';
 import { configureMusicEncoder, validateSpeed, type MusicPlaybackOptions } from './audio.js';
 
 const IDLE_MS = 5 * 60_000;
+const AUTOPLAY_HISTORY_LIMIT = 500;
+const AUTOPLAY_SEED_LIMIT = 3;
 
 export class GuildQueue {
   readonly player: AudioPlayer = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
@@ -42,6 +44,8 @@ export class GuildQueue {
   private readonly mediaFactory: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream;
   private voiceDucking = false;
   private cueState: { resumeAfter: boolean; finish(): void } | null = null;
+  private readonly recentTrackIds: string[] = [];
+  private readonly recentTrackIdSet = new Set<string>();
 
   constructor(readonly guildId: string, readonly client: MusicClient,
     mediaFactory?: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream) {
@@ -185,6 +189,7 @@ export class GuildQueue {
     this.activeResource = resource;
     resource.volume?.setVolume(this.volume * (this.voiceDucking ? 0.2 : 1));
     this.currentTrack = track;
+    this.rememberTrack(track.videoId);
     this.trackOffset = startSeconds;
     this.trackSpeed = speed;
     this.pauseRequested = paused;
@@ -193,6 +198,41 @@ export class GuildQueue {
     oldStream?.destroy();
     void this.playerMessage.update();
     console.log(`[Queue:${this.guildId}] ▶ ${track.title} [${track.videoId}] • ${track.isLive ? 'live' : track.duration}`);
+  }
+
+  private rememberTrack(videoId: string): void {
+    const previousIndex = this.recentTrackIds.indexOf(videoId);
+    if (previousIndex >= 0) this.recentTrackIds.splice(previousIndex, 1);
+    else this.recentTrackIdSet.add(videoId);
+    this.recentTrackIds.push(videoId);
+    if (this.recentTrackIds.length > AUTOPLAY_HISTORY_LIMIT) {
+      const expired = this.recentTrackIds.shift();
+      if (expired) this.recentTrackIdSet.delete(expired);
+    }
+  }
+
+  private async findAutoplayTracks(sourceTrack: Track): Promise<Track[]> {
+    const seeds = [sourceTrack.videoId, ...this.recentTrackIds.slice().reverse()
+      .filter((id) => id !== sourceTrack.videoId)].slice(0, AUTOPLAY_SEED_LIMIT);
+    for (const seed of seeds) {
+      try {
+        const related = await this.client.ytdlp.related(seed);
+        if (this.closed || !this.autoplay || this.currentTrack !== sourceTrack) return [];
+        const excluded = new Set(this.recentTrackIdSet);
+        for (const track of this.pending.items) excluded.add(track.videoId);
+        const fresh: Track[] = [];
+        for (const track of related) {
+          if (excluded.has(track.videoId)) continue;
+          excluded.add(track.videoId);
+          fresh.push(track);
+        }
+        if (fresh.length) return fresh;
+      } catch (error) {
+        console.error(`[Queue:${this.guildId}] recommendations from ${seed}:`, error);
+        if (this.closed || !this.autoplay || this.currentTrack !== sourceTrack) return [];
+      }
+    }
+    return [];
   }
 
   private async advance(): Promise<void> {
@@ -205,12 +245,9 @@ export class GuildQueue {
     try {
       let next = this.loopCurrent && this.currentTrack ? this.currentTrack : this.pending.shift();
       if (!next && this.autoplay && this.currentTrack) {
-        try {
-          const related = await this.client.ytdlp.related(this.currentTrack.videoId);
-          if (!this.closed && this.autoplay) this.pending.addMany(related);
-        } catch (error) {
-          console.error(`[Queue:${this.guildId}] recommendations:`, error);
-        }
+          const sourceTrack = this.currentTrack;
+          const related = await this.findAutoplayTracks(sourceTrack);
+          if (!this.closed && this.autoplay && this.currentTrack === sourceTrack) this.pending.addMany(related);
         next = this.pending.shift();
       }
       while (next && !this.closed) {

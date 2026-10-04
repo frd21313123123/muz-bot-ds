@@ -184,6 +184,89 @@ test('manual track added while recommendations load plays before them', async ()
   }
 });
 
+test('autoplay filters recently played recommendations and tries up to two recent seed tracks', async () => {
+  const streams: PassThrough[] = [];
+  const calls: string[] = [];
+  const suggestions: Record<string, Track[]> = {
+    ccccccccccc: [track('aaaaaaaaaaa'), track('bbbbbbbbbbb')],
+    bbbbbbbbbbb: [track('aaaaaaaaaaa')],
+    aaaaaaaaaaa: [{ ...track('ddddddddddd'), isAutoplay: true }, { ...track('ddddddddddd'), isAutoplay: true }],
+  };
+  const client = {
+    queues: new Map(),
+    ytdlp: { related: async (id: string) => { calls.push(id); return suggestions[id] ?? []; } },
+  } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-autoplay-dedup', client, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  client.queues.set(queue.guildId, queue);
+  try {
+    queue.setAutoplay(true);
+    await queue.addTracks([track('aaaaaaaaaaa'), track('bbbbbbbbbbb'), track('ccccccccccc')]);
+    for (const id of ['bbbbbbbbbbb', 'ccccccccccc']) {
+      queue.player.stop(true);
+      await waitFor(() => queue.currentTrack?.videoId === id);
+    }
+    queue.player.stop(true);
+    await waitFor(() => queue.currentTrack?.videoId === 'ddddddddddd');
+    assert.deepEqual(calls, ['ccccccccccc', 'bbbbbbbbbbb', 'aaaaaaaaaaa']);
+    assert.equal(queue.tracks.length, 0);
+    assert.equal(streams.length, 4);
+  } finally { await queue.stop(); }
+});
+
+test('autoplay history keeps only the latest 500 unique tracks', async () => {
+  const streams: PassThrough[] = [];
+  const ids = Array.from({ length: 501 }, (_, index) => `video${String(index + 1).padStart(6, '0')}`);
+  const calls: string[] = [];
+  const client = {
+    queues: new Map(),
+    ytdlp: { related: async (id: string) => {
+      calls.push(id);
+      return [{ ...track(ids[0]!), isAutoplay: true }, { ...track(ids[1]!), isAutoplay: true }];
+    } },
+  } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-autoplay-history', client, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  client.queues.set(queue.guildId, queue);
+  try {
+    await queue.addTracks(ids.map((id) => track(id)));
+    for (const id of ids.slice(1)) {
+      queue.player.stop(true);
+      await waitFor(() => queue.currentTrack?.videoId === id);
+    }
+    queue.setAutoplay(true);
+    queue.player.stop(true);
+    await waitFor(() => queue.currentTrack?.videoId === ids[0]);
+    assert.deepEqual(calls, [ids.at(-1)]);
+    assert.equal(streams.length, 502);
+  } finally { await queue.stop(); }
+});
+
+test('autoplay leaves the queue idle when every recommendation is in recent history', async () => {
+  const calls: string[] = [];
+  const client = {
+    queues: new Map(),
+    ytdlp: { related: async (id: string) => { calls.push(id); return [track(id)]; } },
+  } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-autoplay-exhausted', client, () => {
+    const stream = new PassThrough();
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  client.queues.set(queue.guildId, queue);
+  try {
+    queue.setAutoplay(true);
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    queue.player.stop(true);
+    await waitFor(() => queue.currentTrack === null);
+    assert.deepEqual(calls, ['aaaaaaaaaaa']);
+    assert.equal(queue.tracks.length, 0);
+  } finally { await queue.stop(); }
+});
+
 test('stop during recommendation lookup prevents playback and removes queue', async () => {
   let resolveRelated: ((tracks: Track[]) => void) | undefined;
   const related = new Promise<Track[]>((resolve) => { resolveRelated = resolve; });
