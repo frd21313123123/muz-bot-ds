@@ -10,6 +10,7 @@ import { extractMusicRequest } from './music.js';
 import { playerControlRequest } from './intents.js';
 import { ruleIntent } from './intents.js';
 import { voiceDirectory, voiceProfile, type VoiceProfile } from './profile.js';
+import { GroqSpeech, GROQ_STT_MODEL, sttProvider, type SttProvider } from './groq.js';
 
 export const VOICE_DIR = path.resolve('.runtime/voice');
 export const voicePython = (profile = voiceProfile()): string => path.join(voiceDirectory(profile), process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
@@ -33,6 +34,8 @@ export interface VoiceFailure {
 
 export class VoiceRuntime extends EventEmitter implements VoiceBackend {
   readonly profile: VoiceProfile;
+  readonly sttProvider: SttProvider;
+  private readonly groq: GroqSpeech;
   ready = false;
   modelName: string | null = null;
   sttModelName: string | null = null;
@@ -53,9 +56,15 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   constructor(private readonly options: { command?: string; args?: string[]; prepared?: boolean;
     requestTimeoutMs?: number; startupTimeoutMs?: number; autoRestart?: boolean; recoveryDelayMs?: number;
-    profile?: VoiceProfile; idleTimeoutMs?: number } = {}) { super(); this.profile = options.profile ?? voiceProfile(); }
+    profile?: VoiceProfile; idleTimeoutMs?: number; sttProvider?: SttProvider;
+    groq?: ConstructorParameters<typeof GroqSpeech>[0] } = {}) {
+    super(); this.profile = options.profile ?? voiceProfile();
+    this.sttProvider = options.sttProvider ?? sttProvider(); this.groq = new GroqSpeech(options.groq);
+  }
 
   get prepared(): boolean {
+    if (this.sttProvider === 'groq' && !this.groq.configured) return false;
+    if (this.sttProvider === 'groq' && this.profile === 'light') return true;
     return this.options.prepared ?? (existsSync(voicePython(this.profile)) && existsSync(path.join(voiceDirectory(this.profile), 'ready.json')));
   }
 
@@ -81,7 +90,7 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     this.unloadTimer = setTimeout(() => {
       this.unloadTimer = null;
       if (this.owners.size) return;
-      if (this.active || this.waiting.length) this.scheduleUnload(); else this.close();
+      if (this.active || this.waiting.length || this.groq.busy) this.scheduleUnload(); else this.close();
     }, timeout);
     this.unloadTimer.unref();
   }
@@ -99,9 +108,25 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
   private async launch(): Promise<boolean> {
     const directory = voiceDirectory(this.profile);
     if (!this.prepared) return false;
-    const child = spawn(this.options.command ?? voicePython(this.profile), this.options.args ?? ['-u', path.resolve('scripts/voice_worker.py')], {
+    if (this.sttProvider === 'groq' && this.profile === 'light') {
+      const commandIsWorker = Boolean(this.options.command && existsSync(this.options.command));
+      const pythonPath = voicePython(this.profile);
+      const pythonCmd = existsSync(pythonPath) ? pythonPath
+        : (existsSync(voicePython('heavy')) ? voicePython('heavy') : null);
+      const hasWakeModel = existsSync(path.resolve('models/wake-model/wake_model.onnx'))
+        || existsSync(path.resolve('word_training/runs/bot-v5-acc90/wake-model/wake_model.onnx'))
+        || Boolean(process.env.WAKE_MODEL_PATH);
+      if (!commandIsWorker && (!pythonCmd || !hasWakeModel || this.options.command)) {
+        this.modelName = 'rules'; this.sttModelName = GROQ_STT_MODEL; this.wakeModelName = GROQ_STT_MODEL;
+        this.ready = true; this.emit('available'); return true;
+      }
+    }
+    const pythonCmd = this.options.command
+      ?? (existsSync(voicePython(this.profile)) ? voicePython(this.profile)
+        : (existsSync(voicePython('heavy')) ? voicePython('heavy') : voicePython(this.profile)));
+    const child = spawn(pythonCmd, this.options.args ?? ['-u', path.resolve('scripts/voice_worker.py')], {
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, VOICE_PROFILE: this.profile, PYTHONIOENCODING: 'utf-8', HF_HOME: path.join(directory, 'cache'),
+      env: { ...process.env, VOICE_PROFILE: this.profile, STT_PROVIDER: this.sttProvider, PYTHONIOENCODING: 'utf-8', HF_HOME: path.join(directory, 'cache'),
         HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', USE_TF: '0', TOKENIZERS_PARALLELISM: 'false' },
     });
     this.child = child;
@@ -124,8 +149,8 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
               && /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,95}$/.test(value) ? value : null;
             this.modelName = typeof message.modelName === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,95}$/.test(message.modelName)
               ? message.modelName : null;
-            this.sttModelName = safeName(message.sttModelName);
-            this.wakeModelName = safeName(message.wakeModelName);
+            this.sttModelName = this.sttProvider === 'groq' ? GROQ_STT_MODEL : safeName(message.sttModelName);
+            this.wakeModelName = safeName(message.wakeModelName) ?? (this.sttProvider === 'groq' ? GROQ_STT_MODEL : safeName(message.wakeModelName));
             this.inferenceDevice = message.inferenceDevice === 'cpu' || message.inferenceDevice === 'cuda'
               ? message.inferenceDevice : null;
             this.ready = true; finish(true); this.emit('available'); return;
@@ -152,10 +177,11 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     const wasReady = this.ready;
     const operation = this.active?.payload.op;
     const failure: VoiceFailure | null = reason === 'closed' ? null : { reason,
-      ...(typeof operation === 'string' && ['transcribe', 'classify', 'music_route', 'music_policy', 'music_rerank'].includes(operation) ? { operation } : {}),
+      ...(typeof operation === 'string' && ['transcribe', 'classify', 'music_route', 'music_policy', 'music_rerank', 'wake_detect'].includes(operation) ? { operation } : {}),
       ...(this.activeSince ? { elapsedMs: Date.now() - this.activeSince } : {}),
       ...(exitCode !== undefined ? { exitCode } : {}) };
     this.ready = false;
+    this.groq.close();
     this.modelName = null;
     this.sttModelName = null;
     this.wakeModelName = null;
@@ -243,7 +269,13 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   async transcribe(pcm: Buffer, signal: AbortSignal, command: boolean, wakeName?: string,
     diagnostic?: (metrics: SpeechMetrics) => void): Promise<string> {
-    if (pcm.length > 16_000 * 2 * 15 || pcm.length % 2) throw new Error('Invalid audio length');
+    if (!pcm.length || pcm.length > 16_000 * 2 * 15 || pcm.length % 2) throw new Error('Invalid audio length');
+    if (this.sttProvider === 'groq') {
+      if (!this.ready || signal.aborted) throw new Error('Голосовой запрос отменён.');
+      this.scheduleUnload();
+      try { return await this.groq.transcribe(pcm, signal, command, wakeName, diagnostic); }
+      finally { this.scheduleUnload(); }
+    }
     let result = await this.request({ op: 'transcribe', pcm: pcm.toString('base64'), wakeName: wakeName?.slice(0, 64) }, signal, command);
     if (result && typeof result === 'object') {
       const reply = result as { text?: unknown; metrics?: SpeechMetrics };
@@ -256,6 +288,25 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     }
     if (typeof result !== 'string' || result.length > 1000) throw new Error('Invalid transcription');
     return result;
+  }
+
+  get hasWakeDetector(): boolean {
+    return Boolean(this.ready && this.child && this.wakeModelName && this.wakeModelName !== GROQ_STT_MODEL);
+  }
+
+  async detectWake(pcm: Buffer, signal: AbortSignal, threshold?: number): Promise<{ wake: boolean; probability: number }> {
+    if (!pcm.length || pcm.length > 16_000 * 2 * 15 || pcm.length % 2) throw new Error('Invalid audio length');
+    if (!this.ready || signal.aborted) throw new Error('Голосовой запрос отменён.');
+    this.scheduleUnload();
+    const payload: Record<string, unknown> = { op: 'wake_detect', pcm: pcm.toString('base64') };
+    if (threshold !== undefined && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1) {
+      payload.threshold = threshold;
+    }
+    const result = await this.request(payload, signal, false);
+    if (!result || typeof result !== 'object') throw new Error('Invalid wake detection result');
+    const res = result as { wake?: unknown; probability?: unknown };
+    if (typeof res.wake !== 'boolean' || typeof res.probability !== 'number') throw new Error('Invalid wake detection result');
+    return { wake: res.wake, probability: res.probability };
   }
 
   async classify(text: string, signal: AbortSignal): Promise<VoiceDecision> {

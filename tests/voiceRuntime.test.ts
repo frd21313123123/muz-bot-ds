@@ -8,7 +8,7 @@ import { VoiceRuntime } from '../src/voice/runtime.js';
 import { voiceProfile, voiceDirectory } from '../src/voice/profile.js';
 
 const fake = (extra: string[] = [], options: { autoRestart?: boolean; recoveryDelayMs?: number; requestTimeoutMs?: number; idleTimeoutMs?: number } = {}) => new VoiceRuntime({ command: process.execPath,
-  args: [path.resolve('tests/fixtures/voice-worker.mjs'), ...extra], prepared: true, profile: 'heavy', requestTimeoutMs: 300, ...options });
+  args: [path.resolve('tests/fixtures/voice-worker.mjs'), ...extra], prepared: true, profile: 'heavy', sttProvider: 'local', requestTimeoutMs: 300, ...options });
 
 test('light profile defaults to a separate environment and rejects invalid profile names', () => {
   assert.equal(voiceProfile(''), 'light'); assert.equal(voiceProfile(' HEAVY '), 'heavy');
@@ -187,5 +187,16 @@ test('recovery stops after three attempts when every replacement hangs', async (
     while ((launches < 4 || runtime.ready) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
     await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal(launches, 4); assert.deepEqual(attempts, [1, 2, 3]); assert.equal(runtime.ready, false);
+  } finally { runtime.close(); }
+});
+
+test('runtime detectWake runs wake detection request through worker', async () => {
+  const runtime = fake();
+  try {
+    assert.equal(await runtime.start(), true);
+    const audio = Buffer.alloc(16000 * 2);
+    const result = await runtime.detectWake(audio, new AbortController().signal);
+    assert.equal(result.wake, true);
+    assert.equal(result.probability, 0.99);
   } finally { runtime.close(); }
 });

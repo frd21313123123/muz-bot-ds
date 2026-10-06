@@ -1,7 +1,16 @@
 import 'dotenv/config';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { sttProvider } from './voice/groq.js';
+import { voiceProfile } from './voice/profile.js';
 
+if (sttProvider() === 'groq') {
+  if (!process.env.GROQ_API_KEY?.trim()) throw new Error('Укажите GROQ_API_KEY в .env.');
+  if (voiceProfile() === 'light') {
+    console.log('Groq whisper-large-v3-turbo + правила готовы; локальные модели STT не нужны.');
+    process.exit(0);
+  }
+}
 const candidates = process.platform === 'win32'
   ? [['py', '-3'], ['python'], ['python3']] : [['python3'], ['python']];
 const python = candidates.find(([command, ...prefix]) => spawnSync(command!, [...prefix, '-c',

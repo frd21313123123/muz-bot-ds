@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const tts = new LocalTts();
   client.voiceTts = tts;
   console.log(await tts.load() ? `[TTS] ${tts.voice} готов.` : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
-  console.log(`[Voice] Профиль ${client.voiceRuntime.profile}; модели загрузятся при подключении к голосовому каналу.`);
+  console.log(`[Voice] Профиль ${client.voiceRuntime.profile}; STT ${client.voiceRuntime.sttProvider}; обработчик запустится при подключении к голосовому каналу.`);
   client.voiceRuntime.on('available', () => console.log(`[Voice] Whisper ${client.voiceRuntime!.sttModelName ?? '?'} (wake: ${client.voiceRuntime!.wakeModelName ?? '?'}, device: ${client.voiceRuntime!.inferenceDevice ?? '?'}) + ${client.voiceRuntime!.modelName ?? '?'} готовы.`));
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; прослушивание временно выключено. Музыка продолжает работать.'));
   client.once(Events.ClientReady, () => {

@@ -1,0 +1,6 @@
+# Heavy profile with cloud STT: only local Laya dependencies.
+laya==0.3.22
+huggingface-hub==1.33.0
+transformers==5.17.0
+numpy==2.2.6; python_version < '3.12'
+numpy==2.5.3; python_version >= '3.12'

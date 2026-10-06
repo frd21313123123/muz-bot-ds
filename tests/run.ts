@@ -10,6 +10,7 @@ import './ytdlp.test.js';
 import './duration.test.js';
 import './voice.test.js';
 import './voiceRuntime.test.js';
+import './groq.test.js';
 import './GuildVoice.test.js';
 import './music.test.js';
 import './decoder.test.js';

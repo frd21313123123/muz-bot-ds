@@ -34,6 +34,7 @@ export interface VoiceBackend extends MusicBackend {
   transcribe(pcm: Buffer, signal: AbortSignal, command: boolean, wakeName?: string,
     diagnostic?: (metrics: SpeechMetrics) => void): Promise<string>;
   classify(text: string, signal: AbortSignal): Promise<VoiceDecision>;
+  detectWake?(pcm: Buffer, signal: AbortSignal, threshold?: number): Promise<{ wake: boolean; probability: number }>;
 }
 export interface SpeechMetrics { vadMs: number; segments: number; rejectedSegments: number }
 export interface VoiceHost {
@@ -153,17 +154,60 @@ export class VoiceSession {
           for (let i = 0; i + 1 < pcm.length; i += 2) {
             const sample = pcm.readInt16LE(i); energy += sample * sample; peak = Math.max(peak, Math.abs(sample));
           }
+
+          let localWakeDetected = false;
+          if (!command && this.backend.detectWake) {
+            const wakeStart = performance.now();
+            let wakeResult: { wake: boolean; probability: number };
+            try {
+              wakeResult = await this.backend.detectWake(pcm, controller.signal);
+            } catch {
+              if (!controller.signal.aborted) report({ stage: 'error', reason: 'pipeline' });
+              return;
+            }
+            if (!valid()) return;
+            const wakeElapsedMs = Math.round(performance.now() - wakeStart);
+            const audioMs = Math.round(pcm.length / 32);
+            report({
+              stage: 'recognition', kind: 'wake', audioMs,
+              rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak,
+              ms: wakeElapsedMs, matched: wakeResult.wake, confidence: wakeResult.probability,
+            });
+            if (!wakeResult.wake) return;
+            localWakeDetected = true;
+
+            // Standalone wake word: short utterance (<= 1.3s)
+            if (audioMs <= 1300) {
+              this.owner = userId;
+              this.phase = 'signalling';
+              const activation = new AbortController();
+              this.activation = activation;
+              for (const [id, pending] of this.tasks) {
+                for (const task of pending) if (task !== controller) { task.abort(); pending.delete(task); }
+                if (!pending.size) { this.tasks.delete(id); this.capturing.delete(id); }
+              }
+              await this.host.cue(activation.signal);
+              if (!valid() || activation.signal.aborted) { if (epoch === this.epoch) this.cancel(); return; }
+              this.host.duck(true);
+              this.phase = 'awaiting';
+              this.timer = setTimeout(() => { this.host.diagnostic?.({ stage: 'timeout', reason: 'wait' }); this.cancel(); }, this.timings.waitMs);
+              return;
+            }
+          }
+
           let metrics: SpeechMetrics | undefined;
           const asrStart = performance.now();
           const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName(),
             (value) => { metrics = value; });
           const paused = this.host.paused?.() ?? false;
-          const text = command ? contextualCommand(transcript, paused, this.host.radio?.() ?? false) : transcript;
-          const direct = command ? modeCommand(text) : null;
-          const radio = command ? extractRadioRequest(text, true) : null;
-          const explicitMusic = command && !radio ? extractMusicRequest(text) : null;
-          const music = explicitMusic ?? (command && !radio ? extractMusicRequest(text, true) : null);
-          const unsupported = command && !music && unsupportedSpeech(text);
+          const text = command ? contextualCommand(transcript, paused, this.host.radio?.() ?? false) : contextualCommand(transcript, paused, this.host.radio?.() ?? false);
+          const direct = modeCommand(text);
+          const radio = extractRadioRequest(text, true);
+          const explicitMusic = !radio ? extractMusicRequest(text) : null;
+          const music = explicitMusic ?? (!radio ? extractMusicRequest(text, true) : null);
+          const unsupported = !music && unsupportedSpeech(text);
+          const wakeMatched = localWakeDetected || isWakePhrase(transcript, this.host.wakeName()) || isWakePhrase(text, this.host.wakeName());
+
           if (command && this.host.training) example = {
             state: { phase: 'request', message: transcript, canonical_message: text,
               selected_track: null, player: this.host.playerState?.() ?? null },
@@ -176,9 +220,11 @@ export class VoiceSession {
             audioMs: Math.round(pcm.length / 32), rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak, ...metrics,
             wakeDistance: command ? undefined : wakeDistance(text, this.host.wakeName()),
             ms: Math.round(performance.now() - asrStart), words: normalizeSpeech(transcript).split(' ').filter(Boolean).length,
-            paused, canonicalized: text !== transcript, matched: !command && isWakePhrase(text, this.host.wakeName()),
+            paused, canonicalized: text !== transcript, matched: !command && wakeMatched,
             requestKind: command ? (radio?.kind === 'station' ? 'radio' : music?.kind ?? (unsupported ? 'rejected' : 'control')) : undefined });
-          if (command) {
+
+          const shouldExecuteCommand = command || (localWakeDetected && (direct || radio || music || playerControlRequest(text)));
+          if (shouldExecuteCommand) {
             // Bare titles first pass through control classification. Explicit
             // play requests remain independent of model routing/artist labels.
             this.recognizedMusic = Boolean(music || radio?.kind === 'station');
@@ -234,7 +280,7 @@ export class VoiceSession {
               if (example) { example.route = 'rejected'; example.outcome = 'rejected'; }
               await this.host.feedback?.('unknown', controller.signal);
             }
-          } else if (this.phase === 'idle' && isWakePhrase(text, this.host.wakeName())) {
+          } else if (this.phase === 'idle' && wakeMatched) {
             this.owner = userId;
             this.phase = 'signalling';
             const activation = new AbortController();

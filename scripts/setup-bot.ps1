@@ -41,7 +41,9 @@ function Get-SetupValue([string]$Key) {
     $content = [IO.File]::ReadAllText($envPath)
     $match = [regex]::Match($content, '(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*(.*)$')
     if (-not $match.Success) { return '' }
-    return $match.Groups[1].Value.Trim().Trim('"').Trim("'")
+    $value = $match.Groups[1].Value.Trim()
+    if ($value.StartsWith('#')) { return '' }
+    return ($value -split '\s+#', 2)[0].Trim().Trim('"').Trim("'")
 }
 function Set-SetupValue([string]$Key, [string]$Value) {
     if ($Value -match '[\r\n]') { throw 'Multiline settings are not supported.' }
@@ -76,8 +78,8 @@ try {
         exit 0
     }
     if (-not $Profile) {
-        Write-Host '1. Light (recommended): CPU, one small Whisper, commands parsed by rules.'
-        Write-Host '2. Heavy: larger Whisper + Laya, optional NVIDIA CUDA.'
+        Write-Host '1. Light (recommended): Groq Whisper Large V3 Turbo, commands parsed by rules.'
+        Write-Host '2. Heavy: Groq STT + local Laya, optional NVIDIA CUDA for Laya.'
         $choice = Read-Host 'Select profile [1]'
         if ($choice -eq '' -or $choice -eq '1') { $Profile = 'light' }
         elseif ($choice -eq '2') { $Profile = 'heavy' }
@@ -97,6 +99,18 @@ try {
     & (Join-Path $PSScriptRoot 'bot.ps1') -Action Stop
     if ($LASTEXITCODE -ne 0) { throw 'Could not stop the running bot for setup.' }
     if (-not (Test-Path -LiteralPath $envPath)) { Copy-Item -LiteralPath (Join-Path $projectPath '.env.example') -Destination $envPath }
+    $configuredStt = ((Get-SetupValue 'STT_PROVIDER') -split '\s+#', 2)[0].Trim()
+    if (-not $configuredStt) { $configuredStt = 'groq' }
+    $env:STT_PROVIDER = $configuredStt
+    if ($configuredStt -eq 'groq' -and -not (Get-SetupValue 'GROQ_API_KEY')) {
+        $secureGroqKey = Read-Host 'Groq API key (hidden; saved only in .env)' -AsSecureString
+        $groqPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureGroqKey)
+        try { $groqKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($groqPointer) }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($groqPointer) }
+        if ([string]::IsNullOrWhiteSpace($groqKey)) { throw 'Groq API key is required for cloud STT.' }
+        Set-SetupValue 'GROQ_API_KEY' $groqKey.Trim()
+        $groqKey = $null
+    }
     Invoke-SetupNpm -Arguments @('ci')
     # Overrides apply only to this installer process until preparation succeeds.
     $env:VOICE_PROFILE = $Profile; $env:VOICE_DEVICE = $Device; $env:VOICE_TTS_ENGINE = 'bundled'

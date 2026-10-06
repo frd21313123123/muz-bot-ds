@@ -443,3 +443,66 @@ test('custom names persist per guild and reset independently, with serialized wr
     await assert.rejects(reset.set('a', '!!!'));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('neural wake detector activates cue and awaiting mode on wake word without calling cloud STT', async () => {
+  let cloudTranscribeCalls = 0;
+  const h = harness({
+    detectWake: async () => ({ wake: true, probability: 0.99 }),
+    classify: async () => ({ action: 'pause', confidence: 0.99 }),
+    transcribe: async (_pcm, _sig, command) => {
+      cloudTranscribeCalls++;
+      if (!command) assert.fail('Cloud transcribe must not be called during standalone wake detection');
+      return 'Поставь на паузу';
+    },
+  });
+  try {
+    // 800ms audio (< 1300ms)
+    const shortAudio = Buffer.alloc(800 * 32);
+    await h.session.begin('alice')!.complete(shortAudio);
+    assert.equal(cloudTranscribeCalls, 0, 'zero cloud STT calls for wake phrase');
+    assert.equal(h.cues, 1, 'cue tone played');
+    assert.equal(h.ducked, true, 'audio ducked');
+    assert.equal(h.session.phase, 'awaiting');
+
+    // Alice now speaks her command
+    const commandCapture = h.session.begin('alice')!;
+    await commandCapture.complete(shortAudio);
+    assert.equal(cloudTranscribeCalls, 1, 'cloud STT called for spoken command');
+    assert.deepEqual(h.actions, [{ action: 'pause' }]);
+  } finally { h.session.disable(); }
+});
+
+test('neural wake detector rejects non-wake audio locally without invoking cloud STT', async () => {
+  const h = harness({
+    detectWake: async () => ({ wake: false, probability: 0.0001 }),
+    transcribe: async () => {
+      assert.fail('Cloud transcribe must not be called when wake detector rejects audio');
+    },
+  });
+  try {
+    const speechAudio = Buffer.alloc(1000 * 32);
+    await h.session.begin('alice')!.complete(speechAudio);
+    assert.equal(h.cues, 0);
+    assert.equal(h.ducked, false);
+    assert.equal(h.session.phase, 'idle');
+    assert.deepEqual(h.actions, []);
+  } finally { h.session.disable(); }
+});
+
+test('neural wake detector on compound command activates cloud STT and executes immediately', async () => {
+  let cloudTranscribed = false;
+  const h = harness({
+    detectWake: async () => ({ wake: true, probability: 0.99 }),
+    transcribe: async () => {
+      cloudTranscribed = true;
+      return 'Бот, следующий трек';
+    },
+  });
+  try {
+    // 2000ms audio (> 1300ms, long utterance containing wake + command)
+    const longAudio = Buffer.alloc(2000 * 32);
+    await h.session.begin('alice')!.complete(longAudio);
+    assert.equal(cloudTranscribed, true, 'cloud STT called for compound command');
+    assert.deepEqual(h.actions, [{ action: 'skip' }]);
+  } finally { h.session.disable(); }
+});

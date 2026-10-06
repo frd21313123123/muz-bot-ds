@@ -71,7 +71,8 @@ const voice: Command = {
       const name = queue?.wakeName ?? client.voiceSettings?.get(interaction.guildId)
         ?? interaction.guild?.members.me?.displayName ?? client.user?.username ?? '';
       const runtime = client.voiceRuntime;
-      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nПрофиль: ${runtime?.profile ?? 'light'}. Модели ${runtime?.ready ? 'готовы' : runtime?.prepared ? 'разгружены; загрузятся при включении прослушивания' : 'не подготовлены — выполните npm run setup:voice'}.`);
+      const stt = runtime?.sttProvider === 'groq' ? 'Groq · Whisper Large V3 Turbo' : 'локальная Whisper';
+      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nПрофиль: ${runtime?.profile ?? 'light'}. Распознавание: ${stt}. Обработчик ${runtime?.ready ? 'готов' : runtime?.prepared ? 'запустится при включении прослушивания' : 'не подготовлен — проверьте .env и выполните npm run setup:voice'}.`);
     }
     if (!await requireController(interaction, queue)) return;
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -86,7 +87,7 @@ const voice: Command = {
       } catch { return interaction.editReply('❌ Не удалось сохранить имя. Используйте 2–64 символа с буквами или цифрами.'); }
     }
     const enabled = action === 'on';
-    if (!await queue!.setVoiceEnabled(enabled)) return interaction.editReply('❌ Локальные модели недоступны. Выполните npm run setup:voice и повторите /voice on.');
+    if (!await queue!.setVoiceEnabled(enabled)) return interaction.editReply('❌ Голосовой обработчик недоступен. Проверьте .env, выполните npm run setup:voice и повторите /voice on.');
     return interaction.editReply({ content: enabled
       ? `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue!.wakeName)}**, дождитесь сигнала и произнесите команду.`
       : '🎙 Прослушивание выключено.', allowedMentions: { parse: [] } });
@@ -118,7 +119,7 @@ const join: Command = {
       return interaction.editReply('❌ Нет прав на подключение и речь в этом канале.');
     }
     if (!client.voiceRuntime || !await client.voiceRuntime.start()) {
-      return interaction.editReply('❌ Локальные модели недоступны. Выполните npm run setup:voice и повторите /join.');
+      return interaction.editReply('❌ Голосовой обработчик недоступен. Проверьте .env, выполните npm run setup:voice и повторите /join.');
     }
     // Startup and member fetching may take time; use the latest channel state.
     if (memberVoiceChannel(interaction)?.id !== channel.id) {

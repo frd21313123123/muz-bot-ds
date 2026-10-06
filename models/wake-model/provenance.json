@@ -1,0 +1,11 @@
+{
+  "repository": "openai/whisper-tiny",
+  "revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
+  "window_adaptation": "encoder positions truncated to 100 for 2-second audio",
+  "license_reference": "https://huggingface.co/openai/whisper-tiny",
+  "files_sha256": {
+    "encoder_config.json": "6b5b40578693575d294dc7549cad7029a6e07ac538d69632846c9ce4144d77ba",
+    "encoder_state.pt": "b94e34a24018a57c63948db97a5758445ef7092d59e3f0ac4710a499f7af1e57",
+    "whisper_mel_filters.npy": "b697115893111b7eac447de3f430a1c7264cf74e6c1b78c41e577ad39bbe06ef"
+  }
+}

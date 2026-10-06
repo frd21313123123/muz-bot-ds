@@ -7,3 +7,7 @@ dist/
 *.log
 __pycache__/
 *.py[cod]
+word_training/runs/
+word_training/dataset/
+*.wav
+*.mp3

@@ -24,6 +24,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     console.log(JSON.stringify({ id: request.id, result: { best_track: process.argv.includes('--bad-index') ? 99 : process.argv.includes('--none') ? -1 : 1,
       ...(process.argv.includes('--none') ? { no_match: true } : {}), confidence: 0.99 } })); return;
   }
+  if (request.op === 'wake_detect') {
+    console.log(JSON.stringify({ id: request.id, result: { wake: true, probability: 0.99 } })); return;
+  }
   setTimeout(() => console.log(JSON.stringify({ id: request.id,
     result: request.op === 'transcribe' ? String(Buffer.from(request.pcm, 'base64')[0])
       : { action: 'skip', confidence: 0.99 } })), 30);

@@ -46,7 +46,7 @@ export function wakeDistance(text: string, name: string): number {
 }
 
 export function commandLeadIn(text: string): string {
-  return text.trim().replace(/^(?:(?:вот|ну|пожалуйста|слушай|давай)[\s,.:;!—-]+){1,3}/iu, '');
+  return text.trim().replace(/^(?:(?:бот|bot|вот|ну|пожалуйста|слушай|давай)[\s,.:;!—-]+){1,3}/iu, '');
 }
 
 // Modes have explicit on/off semantics. Parse complete phrases before music
