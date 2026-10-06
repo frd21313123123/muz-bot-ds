@@ -6,7 +6,7 @@
   "standalone_only": false,
   "sample_rate": 16000,
   "window_samples": 32000,
-  "threshold": 0.9945449233055116,
+  "threshold": 0.995,
   "architecture": "whisper_encoder_v4",
   "input": "log_mel float32 [batch,1,80,200]",
   "output": "probability float32 [batch]",
@@ -21,15 +21,15 @@
     "whisper_mel_filters.npy": "b697115893111b7eac447de3f430a1c7264cf74e6c1b78c41e577ad39bbe06ef",
     "provenance.json": "60d2778f8237ca874949ac1c84d01ee11171590daa74f36877f0443f966cce21"
   },
-  "model_sha256": "5e0fcc78dec06582198a9ff8b00a3c59ec32f7a33937a75092c9835118a0e8b3",
+  "model_sha256": "74443f2d3150ad381622cf0a27f15f1e45460ad131c21c616c67d79253183812",
   "selected_members": [
     0
   ],
   "best_epoch": 4,
   "smoke_only": false,
   "quality_validated_on_real_users": false,
-  "recipe_version": "bot-v5-acc90",
+  "recipe_version": "bot-v5-acc90-opt",
   "source_group_calibration": false,
-  "quantization": "int8",
+  "quantization": "int8_weight_only_conv",
   "inference_batch_size": 1
 }
