@@ -185,18 +185,24 @@ const play: Command = {
       client.queues.set(interaction.guildId, queue);
     }
     try {
-      await queue.join(channel);
       const infinite = interaction.options.getBoolean('infinite');
-      const result = await resolveQuery(interaction.options.getString('query', true),
-        interaction.member && 'displayName' in interaction.member ? interaction.member.displayName : interaction.user.username,
-        client.ytdlp, (infinite ?? queue.autoplay) ? 25 : 1);
-      if (!result) {
-        if (created) await queue.stop();
-        return interaction.editReply('❌ Ничего не найдено.');
-      }
+      const requestedBy = interaction.member && 'displayName' in interaction.member
+        ? interaction.member.displayName
+        : interaction.user.username;
+      const playlistLimit = (infinite ?? queue.autoplay) ? 25 : 1;
+      const query = interaction.options.getString('query', true);
+
+      const [, result] = await Promise.all([
+        queue.join(channel),
+        resolveQuery(query, requestedBy, client.ytdlp, playlistLimit, { fast: true }),
+      ]);
       if (memberVoiceChannel(interaction)?.id !== channel.id || queue.closed) {
         if (created && !queue.closed && !queue.currentTrack && !queue.tracks.length) await queue.stop();
         return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /play.');
+      }
+      if (!result) {
+        if (created && !queue.closed && !queue.currentTrack && !queue.tracks.length) await queue.stop();
+        return interaction.editReply('❌ Ничего не найдено.');
       }
       queue.setPlayerChannel(interaction.channelId);
       const wasIdle = queue.isRadio || (!queue.currentTrack && queue.tracks.length === 0);
@@ -210,8 +216,9 @@ const play: Command = {
       }
       await queue.addTrack(result.track);
       if (infinite !== null) queue.setAutoplay(infinite);
+      const displayTitle = result.track.title === 'Загрузка…' ? result.track.url : result.track.title;
       return interaction.editReply({
-        content: `${wasIdle ? '▶ Воспроизведение началось' : '✅ Добавлено в очередь'}: **${escapeMarkdown(result.track.title)}**`,
+        content: `${wasIdle ? '▶ Воспроизведение началось' : '✅ Добавлено в очередь'}: **${escapeMarkdown(displayTitle)}**`,
         allowedMentions: { parse: [] },
       });
     } catch (error) {

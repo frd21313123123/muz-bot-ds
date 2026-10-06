@@ -97,7 +97,15 @@ export async function prepareYtdlp(update = false): Promise<YtdlpClient> {
 }
 
 export class YtdlpClient {
+  private readonly searchCache = new Map<string, { entries: VideoInfo[]; timestamp: number }>();
+  private readonly videoCache = new Map<string, { info: VideoInfo; timestamp: number }>();
+
   constructor(private readonly runtime: Runtime) {}
+
+  clearCache(): void {
+    this.searchCache.clear();
+    this.videoCache.clear();
+  }
 
   spawn(args: string[]): ChildProcess {
     return spawn(this.runtime.command, [...this.runtime.prefix, ...COMMON_ARGS, ...args], {
@@ -113,8 +121,28 @@ export class YtdlpClient {
     return JSON.parse(stdout) as VideoInfo;
   }
 
+  async getStreamUrl(url: string, signal?: AbortSignal): Promise<string> {
+    const { stdout } = await execFileAsync(this.runtime.command,
+      [...this.runtime.prefix, ...COMMON_ARGS, '-g', '-f', 'bestaudio/best', '--no-playlist', url],
+      { timeout: 20_000, maxBuffer: 1024 * 1024, windowsHide: true, signal },
+    );
+    return stdout.trim().split(/\r?\n/)[0] ?? '';
+  }
+
   async video(url: string, signal?: AbortSignal): Promise<VideoInfo> {
-    return this.json(['--no-playlist', url], 20_000, signal);
+    const cached = this.videoCache.get(url);
+    if (cached && Date.now() - cached.timestamp < 30 * 60_000) {
+      return cached.info;
+    }
+    const info = await this.json(['--no-playlist', url], 20_000, signal);
+    if (info.id) {
+      this.videoCache.set(url, { info, timestamp: Date.now() });
+      if (this.videoCache.size > 500) {
+        const first = this.videoCache.keys().next().value;
+        if (first) this.videoCache.delete(first);
+      }
+    }
+    return info;
   }
 
   async playlist(url: string, limit: number): Promise<VideoInfo> {
@@ -129,6 +157,13 @@ export class YtdlpClient {
     signal?.throwIfAborted();
     if (!query.trim()) return [];
     if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('Invalid search limit');
+
+    const cacheKey = `${query.trim().toLowerCase()}:${limit}`;
+    const cached = this.searchCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 15 * 60_000) {
+      return cached.entries;
+    }
+
     // The songs section excludes podcasts and other ordinary YouTube videos.
     // Do not fall back to unrestricted video search when no song is found.
     const url = `https://music.youtube.com/search?q=${encodeURIComponent(query.trim())}#songs`;
@@ -140,18 +175,12 @@ export class YtdlpClient {
       seen.add(entry.id);
       return true;
     }).slice(0, limit);
-    // YouTube Music flat results contain IDs and titles, but no duration.
-    // Runtime selects the first song: hydrate that exact ID, not a new search.
-    const selected = candidates[0];
-    if (selected && videoDuration(selected) === null && !isLiveVideo(selected)) {
-      try {
-        const full = await this.video(`https://www.youtube.com/watch?v=${selected.id}`, signal);
-        signal?.throwIfAborted();
-        if (full.id === selected.id) candidates[0] = { ...selected, ...full };
-      } catch {
-        signal?.throwIfAborted();
-        // Keep the selected song if metadata is temporarily unavailable;
-        // the player will display unknown duration without labelling it live.
+
+    if (candidates.length) {
+      this.searchCache.set(cacheKey, { entries: candidates, timestamp: Date.now() });
+      if (this.searchCache.size > 200) {
+        const first = this.searchCache.keys().next().value;
+        if (first) this.searchCache.delete(first);
       }
     }
     return candidates;
@@ -187,7 +216,7 @@ export class YtdlpClient {
   }
 }
 
-function isNonSong(info: VideoInfo): boolean {
+export function isNonSong(info: VideoInfo): boolean {
   if (info.is_live || ['is_live', 'is_upcoming'].includes(info.live_status ?? '')) return true;
   const title = (info.title ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
   return /(?:^| )(?:podcasts?|подкаст\p{L}*|interviews?|интервью|аудиокниг\p{L}*|audiobooks?|лекци\p{L}*|lectures?)(?: |$)/u.test(title)
@@ -219,6 +248,6 @@ export function toTrack(info: VideoInfo, requestedBy: string, isAutoplay = false
   };
 }
 
-function isLiveVideo(info: VideoInfo): boolean {
+export function isLiveVideo(info: VideoInfo): boolean {
   return info.live_status === 'is_live' || (info.live_status === undefined && info.is_live === true);
 }

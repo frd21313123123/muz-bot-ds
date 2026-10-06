@@ -40,9 +40,27 @@ export function classifyQuery(query: string): { kind: 'video' | 'playlist' | 'se
 }
 
 export async function resolveQuery(query: string, requestedBy: string, metadata: MetadataClient,
-  playlistLimit = 1): Promise<ResolveResult> {
+  playlistLimit = 1, options: { fast?: boolean } = {}): Promise<ResolveResult> {
   const target = classifyQuery(query);
   if (target.kind === 'video') {
+    if (options.fast) {
+      const id = new URL(target.value).searchParams.get('v');
+      if (id && /^[\w-]{11}$/.test(id)) {
+        return {
+          type: 'single',
+          track: {
+            url: target.value,
+            videoId: id,
+            title: 'Загрузка…',
+            duration: '?',
+            thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`,
+            requestedBy,
+            isAutoplay: false,
+            isLive: false,
+          },
+        };
+      }
+    }
     return { type: 'single', track: toTrack(await metadata.video(target.value), requestedBy) };
   }
   if (target.kind === 'playlist') {

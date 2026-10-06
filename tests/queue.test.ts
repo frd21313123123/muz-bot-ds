@@ -18,3 +18,10 @@ test('manual tracks stay before recommendations', () => {
   assert.equal(queue.clear(), 3);
   assert.equal(queue.items.length, 0);
 });
+
+test('clearAutoplay removes only recommendations', () => {
+  const queue = new TrackQueue();
+  queue.addMany([track('aaaaaaaaaaa'), track('bbbbbbbbbbb', true), track('ccccccccccc')]);
+  assert.equal(queue.clearAutoplay(), 1);
+  assert.deepEqual(queue.items.map((item) => item.videoId), ['aaaaaaaaaaa', 'ccccccccccc']);
+});

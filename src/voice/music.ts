@@ -1,6 +1,6 @@
 import type { Track } from '../types.js';
-import { commandLeadIn, normalizeSpeech, playerControlRequest } from './intents.js';
-import { toTrack, type VideoInfo } from '../utils/ytdlp.js';
+import { commandLeadIn, isMathExpression, normalizeSpeech, playerControlRequest } from './intents.js';
+import { isNonSong, toTrack, type VideoInfo } from '../utils/ytdlp.js';
 
 export type MusicVariant = 'live' | 'remix' | 'cover' | 'acoustic' | 'instrumental';
 export interface MusicPlayerState { connected: boolean; playing: boolean; paused: boolean; autoplay: boolean; queue_length: number }
@@ -57,6 +57,44 @@ export function musicState(message: string, request: MusicRequest, player?: Musi
     ...(player ? { player } : {}) };
 }
 
+export function isNonMusicTarget(target: string): boolean {
+  if (/https?:\/\//iu.test(target)) return false;
+  if (isMathExpression(target)) return true;
+  const norm = normalizeSpeech(target);
+  if (/^(?:свет|микрофон|звук|камеру|вебку|веб камеру|демонстрацию|демонстрацию экрана|демку|трансляцию|стрим|запись|видео|вентилятор|кондиционер|телевизор|утюг|чайник|лайк|таймер|будильник|секундомер|напоминание|напоминалку)(?: [а-яa-z0-9]+)?$/iu.test(norm)) return true;
+  if (/^в (?:города|шахматы|дурака|игру|игры|карты|слова|крестики нолики)(?: |$)/iu.test(norm)) return true;
+  return false;
+}
+
+export function isNonMusicBareQuery(cleaned: string): boolean {
+  if (/https?:\/\//iu.test(cleaned)) return false;
+  if (cleaned.includes('?')) return true;
+  if (isMathExpression(cleaned)) return true;
+
+  const bare = normalizeSpeech(cleaned);
+  if (!bare || bare.length < 2 || bare.split(' ').length > 25) return true;
+  if (bare.length <= 2 && !/^(?:u2|in)$/iu.test(bare)) return true;
+
+  if (/^(?:что|че|чо|как|где|куда|откуда|когда|почему|зачем|отчего|сколько|кто|какой|какая|какое|какие|чей|чья|чье|чьи)(?: |$)/u.test(bare)) return true;
+  if (/^а (?:что|как|где|куда|откуда|когда|почему|зачем|сколько|кто|какой|какая|какое|какие)(?: |$)/u.test(bare)) return true;
+  if (/(?:^| )(?:что такое|что это|что делаешь|что умеешь|что нового|что там|как дела|как ты|как жизнь|ты кто|кто ты|где ты|сколько времени|который час)(?: |$)/u.test(bare)) return true;
+
+  if (/^(?:привет|приветик|здравствуй|здравствуйте|доброе утро|добрый день|добрый вечер|доброй ночи|хай|хеллоу|салам|ку|йоу|здарова|здорово|пока|до свидания|до встречи|спокойной ночи|бывай|прощай|спасибо|благодарю|пожалуйста|не за что)(?: |$)/u.test(bare)) return true;
+
+  if (/^(?:ладно|хорошо|понятно|ясно|отлично|ок|окей|нормально|согласен|понял|красава|молодец|точно|конечно|да|нет|неа|ага|угу|не|если|сначала|потом|затем|но|not|no|never|dont|and|or|then|but|don t|do not|please don t)(?: |$)/u.test(bare)) return true;
+
+  if (/^(?:посчитай|вычисли|реши|скажи|объясни|назови|подскажи|посоветуй|ответь|переведи|напомни|погугли|загугли|поищи|помоги|погода|прогноз|новости|анекдот|шутка|прикол|мем|гороскоп|таймер|будильник|секундомер|калькулятор)(?: |$)/u.test(bare)) return true;
+
+  if (/^(?:проверка|тест|раз раз|раз два|раз два три|ты тут|ты здесь|ты на месте|ты слышишь|слышно меня|меня слышно|алло)(?: |$)/u.test(bare)) return true;
+
+  if (/^(?:я|мы|ты|вы|он|она|оно|они|мне|мое|меня|тебе|твое|тебя|нам|нас|вам|вас|им|их|это|то|мне нравится)(?: |$)/u.test(bare)) return true;
+
+  if (/(?:^| )(?:next|skip|pause|resume|stop|louder|quieter)(?: |$)/u.test(bare)) return true;
+  if (/(?:^| )(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть)(?: |$)/u.test(bare)) return true;
+
+  return false;
+}
+
 // Extract from the original transcript: speech normalization would destroy URLs
 // and punctuation in song titles. Only command boundaries are interpreted here.
 export function extractMusicRequest(message: string, allowBare = false): MusicRequest | null {
@@ -69,15 +107,15 @@ export function extractMusicRequest(message: string, allowBare = false): MusicRe
   // leading command form only; never rewrite words inside the query.
   const match = /^(?:(?:можешь|можете)\s+)?(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть|хочу послушать|послушаем)(?:\s*[,:\u2014-]\s*|\s+)(.+)$/iu.exec(cleaned);
   if (!match && !allowBare) return null;
-  if (!match) {
-    const bare = normalizeSpeech(cleaned);
-    // Only the speaker's command window permits a bare title/artist. Do not
-    // turn conversations, negations, questions or incomplete commands into music.
-    if (!bare || bare.split(' ').length > 35 || cleaned.includes('?')
-      || /^(?:не|нет|если|сначала|потом|затем|как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|я|мы|ты|вы|он|она|мне нравится|добавь|найди|очисти|not|no|never|don t|dont|do not|please don t)(?: |$)/u.test(bare)
-      || /(?:^| )(?:next|skip|pause|resume|stop|louder|quieter)(?: |$)/u.test(bare)
-      || /(?:^| )(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть)(?: |$)/u.test(bare)) return null;
+
+  if (match) {
+    const rawTarget = match[1]!.trim();
+    if (isMathExpression(rawTarget)) return null;
+    if (!/^(?:песню|трек|композицию)\s+/iu.test(rawTarget) && isNonMusicTarget(rawTarget)) return null;
+  } else {
+    if (isNonMusicBareQuery(cleaned)) return null;
   }
+
   const target = (match?.[1] ?? cleaned).trim();
   if (/^(?:песню|трек)\s+из[.!…]*$/iu.test(target)) return null;
   // "Song from Luntik" needs its music noun: searching only "from Luntik"
@@ -87,6 +125,7 @@ export function extractMusicRequest(message: string, allowBare = false): MusicRe
     : target.replace(/^(?:песню|трек)\s+/iu, '').trim();
   const words = normalizeSpeech(query);
   if (!words || /^(?:на паузу|паузу|музыку(?: снова| обратно| дальше)?|музыка|воспроизведение|снова|обратно|дальше|песню|песни|песня|трек|эту(?: песню)?|этот(?: трек)?|ее|его|это|то|ту|тот|первую|первый|следующую(?: песню| музыку)?|следующий(?: трек)?)$/u.test(words)) return null;
+  if (isMathExpression(query)) return null;
   // Conjunctions in names (e.g. "Numb и Encore") are valid. A second command
   // verb after a command separator is not a song name.
   if (/(?:^|\s)(?:и|или|потом|затем)\s+(?:не\s+)?(?:включ\p{L}*|ключи\p{L}*|постав\p{L}*|сыгра\p{L}*|воспроизвед\p{L}*|запуст\p{L}*|проигра\p{L}*|останов\p{L}*|останавли\p{L}*|выключ\p{L}*|пропуст\p{L}*|продолж\p{L}*|возобнов\p{L}*|сдела\p{L}*|пауза|следующий|громче|тише|стоп)(?:\s|$)/iu.test(words)) return null;
@@ -132,6 +171,7 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
   const seen = new Set<string>();
   const usable = candidates.flatMap((info) => {
     try {
+      if (isNonSong(info)) return [];
       const track = toTrack(info, requestedBy);
       if (seen.has(track.videoId)) return [];
       seen.add(track.videoId);

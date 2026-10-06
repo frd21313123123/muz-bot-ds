@@ -1,3 +1,5 @@
+import { extraVoiceCommand } from './phrases.js';
+
 export type VoiceAction = 'skip' | 'pause' | 'resume' | 'stop' | 'volume_set' | 'volume_up' | 'volume_down'
   | 'autoplay_on' | 'autoplay_off' | 'loop_on' | 'loop_off' | 'queue_clear' | 'voice_on' | 'voice_off' | 'unknown';
 export type VoiceIntent = { action: 'volume_set'; level: number }
@@ -67,6 +69,11 @@ export function modeCommand(text: string): VoiceIntent | null {
   const match = (verb: string, target: string): boolean => new RegExp(`^${verb} ${target}$`, 'u').test(words);
   const unsafe = text.includes('?') || /(?:^| )(?:не|нет|если|и|или|потом|затем|not|never|and|or|then)(?: |$)/u.test(words);
   if (!unsafe) {
+    const extra = extraVoiceCommand(words);
+    if (extra) {
+      const direct = modeCommand(extra);
+      if (direct) return direct;
+    }
     if (new RegExp(`^${on} громкость(?: |$)`, 'u').test(words)) {
       const level = parseVolume(text);
       return level === null ? { action: 'unknown' } : { action: 'volume_set', level };
@@ -93,23 +100,39 @@ export function modeCommand(text: string): VoiceIntent | null {
   return null;
 }
 
+// Match whole requests so that titles, negations and multiple commands stay intact.
+// Both voice profiles receive the same familiar command after canonicalization.
+const CONTROL_ALIASES: readonly (readonly [RegExp, string])[] = [
+  [/^приостанови(?: (?:музыку|воспроизведение|песню|трек))?$/u, 'Поставь на паузу'],
+  [/^(?:продолжи|продолжай|возобнови|продолжить|возобновить) (?:песню|трек)$/u, 'Продолжи музыку'],
+  [/^(?:следующ(?:ий|ая|ее|ую)|следущий|следующе|далее|дальше|переключи|переключись|скип|скипни|скипнуть|некст|next|skip)(?: (?:трек|песню|песня|композицию|track|song))?$/u, 'Следующий трек'],
+  [/^(?:включи|включить|включай|ключи|поставь|поставить|запусти|сыграй) (?:следующ(?:ий|ая|ее|ую)(?: (?:трек|песню|песня|композицию))?|другой трек|другую песню)$/u, 'Следующий трек'],
+  [/^(?:пропусти|пропустить|пропускай|скипни)(?: (?:этот трек|эту песню|эту композицию|этот|эту|это|текущий трек|текущую песню|трек|песню|музыку))?$/u, 'Следующий трек'],
+  [/^(?:переключи|переключить|переключай|переключись|поменяй|смени)(?: (?:трек|песню|музыку|композицию))?(?: на следующ(?:ий|ую)| на следующий трек| на следующую песню)?$/u, 'Следующий трек'],
+  [/^(?:перейди|переходи) к следующ(?:ему треку|ей песне)$|^дальше по очереди$/u, 'Следующий трек'],
+  [/^(?:pause|пауза|паузу|пауза на музыку|поставь паузу|сделай паузу|нажми паузу|поставь (?:музыку|трек|песню|воспроизведение) на паузу|приостановить(?: (?:музыку|воспроизведение))?|притормози(?: (?:музыку|трек|песню))?)$/u, 'Поставь на паузу'],
+  [/^(?:resume|continue|сними паузу|убери паузу|убери с паузы|сними (?:музыку|трек|песню) с паузы|снять с паузы|снять паузу|продолжить(?: (?:музыку|воспроизведение|играть))?|возобновить(?: (?:музыку|воспроизведение))?|возобнови проигрывание|продолжи воспроизведение трека)$/u, 'Продолжи музыку'],
+  [/^(?:stop|стоп музыка|остановить(?: (?:музыку|воспроизведение))?|останови (?:плеер|проигрывание)|выключить музыку|выключай музыку|отключи музыку|хватит музыки|перестань играть|прекрати (?:музыку|воспроизведение)|выйти из канала|отключись от голосового канала|выйди из голосового канала)$/u, 'Останови музыку'],
+  [/^(?:louder|прибавь (?:громкость|звук|громкости|звука)|добавь (?:громкость|звук|громкости|звука)|погромче сделай|сделай (?:музыку|трек|песню|звук) (?:громче|погромче)|увеличить громкость)$/u, 'Сделай громче'],
+  [/^(?:quieter|убавь (?:громкость|звук|громкости|звука)|потише сделай|сделай (?:музыку|трек|песню|звук) (?:тише|потише)|уменьшить громкость)$/u, 'Сделай тише'],
+];
+
 function controlAlias(text: string): string | null {
   if (text.includes('?')) return null;
   const words = normalizeSpeech(commandLeadIn(text)).replace(/ (?:пожалуйста|please)$/u, '');
-  if (/^(?:следующ(?:ий|ая|ее|ую)|следущий|следующе|далее|дальше|переключи|переключись|скип|скипни|некст|next|skip)(?: (?:трек|песню|песня|track|song))?$|^пропусти$/u.test(words)) return 'Следующий трек';
-  if (/^(?:pause|пауза|паузу)$/u.test(words)) return 'Поставь на паузу';
-  if (/^(?:resume|continue)$/u.test(words)) return 'Продолжи музыку';
-  if (/^(?:stop)$/u.test(words)) return 'Стоп';
-  if (/^(?:louder)$/u.test(words)) return 'Сделай громче';
-  if (/^(?:quieter)$/u.test(words)) return 'Сделай тише';
-  return null;
+  const volume = /^(?:(?:выставь|задай|сделай|поставь|установи) (?:громкость|звук)|звук)(?: (?:на|до))? (.+?)(?: (?:процентов|процента|процент))?$/u.exec(words);
+  if (volume && volume[1]!.split(' ').every(token => /^\d+$/u.test(token) || ONES[token] !== undefined)) {
+    const level = parseVolume(text);
+    if (level !== null) return `Громкость ${level}`;
+  }
+  return CONTROL_ALIASES.find(([pattern]) => pattern.test(words))?.[1] ?? extraVoiceCommand(words);
 }
 
 // Closed control prefixes take priority over a free-form YouTube query.
 export function playerControlRequest(text: string): boolean {
   if (modeCommand(text)) return true;
   const words = normalizeSpeech(controlAlias(text) ?? commandLeadIn(text));
-  return /^(?:следующ\p{L}*|пропуст\p{L}*|скип\p{L}*|пауз\p{L}*|продолж\p{L}*|возобнов\p{L}*|приостанов\p{L}*|останов\p{L}*|стоп|выключ\p{L}*|отключ\p{L}*|выйди|выйти|громк\p{L}*|громче|тише|погромче|потише|установ\p{L}*|увелич\p{L}*|уменьш\p{L}*|сдела\p{L}*)(?: |$)/u.test(words)
+  return /^(?:следующ\p{L}*|пропуст\p{L}*|скип\p{L}*|пауз\p{L}*|продолж\p{L}*|возобнов\p{L}*|приостанов\p{L}*|останов\p{L}*|стоп|выключ\p{L}*|отключ\p{L}*|выйди|выйти|громк\p{L}*|громче|тише|погромче|потише|установ\p{L}*|выстав\p{L}*|задай|звук|увелич\p{L}*|уменьш\p{L}*|сдела\p{L}*)(?: |$)/u.test(words)
     || /^(?:поставь|поставить) (?:(?:на )?паузу|громкость|звук)(?: |$)|^сними с паузы(?: |$)|^хватит играть(?: |$)|^на паузу(?: |$)|^музыка на паузе(?: |$)/u.test(words);
 }
 
@@ -117,6 +140,8 @@ export function playerControlRequest(text: string): boolean {
 // Keep song titles and any extra words outside this closed set.
 export function contextualCommand(text: string, paused: boolean, radio = false): string {
   const cleaned = commandLeadIn(text);
+  // Explicit mode commands already have a direct route without classification.
+  if (modeCommand(cleaned)) return cleaned;
   const alias = controlAlias(cleaned);
   if (alias) return alias;
   const words = normalizeSpeech(cleaned);
@@ -131,7 +156,7 @@ export function contextualCommand(text: string, paused: boolean, radio = false):
 }
 
 // A closed decision model cannot supply arbitrary arguments. Parse numbers in code.
-const ONES: Record<string, number> = {
+export const ONES: Record<string, number> = {
   ноль: 0, один: 1, одна: 1, два: 2, две: 2, три: 3, четыре: 4, пять: 5,
   шесть: 6, семь: 7, восемь: 8, девять: 9, десять: 10, одиннадцать: 11,
   двенадцать: 12, тринадцать: 13, четырнадцать: 14, пятнадцать: 15,
@@ -139,6 +164,34 @@ const ONES: Record<string, number> = {
   двадцать: 20, тридцать: 30, сорок: 40, пятьдесят: 50, шестьдесят: 60,
   семьдесят: 70, восемьдесят: 80, девяносто: 90, сто: 100,
 };
+
+export function isNumberWord(word: string): boolean {
+  return /^\d+$/u.test(word) || ONES[word] !== undefined
+    || /^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)$/u.test(word);
+}
+
+export function isMathExpression(text: string): boolean {
+  if (/https?:\/\//iu.test(text)) return false;
+  if (/[\+^÷×]/u.test(text)) return true;
+  if (/=\s*\d|\d\s*=/u.test(text)) return true;
+  if (/\d\s*[\/\-−]\s*\d/u.test(text)) return true;
+  if (/\b\d+\s*[xх*]\s*\d+\b/iu.test(text)) return true;
+
+  const normalized = normalizeSpeech(text);
+  const words = normalized.split(' ').filter(Boolean);
+  if (!words.length) return false;
+
+  if (words.some((w) => /^(?:умножить|умножь|умноженное|умноженная|поделить|разделить|раздели|деленное|квадратный|факториал|синус|косинус|тангенс|логарифм)$/u.test(w))) return true;
+  if ((words.includes('плюс') || words.includes('минус') || words.includes('прибавить') || words.includes('прибавь') || words.includes('отнять') || words.includes('вычесть') || words.includes('равно'))
+    && words.some(isNumberWord)) return true;
+
+  if (/^(?:сколько будет|посчитай|вычисли|реши|решите|сосчитай|пересчитай|калькулятор)(?: |$)/u.test(normalized)) return true;
+  if (/^(?:раз|раз два|раз два три|раз раз)(?: |$)/u.test(normalized)) return true;
+
+  if (words.every(isNumberWord)) return true;
+
+  return false;
+}
 
 export function parseVolume(text: string): number | null {
   // Reject decimals, signs and multiple separate values instead of clamping a guess.
@@ -165,11 +218,12 @@ export function parseVolume(text: string): number | null {
 export function unsupportedSpeech(text: string): boolean {
   const mode = modeCommand(text);
   if (mode) return mode.action === 'unknown';
+  if (isMathExpression(text)) return true;
   const words = normalizeSpeech(text).split(' ');
   if (!words[0] || words.length > 35
     || words.some((word) => /^(не|нет|если|потом|затем|сначала|и|или|но|not|no|never|dont|and|or|then|but)$/.test(word))
     || /^(?:don t|do not|please don t)(?: |$)/u.test(words.join(' '))) return true;
-  if (/\?/u.test(text) || /^(как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|мне нравится|музыка на паузе)(?: |$)/u.test(words.join(' '))) return true;
+  if (/\?/u.test(text) || /^(как|кто|когда|почему|зачем|расскажи|покажи|привет|спасибо|мне нравится|музыка на паузе|что|че|чо|где|куда|откуда|сколько|какой|какая|какое|какие|чей|посчитай|вычисли|реши|скажи|объясни|переведи|помоги|погода|новости|анекдот|шутка|здравствуй|здравствуйте|пока|до свидания|ладно|хорошо|ясно|понятно|ок|окей|проверка|тест)(?: |$)/u.test(words.join(' '))) return true;
   if (words.some((word) => /^(добавь|найди|поиск|сыграй|воспроизведи|очисти|плейлист|песн\p{L}*)$/u.test(word))) return true;
   if (words.includes('включи') || words.includes('включить')) return true;
   if (words.includes('поставь') || words.includes('поставить')) {

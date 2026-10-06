@@ -3,13 +3,117 @@ import test from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { contextualCommand, isWakePhrase, modeCommand, parseVolume, ruleIntent, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
+import { contextualCommand, isWakePhrase, modeCommand, parseVolume, playerControlRequest, ruleIntent, validateIntent, validateWakeName, type VoiceIntent } from '../src/voice/intents.js';
 import { extractMusicRequest } from '../src/voice/music.js';
+import { EXTRA_VOICE_PHRASES } from '../src/voice/phrases.js';
 import { VoiceSettings } from '../src/voice/settings.js';
 import { VoiceSession, type VoiceBackend, type VoiceDiagnostic, type VoiceHost } from '../src/voice/session.js';
 import type { TrainingExample } from '../src/voice/training.js';
 
 const audio = Buffer.from([0, 0]);
+test('extended phrase dictionary works through rules and voice sessions without changing music titles', async () => {
+  for (const [canonical, phrases] of Object.entries(EXTRA_VOICE_PHRASES)) {
+    const expected = ruleIntent(canonical);
+    assert.notEqual(expected.action, 'unknown', canonical);
+    const h = harness({ classify: async (text) => {
+      assert.equal(text, canonical);
+      return { action: expected.action, confidence: 0.99 };
+    } }, { playMusic: async () => { assert.fail('Control must not search for music'); } });
+    try {
+      for (const phrase of phrases) {
+        for (const text of [phrase, `Ну, ${phrase}, пожалуйста!`]) {
+          assert.deepEqual(ruleIntent(text), expected, text);
+          assert.equal(playerControlRequest(text), true, text);
+          assert.equal(extractMusicRequest(text, true), null, text);
+          h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
+          h.setText(text); await h.session.begin('alice')!.complete(audio);
+        }
+        for (const text of [`Не ${phrase}`, `${phrase}?`, `${phrase} и пауза`, `${phrase} завтра`]) {
+          assert.deepEqual(ruleIntent(text), { action: 'unknown' }, text);
+        }
+        const title = `Включи песню ${phrase}`;
+        assert.deepEqual(extractMusicRequest(title), { kind: 'search', query: phrase }, title);
+      }
+      assert.deepEqual(h.actions, phrases.flatMap(() => [expected, expected]), canonical);
+    } finally { h.session.disable(); }
+  }
+});
+
+test('spoken volume aliases preserve the range and reject malformed or relative values', () => {
+  for (const text of ['Выставь громкость 50', 'Задай звук на пятьдесят процентов',
+    'Поставь звук до 50', 'Установи громкость до 50', 'Звук на 50', 'Сделай громкость на 50']) {
+    assert.equal(contextualCommand(text, false), 'Громкость 50', text);
+    assert.deepEqual(ruleIntent(text), { action: 'volume_set', level: 50 }, text);
+    assert.equal(extractMusicRequest(text, true), null, text);
+  }
+  for (const text of ['Задай звук 0', 'Выставь громкость 151', 'Звук -10', 'Звук 10.5',
+    'Звук 10,5', 'Выставь громкость пять пять', 'Звук на 50 и пауза', 'Прибавь звук на 20']) {
+    assert.deepEqual(ruleIntent(text), { action: 'unknown' }, text);
+  }
+});
+
+const conversationalControls = [
+  ['skip', 'Следующий трек', ['Следующее', 'Следующая', 'Следующий', 'Далее', 'Дальше',
+    'Включи следующую', 'Включи следующее', 'Включить следующий трек', 'Поставь следующую песню',
+    'Запусти следующий', 'Сыграй следующую композицию', 'Включи другую песню', 'Поставь другой трек',
+    'Пропусти эту', 'Пропусти этот трек', 'Пропустить текущую песню', 'Пропускай', 'Скипнуть',
+    'Поменяй песню', 'Смени трек', 'Переключи на следующую', 'Переключись на следующий трек',
+    'Перейди к следующему треку', 'Переходи к следующей песне', 'Дальше по очереди']],
+  ['pause', 'Поставь на паузу', ['Сделай паузу', 'Нажми паузу', 'Поставь музыку на паузу',
+    'Поставь трек на паузу', 'Приостановить воспроизведение', 'Притормози', 'Притормози песню']],
+  ['resume', 'Продолжи музыку', ['Сними паузу', 'Убери паузу', 'Убери с паузы', 'Сними трек с паузы',
+    'Снять с паузы', 'Продолжить играть', 'Возобновить музыку', 'Возобнови проигрывание']],
+  ['stop', 'Останови музыку', ['Стоп музыка', 'Остановить', 'Останови плеер', 'Выключить музыку',
+    'Выключай музыку', 'Отключи музыку', 'Хватит музыки', 'Перестань играть', 'Прекрати воспроизведение',
+    'Выйти из канала', 'Отключись от голосового канала']],
+  ['volume_up', 'Сделай громче', ['Прибавь громкость', 'Добавь громкости', 'Добавь звука',
+    'Погромче сделай', 'Сделай музыку громче', 'Сделай звук погромче', 'Увеличить громкость']],
+  ['volume_down', 'Сделай тише', ['Убавь громкость', 'Убавь звука', 'Потише сделай',
+    'Сделай музыку тише', 'Сделай трек потише', 'Уменьшить громкость']],
+] as const;
+
+test('conversational controls share canonical routing in both voice profiles', () => {
+  for (const [action, canonical, phrases] of conversationalControls) {
+    for (const phrase of phrases) {
+      for (const text of [phrase, `Ну, ${phrase}, пожалуйста!`]) {
+        const direct = modeCommand(text);
+        const resolved = contextualCommand(text, false);
+        if (direct) assert.deepEqual(direct, { action }, text);
+        else assert.equal(resolved, canonical, text);
+        assert.equal(contextualCommand(text, true), resolved, text);
+        assert.equal(playerControlRequest(text), true, text);
+        assert.equal(extractMusicRequest(text, true), null, text);
+        assert.deepEqual(ruleIntent(text), { action }, text);
+        assert.deepEqual(validateIntent(resolved, { action, confidence: 0.99 }), { action }, text);
+      }
+      for (const text of [`Не ${phrase}`, `${phrase}?`, `${phrase} и сделай паузу`, `${phrase} завтра`]) {
+        assert.deepEqual(ruleIntent(text), { action: 'unknown' }, text);
+      }
+    }
+  }
+  for (const title of ['Следующее', 'Next', 'Сделай паузу', 'Поменяй песню', 'Хватит музыки']) {
+    const text = `Включи песню ${title}`;
+    assert.deepEqual(extractMusicRequest(text, true), { kind: 'search', query: title }, text);
+    assert.deepEqual(ruleIntent(text), { action: 'unknown' }, text);
+  }
+});
+
+test('voice session classifies canonical conversational requests and executes controls without music search', async () => {
+  for (const [action, canonical, phrases] of conversationalControls) {
+    const h = harness({ classify: async (text) => {
+      assert.equal(text, canonical);
+      return { action, confidence: 0.99 };
+    } }, { playMusic: async () => { assert.fail('Control must not search for music'); } });
+    try {
+      for (const phrase of phrases) {
+        h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
+        h.setText(phrase); await h.session.begin('alice')!.complete(audio);
+      }
+      assert.deepEqual(h.actions, phrases.map(() => ({ action })));
+    } finally { h.session.disable(); }
+  }
+});
+
 test('light command rules cover controls and reject titles, negations and ambiguous requests', () => {
   const cases: [string, VoiceIntent][] = [
     ['next track', { action: 'skip' }], ['Вот, следующее пожалуйста', { action: 'skip' }],
@@ -504,5 +608,41 @@ test('neural wake detector on compound command activates cloud STT and executes 
     await h.session.begin('alice')!.complete(longAudio);
     assert.equal(cloudTranscribed, true, 'cloud STT called for compound command');
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
+  } finally { h.session.disable(); }
+});
+
+test('math expressions and conversational queries never enqueue music in a voice session', async () => {
+  const feedbackCalls: string[] = [];
+  const h = harness({ classify: async () => ({ action: 'unknown', confidence: 1 }) },
+    {
+      playMusic: async () => { assert.fail('Math and conversational queries must never search for music'); },
+      feedback: async (key) => { feedbackCalls.push(key); },
+    });
+  try {
+    for (const phrase of ['2 + 2', 'два плюс два', 'посчитай 2 + 2', 'сколько будет 2 + 2', 'включи 2 + 2', 'что делаешь', 'как дела', 'погода', 'включи свет', 'поставь таймер']) {
+      h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
+      h.setText(phrase); await h.session.begin('alice')!.complete(audio);
+      assert.equal(h.actions.length, 0);
+      assert.equal(h.ducked, false);
+    }
+    assert.ok(feedbackCalls.every((call) => call === 'unknown'));
+  } finally { h.session.disable(); }
+});
+
+test('compound utterance with math expression does not enqueue music', async () => {
+  const feedbackCalls: string[] = [];
+  const h = harness({
+    detectWake: async () => ({ wake: true, probability: 0.99 }),
+    classify: async () => ({ action: 'unknown', confidence: 1 }),
+    transcribe: async () => 'Бот, 2 + 2',
+  }, {
+    playMusic: async () => { assert.fail('Compound math must not search for music'); },
+    feedback: async (key) => { feedbackCalls.push(key); },
+  });
+  try {
+    const longAudio = Buffer.alloc(2000 * 32);
+    await h.session.begin('alice')!.complete(longAudio);
+    assert.equal(h.actions.length, 0);
+    assert.deepEqual(feedbackCalls, ['unknown']);
   } finally { h.session.disable(); }
 });

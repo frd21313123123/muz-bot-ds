@@ -55,3 +55,16 @@ test('unsupported host and malformed video id fail before invoking yt-dlp', () =
   assert.throws(() => classifyQuery('https://example.com/watch?v=abcdefghijk'));
   assert.throws(() => classifyQuery('https://www.youtube.com/watch?v=bad'));
 });
+
+test('fast resolve on video url creates track immediately without calling metadata.video', async () => {
+  seen.length = 0;
+  const result = await resolveQuery('https://www.youtube.com/watch?v=abcdefghijk', 'Alice', metadata, 1, { fast: true });
+  assert.equal(result?.type, 'single');
+  if (result?.type === 'single') {
+    assert.equal(result.track.videoId, 'abcdefghijk');
+    assert.equal(result.track.title, 'Загрузка…');
+    assert.equal(result.track.duration, '?');
+    assert.equal(result.track.url, 'https://www.youtube.com/watch?v=abcdefghijk');
+  }
+  assert.equal(seen.length, 0, 'metadata.video must not be called in fast mode');
+});

@@ -153,7 +153,7 @@ test('speed can be set before playback and failed replacements keep the original
   assert.throws(() => queue.setSpeed(1), /остановлена/);
 });
 
-test('manual track added while recommendations load plays before them', async () => {
+test('manual track added while recommendations load discards stale recommendations and plays the manual track', async () => {
   const streams: PassThrough[] = [];
   let resolveRelated: ((tracks: Track[]) => void) | undefined;
   const related = new Promise<Track[]>((resolve) => { resolveRelated = resolve; });
@@ -176,10 +176,54 @@ test('manual track added while recommendations load plays before them', async ()
     await queue.addTrack(track('bbbbbbbbbbb'));
     resolveRelated?.([{ ...track('ccccccccccc'), isAutoplay: true }]);
     await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
-    assert.deepEqual(queue.tracks.map((item) => item.videoId), ['ccccccccccc']);
+    assert.deepEqual(queue.tracks.map((item) => item.videoId), []);
     assert.equal(streams[0]?.destroyed, true);
   } finally {
     resolveRelated?.([]);
+    await queue.stop();
+  }
+});
+
+test('autoplay clears recommendations from old track when a new track is queued or played, and picks from the new track', async () => {
+  const calls: string[] = [];
+  const suggestions: Record<string, Track[]> = {
+    aaaaaaaaaaa: [{ ...track('rec_a1'), isAutoplay: true }, { ...track('rec_a2'), isAutoplay: true }],
+    bbbbbbbbbbb: [{ ...track('rec_b1'), isAutoplay: true }, { ...track('rec_b2'), isAutoplay: true }],
+  };
+  const client = {
+    queues: new Map(),
+    ytdlp: { related: async (id: string) => { calls.push(id); return suggestions[id] ?? []; } },
+  } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-autoplay-switch', client, () => {
+    const stream = new PassThrough();
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  client.queues.set(queue.guildId, queue);
+  try {
+    queue.setAutoplay(true);
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    // aaaaaaaaaaa ends, recommendations for aaaaaaaaaaa load
+    queue.player.stop(true);
+    await waitFor(() => queue.currentTrack?.videoId === 'rec_a1');
+    assert.equal(calls[0], 'aaaaaaaaaaa');
+    assert.deepEqual(queue.tracks.map((t) => t.videoId), ['rec_a2']);
+
+    // User switches to new song bbbbbbbbbbb
+    await queue.addTrack(track('bbbbbbbbbbb'));
+    // Old recommendations must be cleared, leaving only bbbbbbbbbbb in queue
+    assert.deepEqual(queue.tracks.map((t) => t.videoId), ['bbbbbbbbbbb']);
+
+    // Skip current autoplay song rec_a1 to play bbbbbbbbbbb
+    queue.skip();
+    await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
+    assert.equal(queue.tracks.length, 0);
+
+    // bbbbbbbbbbb ends, bot must now pick from bbbbbbbbbbb, NOT aaaaaaaaaaa!
+    queue.player.stop(true);
+    await waitFor(() => queue.currentTrack?.videoId === 'rec_b1');
+    assert.equal(calls[1], 'bbbbbbbbbbb');
+    assert.deepEqual(queue.tracks.map((t) => t.videoId), ['rec_b2']);
+  } finally {
     await queue.stop();
   }
 });
@@ -412,5 +456,68 @@ test('audible cue preserves playing and paused resources, which can subsequently
         assert.equal(queue.player.state.resource, before.resource);
       }
     } finally { await queue.stop(); }
+  }
+});
+
+test('next track is prefetched when remaining duration is under 20s, and advance uses prepared media', async () => {
+  const streams: PassThrough[] = [];
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-prefetch', client, () => {
+    const stream = new PassThrough();
+    streams.push(stream);
+    return { stream, type: StreamType.OggOpus, destroy: () => stream.destroy() };
+  });
+  client.queues.set(queue.guildId, queue);
+  try {
+    const track1: Track = { ...track('aaaaaaaaaaa'), duration: '0:15' };
+    const track2: Track = { ...track('bbbbbbbbbbb'), duration: '1:00' };
+    await queue.addTrack(track1);
+    await queue.addTrack(track2);
+    await waitFor(() => streams.length >= 2);
+    assert.equal(streams.length, 2, 'Track 2 should have been prefetched while Track 1 is playing');
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    queue.player.stop(true);
+    await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
+    assert.equal(streams.length, 2, 'Advance should have used the prefetched stream');
+    assert.equal(streams[0]?.destroyed, true);
+  } finally {
+    await queue.stop();
+  }
+});
+
+test('background metadata hydration updates track title, duration, and thumbnail without stalling playback', async () => {
+  const client = {
+    queues: new Map(),
+    ytdlp: {
+      related: async () => [],
+      video: async () => ({
+        id: 'fastvideo111',
+        title: 'Hydrated Title',
+        duration: 185,
+        thumbnail: 'https://img.youtube.com/vi/fastvideo111/maxresdefault.jpg',
+      }),
+    },
+  } as unknown as MusicClient;
+  const raw = new PassThrough();
+  const queue = new GuildQueue('guild-hydrate', client, () => ({
+    stream: raw, type: StreamType.Raw, destroy: () => raw.destroy(),
+  }));
+  client.queues.set(queue.guildId, queue);
+  try {
+    const fastTrack: Track = {
+      videoId: 'fastvideo111',
+      url: 'https://www.youtube.com/watch?v=fastvideo111',
+      title: 'Загрузка…',
+      duration: '?',
+      thumbnail: null,
+      requestedBy: 'Tester',
+    };
+    await queue.addTrack(fastTrack);
+    assert.equal(queue.currentTrack?.videoId, 'fastvideo111');
+    await waitFor(() => queue.currentTrack?.title === 'Hydrated Title');
+    assert.equal(queue.currentTrack?.duration, '3:05');
+    assert.equal(queue.currentTrack?.thumbnail, 'https://img.youtube.com/vi/fastvideo111/maxresdefault.jpg');
+  } finally {
+    await queue.stop();
   }
 });

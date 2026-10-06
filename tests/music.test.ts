@@ -84,6 +84,27 @@ test('bare query support preserves control priority and rejects missing context,
   }
 });
 
+test('strict filters reject math expressions, calculations, assistant commands, and device targets', () => {
+  for (const message of [
+    '2 + 2', '2+2', '2 - 2', '5 * 5', '10 / 2', 'два плюс два',
+    'Бот 2 + 2', 'Бот, 2 + 2', 'бот два плюс два',
+    'включи 2 + 2', 'поставь 2 + 2', 'сыграй 2 + 2', 'включи два плюс два', 'поставь два плюс два',
+    'сколько будет 2 + 2', 'сколько будет два плюс два', 'посчитай 2 плюс 2', 'вычисли 5 на 5',
+    'включи свет', 'включи микрофон', 'включи звук', 'включи камеру', 'включи демонстрацию экрана',
+    'поставь таймер', 'поставь будильник', 'поставь чайник', 'сыграй в города', 'сыграй в шахматы',
+    '123', 'раз два три', 'сорок два',
+    'что делаешь', 'как дела', 'кто ты', 'где ты', 'сколько времени', 'какая погода',
+    'погода в Москве', 'анекдот', 'новости', 'переведи на английский',
+    'привет', 'здравствуйте', 'до свидания', 'пока', 'спасибо',
+    'ты тут', 'ты меня слышишь', 'проверка', 'проверка микрофона', 'тест связи',
+  ]) {
+    assert.equal(extractMusicRequest(message, true), null, message);
+    assert.equal(extractMusicRequest(message, false), null, message);
+  }
+  assert.deepEqual(extractMusicRequest('включи песню Свет'), { kind: 'search', query: 'Свет' });
+  assert.deepEqual(extractMusicRequest('поставь песню Таймер'), { kind: 'search', query: 'Таймер' });
+});
+
 test('conversational and ASR command forms retain a song-from request without accepting negation or context', () => {
   for (const text of ['включи песню из Лунтика', 'Вот включи песню из Лунтика',
     'Ну, включи песню из Лунтика', 'Пожалуйста, включи песню из Лунтика',

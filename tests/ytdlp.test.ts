@@ -26,43 +26,49 @@ test('search uses only the YouTube Music songs section, keeps order and removes 
   assert.equal(calls[2]?.[3], `https://music.youtube.com/search?q=${encodeURIComponent('Кино & live #1')}#songs`);
 });
 
-test('song search hydrates only the selected ID with full duration and live status', async () => {
-  const checked: string[] = [];
+test('song search returns candidates immediately without blocking on video metadata', async () => {
+  let videoCalled = false;
   class Stub extends YtdlpClient {
     override async json(): Promise<VideoInfo> {
       return { entries: [{ id: '5FHjH3NBFDI', title: 'Не дано' }, { id: 'bbbbbbbbbbb', title: 'Another' }] };
     }
     override async video(url: string): Promise<VideoInfo> {
-      checked.push(url);
-      return { id: '5FHjH3NBFDI', title: 'Не дано', duration: 216, duration_string: '3:36', live_status: 'not_live' };
+      videoCalled = true;
+      return { id: '5FHjH3NBFDI', title: 'Не дано', duration: 216 };
     }
   }
   const client = new Stub({ command: 'unused', prefix: [] });
   const candidates = await client.searchCandidates('Hi-Fi Не дано');
-  assert.deepEqual(checked, ['https://www.youtube.com/watch?v=5FHjH3NBFDI']);
-  assert.equal(candidates[0]?.duration, 216);
-  assert.equal(candidates[0]?.live_status, 'not_live');
+  assert.equal(videoCalled, false, 'searchCandidates must not block on video metadata');
+  assert.equal(candidates[0]?.id, '5FHjH3NBFDI');
+  assert.equal(candidates[0]?.title, 'Не дано');
   assert.equal(candidates[1]?.id, 'bbbbbbbbbbb');
-  assert.equal((await client.search('Hi-Fi Не дано'))?.duration, 216);
+  assert.equal((await client.search('Hi-Fi Не дано'))?.id, '5FHjH3NBFDI');
 });
 
-test('failed or mismatched metadata keeps the selected song, but cancelled metadata cannot return a track', async () => {
-  const controller = new AbortController();
-  let mode: 'error' | 'mismatch' | 'abort' = 'error';
+test('search candidates and videos are cached, and clearCache resets them', async () => {
+  let jsonCalls = 0;
   class Stub extends YtdlpClient {
-    override async json(): Promise<VideoInfo> { return { entries: [{ id: 'aaaaaaaaaaa', title: 'Selected' }] }; }
-    override async video(): Promise<VideoInfo> {
-      if (mode === 'error') throw new Error('temporary metadata failure');
-      if (mode === 'abort') controller.abort();
-      return { id: 'bbbbbbbbbbb', title: 'Wrong song', duration: 200 };
+    override async json(): Promise<VideoInfo> {
+      jsonCalls++;
+      return { id: 'aaaaaaaaaaa', entries: [{ id: 'aaaaaaaaaaa', title: 'Cached Song' }] };
     }
   }
   const client = new Stub({ command: 'unused', prefix: [] });
-  assert.equal((await client.search('Song'))?.id, 'aaaaaaaaaaa');
-  mode = 'mismatch';
-  assert.equal((await client.search('Song'))?.id, 'aaaaaaaaaaa');
-  mode = 'abort';
-  await assert.rejects(client.searchCandidates('Song', 5, controller.signal));
+  const first = await client.searchCandidates('Cached Song', 5);
+  const second = await client.searchCandidates('Cached Song', 5);
+  assert.equal(jsonCalls, 1);
+  assert.deepEqual(first, second);
+
+  // Video caching
+  await client.video('https://www.youtube.com/watch?v=aaaaaaaaaaa');
+  await client.video('https://www.youtube.com/watch?v=aaaaaaaaaaa');
+  assert.equal(jsonCalls, 2);
+
+  // Clear cache resets them
+  client.clearCache();
+  await client.searchCandidates('Cached Song', 5);
+  assert.equal(jsonCalls, 3);
 });
 
 test('radio recommendations skip the current video and duplicate entries', async () => {

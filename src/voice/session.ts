@@ -204,7 +204,7 @@ export class VoiceSession {
           const direct = modeCommand(text);
           const radio = extractRadioRequest(text, true);
           const explicitMusic = !radio ? extractMusicRequest(text) : null;
-          const music = explicitMusic ?? (!radio ? extractMusicRequest(text, true) : null);
+          const music = explicitMusic ?? (!radio && command ? extractMusicRequest(text, true) : null);
           const unsupported = !music && unsupportedSpeech(text);
           const wakeMatched = localWakeDetected || isWakePhrase(transcript, this.host.wakeName()) || isWakePhrase(text, this.host.wakeName());
 
@@ -223,7 +223,7 @@ export class VoiceSession {
             paused, canonicalized: text !== transcript, matched: !command && wakeMatched,
             requestKind: command ? (radio?.kind === 'station' ? 'radio' : music?.kind ?? (unsupported ? 'rejected' : 'control')) : undefined });
 
-          const shouldExecuteCommand = command || (localWakeDetected && (direct || radio || music || playerControlRequest(text)));
+          const shouldExecuteCommand = command || (localWakeDetected && (direct || radio || music || playerControlRequest(text) || unsupported));
           if (shouldExecuteCommand) {
             // Bare titles first pass through control classification. Explicit
             // play requests remain independent of model routing/artist labels.
