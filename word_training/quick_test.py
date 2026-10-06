@@ -35,18 +35,20 @@ from wake_audio import WakeDetector, read_wav
 
 
 def main():
-    model_dir = ROOT / 'word_training/runs/bot-v5-acc90/wake-model'
+    model_dir = ROOT / 'models/wake-model'
     if not (model_dir / 'wake_model.onnx').exists():
-        print("Ошибка: модель bot-v5-acc90 не найдена.")
+        model_dir = ROOT / 'word_training/runs/bot-v6-hardneg/wake-model-opt'
+    if not (model_dir / 'wake_model.onnx').exists():
+        print("Ошибка: обученная модель не найдена.")
         return
 
     detector = WakeDetector(model_dir)
-    threshold = 0.95
+    threshold = float(detector.config.get('threshold', 0.99))
 
     print("\n" + CYAN + "=" * 70)
     print("  🧪 БЫСТРЫЙ ТЕСТ МОДЕЛИ НА АУДИОЗАПИСЯХ (БОТ vs ДРУГИЕ СЛОВА/ШУМ)")
     print("=" * 70 + RESET)
-    print(f"  Модель: {model_dir.name} (INT8 ONNX)")
+    print(f"  Модель: {detector.config.get('recipe_version', model_dir.name)} (INT8 ONNX)")
     print(f"  Порог детекции: {threshold * 100:.2f}%\n")
 
     dataset_wav_dir = ROOT / 'word_training/runs/bot-v2/dataset/wav'
