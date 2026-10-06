@@ -1,6 +1,6 @@
 {
   "engine": "bundled",
-  "voice": "short-ru/xenia",
+  "voice": "elevenlabs/artspace",
   "sampleRate": 48000,
   "channels": 2,
   "phrases": {
@@ -23,7 +23,7 @@
     "volume_set": "Громкость изменена.",
     "volume_up": "Громче.",
     "volume_down": "Тише.",
-    "unknown": "Не поняла.",
+    "unknown": "Не понял.",
     "not_found": "Трек не найден."
   }
 }
