@@ -166,8 +166,7 @@ const play: Command = {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const radioRequest = extractRadioRequest(interaction.options.getString('query', true), true);
     if (radioRequest?.kind === 'station') return startRadio(interaction, client, radioRequest.station);
-    if (radioRequest) return interaction.editReply(radioRequest.kind === 'unsupported'
-      ? '❌ Радиостанция не поддерживается. Выберите станцию из подсказок /radio.' : '❌ Укажите одну станцию или песню без отрицания.');
+    if (radioRequest?.kind === 'rejected') return interaction.editReply('❌ Укажите одну станцию или песню без отрицания.');
     if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
     const channel = memberVoiceChannel(interaction);
     if (!channel) return interaction.editReply('❌ Войдите в голосовой канал.');

@@ -38,7 +38,7 @@ function harness(factory?: (url: string) => ManagedAudioStream, retryDelays: rea
 }
 
 test('every radio name, ID and alias resolves, with anchored Russian commands and Latin station names', () => {
-  assert.equal(radioStations.length, 10);
+  assert.equal(radioStations.length, 11);
   for (const item of radioStations) {
     for (const alias of [item.id, item.name, ...item.aliases]) {
       assert.equal(findRadioStation(alias)?.id, item.id, alias);
@@ -52,13 +52,17 @@ test('every radio name, ID and alias resolves, with anchored Russian commands an
   assert.equal(extractRadioRequest('Европа Плюс'), null, 'bare names require an explicit command window');
   assert.equal(extractRadioRequest('Вот, включи Ретро FM, пожалуйста')?.kind, 'station');
   assert.equal(extractRadioRequest('включи неизвестную группу'), null);
+  assert.equal(extractRadioRequest('Включи радио Хит'), null, 'ordinary play queries with radio must fall through to music');
+  assert.equal(extractRadioRequest('Включи Радио Тапок'), null, 'artists containing radio must not be intercepted');
+  assert.equal(extractRadioRequest('Включи Хит FM')?.kind, 'station');
+  assert.equal(extractRadioRequest('Включи радиостанцию Хит')?.kind, 'unsupported', 'explicit radio station commands reject unsupported stations');
   assert.equal(extractRadioRequest('Включи радио неизвестное')?.kind, 'unsupported');
   assert.equal(extractRadioRequest('Радио России', true)?.kind, 'unsupported');
   assert.equal(extractRadioRequest('Включи песню Radio Ga Ga'), null);
   assert.equal(extractRadioRequest('Включи песню Европа Плюс'), null);
   assert.equal(extractRadioRequest('Включи Numb и Encore'), null);
   assert.deepEqual(radioSuggestions('ретро'), [{ name: 'Ретро FM', value: 'retro-fm' }]);
-  assert.equal(radioSuggestions('').length, 10);
+  assert.equal(radioSuggestions('').length, 11);
 });
 
 test('negated, questioned and compound radio requests cannot become songs or controls', () => {

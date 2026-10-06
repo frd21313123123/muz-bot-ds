@@ -32,6 +32,9 @@ except ImportError as err:
 def find_default_model():
     """Find the best available trained wake model."""
     candidates = [
+        ROOT / 'models/wake-model',
+        ROOT / 'word_training/runs/bot-v6-hardneg/wake-model-opt',
+        ROOT / 'word_training/runs/bot-v6-hardneg/wake-model',
         ROOT / 'word_training/runs/bot-v5-acc90/wake-model',
         ROOT / 'word_training/runs/bot-v5-acc90-output/wake-model',
         ROOT / 'word_training/runs/bot-best-v3/model',
@@ -102,6 +105,7 @@ def run_mic_listener(model_dir: Path, device: int | None = None, threshold_overr
     buffer = np.zeros(N_SAMPLES, dtype=np.float32)
     audio_queue = queue.Queue()
     last_trigger_time = 0.0
+    consecutive_hits = 0
 
     def audio_callback(indata, frames, time_info, status):
         if status:
@@ -128,6 +132,7 @@ def run_mic_listener(model_dir: Path, device: int | None = None, threshold_overr
                 now = time.time()
                 # Skip detection during cooldown period
                 if now - last_trigger_time < cooldown_sec:
+                    consecutive_hits = 0
                     continue
 
                 # Run neural network prediction
@@ -139,7 +144,14 @@ def run_mic_listener(model_dir: Path, device: int | None = None, threshold_overr
                     print(f"\r[Слушаю...] Вероятность «{wake_word}»: [{'#' * bars}{'.' * (20 - bars)}] {prob * 100:5.1f}%", end='', flush=True)
 
                 if prob >= threshold:
+                    consecutive_hits += 1
+                else:
+                    consecutive_hits = 0
+
+                # Require 2 consecutive frames (persistence) or strong peak (>= 0.9985)
+                if (consecutive_hits >= 2 or prob >= 0.9985) and (now - last_trigger_time >= cooldown_sec):
                     last_trigger_time = now
+                    consecutive_hits = 0
                     on_wake_word_detected(wake_word, prob, now, chime=enable_chime)
 
     except KeyboardInterrupt:

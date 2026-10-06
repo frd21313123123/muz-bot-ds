@@ -50,6 +50,9 @@ except ImportError as err:
 
 def find_best_model():
     candidates = [
+        ROOT / 'models/wake-model',
+        ROOT / 'word_training/runs/bot-v6-hardneg/wake-model-opt',
+        ROOT / 'word_training/runs/bot-v6-hardneg/wake-model',
         ROOT / 'word_training/runs/bot-v5-acc90/wake-model',
         ROOT / 'word_training/runs/bot-v5-acc90-output/wake-model',
         ROOT / 'word_training/runs/bot-best-v3/model',
@@ -119,7 +122,7 @@ def main():
     if args.threshold is not None:
         threshold = args.threshold
     else:
-        threshold = float(config.get('threshold', 0.92))
+        threshold = float(config.get('threshold', 0.995))
 
     # Device info
     if args.device is not None:
@@ -149,6 +152,7 @@ def main():
     audio_queue = queue.Queue()
     last_trigger_time = 0.0
     detected_count = 0
+    consecutive_hits = 0
 
     def audio_callback(indata, frames, time_info, status):
         audio_queue.put(indata[:, 0].copy())
@@ -170,8 +174,17 @@ def main():
 
                 if in_cooldown:
                     prob = 0.0
+                    consecutive_hits = 0
                 else:
                     prob = detector.score(buffer)
+
+                if prob >= threshold and not in_cooldown:
+                    consecutive_hits += 1
+                else:
+                    consecutive_hits = 0
+
+                # Require 2 consecutive frames (160ms persistence) or strong peak (>= 0.9985)
+                is_wake = (consecutive_hits >= 2 or prob >= 0.9985) and not in_cooldown
 
                 # Format bars
                 vol_bar = make_bar(vol_pct, length=10)
@@ -180,7 +193,7 @@ def main():
                 # Status label
                 if in_cooldown:
                     status_text = f"{YELLOW}[ ⏳ ПАУЗА ]{RESET} Остывание после срабатывания..."
-                elif prob >= threshold:
+                elif is_wake or prob >= threshold:
                     status_text = f"{GREEN}[ 🔥 ЕСТЬ! ] СЛОВО «{wake_word.upper()}» НАЙДЕНО!{RESET}"
                 elif vol_pct > 0.12:
                     status_text = f"{RED}[ ❌ НЕТ  ]{RESET} Речь есть, слова «{wake_word}» НЕТ"
@@ -188,7 +201,7 @@ def main():
                     status_text = f"{DIM}[ 💤 ТИШ  ] Жду речь...{RESET}"
 
                 # Live dashboard line (overwriting in place)
-                prob_color = GREEN if prob >= threshold else (YELLOW if prob > 0.4 else DIM)
+                prob_color = GREEN if (is_wake or prob >= threshold) else (YELLOW if prob > 0.4 else DIM)
                 line = (
                     f"\rЗвук:[{vol_bar}] | "
                     f"«{wake_word}»:{prob_color}[{prob_bar}] {prob * 100:5.1f}%{RESET} | "
@@ -198,8 +211,9 @@ def main():
                 sys.stdout.flush()
 
                 # Handle detection trigger
-                if prob >= threshold and not in_cooldown:
+                if is_wake:
                     last_trigger_time = now
+                    consecutive_hits = 0
                     detected_count += 1
                     ts_str = time.strftime('%H:%M:%S', time.localtime(now))
                     

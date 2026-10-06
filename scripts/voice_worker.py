@@ -345,7 +345,7 @@ def load_wake_detector():
             except ValueError:
                 pass
         else:
-            detector.config["threshold"] = 0.95
+            detector.config["threshold"] = float(detector.config.get("threshold", 0.995))
         import numpy as np
         detector.detect(np.zeros(32000, dtype=np.float32))
         return detector

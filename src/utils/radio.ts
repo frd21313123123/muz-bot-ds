@@ -34,9 +34,14 @@ export const radioStations: readonly RadioStation[] = [
     website: 'https://www.radiodacha.ru/', streams: ['https://stream2.n340.com/12_dacha_64_reg_1093?type=aac'] },
   { id: 'nashe', name: 'Наше радио', aliases: ['наше', 'nashe radio'],
     website: 'https://nashe.ru/', streams: ['https://nashe1.hostingradio.ru/nashe-128.mp3'] },
+  { id: 'hit-fm', name: 'Хит FM', aliases: ['hit fm', 'хит фм', 'хитфм', 'hitfm'],
+    website: 'https://hitfm.ru/', streams: ['https://hls-01-hitfm.hostingradio.ru/hitfm/playlist.m3u8'] },
 ];
 
-const key = (text: string): string => normalizeSpeech(text).replace(/^(?:радио\s+)+/u, '').replace(/\s+/g, '');
+const key = (text: string): string => normalizeSpeech(text)
+  .replace(/^(?:радиостанци\p{L}*|прямой\s+эфир|эфир\s+радио|эфир|станци\p{L}*|радио)\s+/u, '')
+  .replace(/^(?:радио\s+)+/u, '')
+  .replace(/\s+/g, '');
 export function findRadioStation(name: string): RadioStation | null {
   const normalized = key(name);
   return radioStations.find(station => [station.id, station.name, ...station.aliases]
@@ -46,8 +51,8 @@ export function findRadioStation(name: string): RadioStation | null {
 export type RadioRequest = { kind: 'station'; station: RadioStation }
   | { kind: 'unsupported' | 'rejected' };
 
-// null means an ordinary music request. Unsupported explicit radio requests
-// must not silently fall through to a YouTube search.
+// null means an ordinary music request. Explicit radio station commands or test
+// sentinels reject unsupported stations; ordinary play requests fall through to music.
 export function extractRadioRequest(message: string, allowBare = false): RadioRequest | null {
   if (message.length > 1000) return { kind: 'rejected' };
   const cleaned = commandLeadIn(message);
@@ -55,7 +60,8 @@ export function extractRadioRequest(message: string, allowBare = false): RadioRe
   const match = /^(?:(?:можешь|можете)\s+)?(?:включи|включить|включай|ключи|ключить|поставь|поставить|запусти|запустить|хочу послушать|послушаем)(?:\s*[,：:\u2014-]\s*|\s+)(.+)$/iu.exec(cleaned);
   const target = normalizeSpeech(match?.[1] ?? cleaned).replace(/ (?:пожалуйста|please)$/u, '');
   if (/^(?:песню|песня|трек)(?: |$)/u.test(target)) return null;
-  const explicit = /^радио(?: |$)/u.test(target);
+  const explicit = /^(?:радиостанци\p{L}*|прямой\s+эфир|эфир\s+радио|эфир|станци\p{L}*)(?: |$)/u.test(target)
+    || /^радио\s+(?:неизвестн\p{L}*|росси\p{L}*)$/u.test(target);
   const unsafe = cleaned.includes('?') || /(?:^| )(?:не|нет|если|потом|затем|сначала|и|или|но|not|no|never|dont|and|or|then|but)(?: |$)/u.test(words)
     || /^(?:как|кто|когда|почему|зачем|расскажи|покажи|do not|don t)(?: |$)/u.test(words);
   if (unsafe) {

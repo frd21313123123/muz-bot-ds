@@ -41,13 +41,13 @@ def show_menu():
     print(CYAN + "=" * 74)
     print("   🤖 НЕЙРОСЕТЕВОЙ ДЕТЕКТОР ВЕЙК-ВОРДА «БОТ» (РЕЖИМ АЛИСЫ)")
     print("=" * 74 + RESET)
-    print(f"  {WHITE}Модель:{RESET}     bot-v5-acc90-opt (Full INT8 ONNX)")
-    print(f"  {WHITE}Качество:{RESET}   Recall: 91.8% | Precision: 98.6% | FPR: 0.45%")
-    print(f"  {WHITE}Размер:{RESET}     7.7 МБ (-1.7 МБ оптимизация)")
+    print(f"  {WHITE}Модель:{RESET}     bot-v6-hardneg-opt (Full INT8 ONNX)")
+    print(f"  {WHITE}Качество:{RESET}   Recall: ≥91% | Защита от созвучных слов («боб», «болт» и др.)")
+    print(f"  {WHITE}Размер:{RESET}     7.7 МБ (сверхкомпактная INT8)")
     print(CYAN + "-" * 74 + RESET)
     print(f"  {WHITE}Выберите режим работы:{RESET}\n")
-    print(f"   {GREEN}[1]{RESET} Запустить детектор с микрофона (Порог 92% — Рекомендуется)")
-    print(f"   {YELLOW}[2]{RESET} Запустить с повышенной чувствительностью для тихой речи (Порог 85%)")
+    print(f"   {GREEN}[1]{RESET} Запустить детектор с микрофона (Калиброванный порог — Рекомендуется)")
+    print(f"   {YELLOW}[2]{RESET} Запустить с повышенной чувствительностью для тихой речи (Порог 98%)")
     print(f"   {CYAN}[3]{RESET} Выбрать конкретный микрофон из списка устройств")
     print(f"   {WHITE}[4]{RESET} Быстрый тест на готовых аудиозаписях (без микрофона)")
     print(f"   {DIM}[0] Выход{RESET}")
@@ -71,11 +71,11 @@ def main():
             break
 
         if choice == '1':
-            sys.argv = ['interactive_listener.py', '--threshold', '0.92']
+            sys.argv = ['interactive_listener.py']
             interactive_listener.main()
             safe_pause()
         elif choice == '2':
-            sys.argv = ['interactive_listener.py', '--threshold', '0.85']
+            sys.argv = ['interactive_listener.py', '--threshold', '0.98']
             interactive_listener.main()
             safe_pause()
         elif choice == '3':
@@ -94,7 +94,7 @@ def main():
                 print(CYAN + "=" * 70 + RESET)
                 dev_idx_str = input("\nВведите номер микрофона: ").strip()
                 if dev_idx_str.isdigit() and int(dev_idx_str) in inputs:
-                    sys.argv = ['interactive_listener.py', '--device', dev_idx_str, '--threshold', '0.92']
+                    sys.argv = ['interactive_listener.py', '--device', dev_idx_str]
                     interactive_listener.main()
                 else:
                     print("Неверный номер устройства.")

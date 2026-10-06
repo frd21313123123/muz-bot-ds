@@ -17,6 +17,7 @@
     "update:ytdlp": "npm run build && node dist/src/update-ytdlp.js",
     "setup:voice": "npm run build && node dist/src/setup-voice.js",
     "setup:tts": "npm run build && node dist/src/setup-tts.js",
+    "import:sounds": "node scripts/import_sounds.js",
     "test:tts": "npm run build && node dist/integration/tts.js",
     "test:voice": "npm run build && node dist/integration/voice.js",
     "test:groq": "npm run build && node dist/integration/groq.js",
