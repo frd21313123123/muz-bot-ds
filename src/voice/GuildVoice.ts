@@ -55,6 +55,7 @@ export class GuildVoice {
       cue: (signal) => this.queue.playVoiceCue(signal),
       duck: (enabled) => this.queue.setVoiceDucking(enabled),
       diagnostic,
+      archiveAudio: (pcm) => this.queue.client.voiceDriveArchive?.append(pcm),
       playerState: () => ({ connected: Boolean(this.queue.connection),
         playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
         paused: this.queue.isPaused,

@@ -8,6 +8,7 @@ import { VoiceRuntime } from './voice/runtime.js';
 import { VoiceSettings } from './voice/settings.js';
 import { LocalTts } from './voice/tts.js';
 import { VoiceTrainingLog } from './voice/training.js';
+import { VoiceDriveArchive } from './voice/drive.js';
 
 async function main(): Promise<void> {
   if (!process.env.DISCORD_TOKEN) throw new Error('Укажите DISCORD_TOKEN в .env');
@@ -24,6 +25,11 @@ async function main(): Promise<void> {
   client.voiceRuntime.on('failure', (event) => console.error('[Voice] Сбой обработчика:', JSON.stringify({ at: new Date().toISOString(), ...event })));
   client.voiceRuntime.on('recovering', (event) => console.error('[Voice] Перезапуск обработчика:', JSON.stringify(event)));
   client.voiceTrainingLog = new VoiceTrainingLog();
+  client.voiceDriveArchive = new VoiceDriveArchive();
+  client.voiceDriveArchive.start();
+  if (client.voiceDriveArchive.enabled) console.log(client.voiceDriveArchive.configured
+    ? '[Drive] Сохранение голосовых команд в WAV и загрузка в Google Drive включены.'
+    : '[Drive] WAV сохраняются локально; для загрузки настройте GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET и GOOGLE_DRIVE_REFRESH_TOKEN.');
   if (client.voiceTrainingLog.enabled) console.log('[NLI] Учебный журнал команд включён: .runtime/nli (текст, без аудио).');
   const tts = new LocalTts();
   client.voiceTts = tts;
@@ -53,6 +59,7 @@ async function main(): Promise<void> {
     await Promise.allSettled([...client.queues.values()].map((queue) => queue.stop()));
     client.voiceRuntime?.close();
     await client.voiceTrainingLog?.flush();
+    await client.voiceDriveArchive?.close();
     client.destroy();
   };
   process.once('SIGINT', () => void shutdown().then(() => { process.exitCode = 0; }));

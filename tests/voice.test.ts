@@ -11,6 +11,44 @@ import { VoiceSession, type VoiceBackend, type VoiceDiagnostic, type VoiceHost }
 import type { TrainingExample } from '../src/voice/training.js';
 
 const audio = Buffer.from([0, 0]);
+test('only activated STT input is archived, including compound requests and failed recognition', async () => {
+  const archived: Buffer[] = [];
+  let wake = false;
+  let failStt = false;
+  const h = harness({ detectWake: async () => ({ wake, probability: wake ? 1 : 0 }),
+    transcribe: async () => { if (failStt) throw new Error('STT offline'); return 'Бот, следующий трек'; } },
+    { archiveAudio: pcm => { archived.push(pcm); } });
+  const short = Buffer.alloc(800 * 32);
+  const command = Buffer.alloc(2000 * 32);
+  try {
+    await h.session.begin('alice')!.complete(short);
+    assert.equal(archived.length, 0);
+    wake = true;
+    await h.session.begin('alice')!.complete(short);
+    assert.equal(archived.length, 0);
+    assert.equal(h.session.begin('bob'), null);
+    await h.session.begin('alice')!.complete(command);
+    assert.deepEqual(archived, [command]);
+    await h.session.begin('alice')!.complete(command);
+    assert.deepEqual(archived, [command, command]);
+    await h.session.begin('alice')!.complete(short);
+    failStt = true;
+    await h.session.begin('alice')!.complete(command);
+    assert.equal(archived.length, 3);
+    h.setPresent(false);
+    assert.equal(h.session.begin('alice'), null);
+  } finally { h.session.disable(); }
+});
+
+test('archive errors do not stop a voice command', async () => {
+  const h = harness({}, { archiveAudio: () => { throw new Error('disk full'); } });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    h.setText('Следующий трек');
+    await h.session.begin('alice')!.complete(audio);
+    assert.deepEqual(h.actions, [{ action: 'skip' }]);
+  } finally { h.session.disable(); }
+});
 test('extended phrase dictionary works through rules and voice sessions without changing music titles', async () => {
   for (const [canonical, phrases] of Object.entries(EXTRA_VOICE_PHRASES)) {
     const expected = ruleIntent(canonical);

@@ -44,6 +44,7 @@ export interface VoiceHost {
   radio?(): boolean;
   playerState?(): MusicPlayerState;
   training?(example: TrainingExample): void;
+  archiveAudio?(pcm: Buffer): void;
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
   execute(intent: VoiceIntent, signal: AbortSignal): Promise<void | boolean>;
@@ -196,6 +197,11 @@ export class VoiceSession {
           }
 
           let metrics: SpeechMetrics | undefined;
+          // Save only activated requests, using exactly the PCM passed to STT.
+          // A compound wake + request is also activated by the local detector.
+          if (command || localWakeDetected) {
+            try { this.host.archiveAudio?.(pcm); } catch { /* Archiving cannot interrupt recognition. */ }
+          }
           const asrStart = performance.now();
           const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName(),
             (value) => { metrics = value; });

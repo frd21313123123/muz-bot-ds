@@ -5,6 +5,7 @@ import type { VoiceRuntime } from './voice/runtime.js';
 import type { VoiceSettings } from './voice/settings.js';
 import type { VoiceTts } from './voice/tts.js';
 import type { VoiceTrainingLog } from './voice/training.js';
+import type { VoiceDriveArchive } from './voice/drive.js';
 
 interface TrackInfo {
   url: string;
@@ -38,6 +39,7 @@ export interface MusicClient extends Client {
   voiceSettings?: VoiceSettings;
   voiceTts?: VoiceTts;
   voiceTrainingLog?: VoiceTrainingLog;
+  voiceDriveArchive?: VoiceDriveArchive;
 }
 
 export interface Command {
