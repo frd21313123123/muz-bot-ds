@@ -79,6 +79,8 @@ def main():
     parser.add_argument('--device', type=int, default=None)
     parser.add_argument('--threshold', type=float, default=0.75)
     parser.add_argument('--hop', type=int, default=120)
+    parser.add_argument('--cooldown', type=float, default=2.0, help='Cooldown in seconds after command trigger (default 2.0s)')
+    parser.add_argument('--no-chime', action='store_true')
     args = parser.parse_args()
 
     try:
@@ -147,23 +149,47 @@ def main():
                 rms = float(np.sqrt(np.mean(chunk ** 2)))
                 rms_bar = make_bar(min(1.0, rms * 15), 10)
 
-                # Predict every hop
-                res = detector.predict(audio_buffer)
-                conf = res["confidence"]
-                action = res["action"]
-                conf_bar = make_bar(conf, 12)
-
                 now = time.time()
+                in_cooldown = (now - last_trigger_time) < args.cooldown
+
+                if in_cooldown:
+                    cooldown_rem = max(0.0, args.cooldown - (now - last_trigger_time))
+                    status_line = f"\r  Звук: [{rms_bar}] | {YELLOW}[ ⏳ ПАУЗА ]{RESET} Команда принята, пауза {cooldown_rem:.1f}с..."
+                    sys.stdout.write(status_line.ljust(78))
+                    sys.stdout.flush()
+                    continue
+
+                # Run prediction only when there is acoustic activity above room noise
+                if rms > 0.006:
+                    res = detector.predict(audio_buffer)
+                    conf = res["confidence"]
+                    action = res["action"]
+                else:
+                    conf = 0.0
+                    action = "unknown"
+
+                conf_bar = make_bar(conf, 12)
                 is_control = action in ["pause", "resume", "skip", "stop", "volume_up", "volume_down", "loop_on", "autoplay_on", "queue_clear", "play_search"]
-                triggered = is_control and conf >= threshold and (now - last_trigger_time > 1.2 or action != last_action)
+                triggered = is_control and conf >= threshold
 
                 if triggered:
                     last_trigger_time = now
                     last_action = action
-                    play_chime()
                     title, desc = ACTION_TITLES.get(action, (action.upper(), ""))
                     color = GREEN if action != "play_search" else YELLOW
                     print(f"\r  {color}[РАСПОЗНАНО] {title:<20} ({conf*100:5.1f}%) -> {desc}{RESET}")
+
+                    if not args.no_chime:
+                        threading.Thread(target=play_chime, daemon=True).start()
+
+                    # Clear buffer and drain queue to completely eliminate duplicate recognition
+                    with buffer_lock:
+                        audio_buffer.fill(0)
+                    while not audio_queue.empty():
+                        try:
+                            audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
                 else:
                     if rms > 0.01:
                         # Speaking

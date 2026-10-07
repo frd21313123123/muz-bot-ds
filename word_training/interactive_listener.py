@@ -86,7 +86,7 @@ def main():
     parser.add_argument('--device', type=int, default=None)
     parser.add_argument('--threshold', type=float, default=None)
     parser.add_argument('--hop', type=int, default=80, help='Hop size in ms (default 80ms)')
-    parser.add_argument('--cooldown', type=float, default=1.2, help='Cooldown in seconds after trigger')
+    parser.add_argument('--cooldown', type=float, default=2.0, help='Cooldown in seconds after trigger (default 2.0s)')
     parser.add_argument('--no-chime', action='store_true')
     parser.add_argument('--list-devices', action='store_true')
     args = parser.parse_args()
@@ -223,6 +223,14 @@ def main():
                     sys.stdout.write(f"  🎙️ Сигнал подан! Голосовой ассистент слушает команду...\n")
                     sys.stdout.write("=" * 74 + RESET + "\n")
                     sys.stdout.flush()
+
+                    # Clear buffer and drain queue to prevent duplicate recognition of the same utterance
+                    buffer.fill(0)
+                    while not audio_queue.empty():
+                        try:
+                            audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
 
                     if not args.no_chime:
                         threading.Thread(target=play_chime, daemon=True).start()

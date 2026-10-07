@@ -153,6 +153,12 @@ def run_mic_listener(model_dir: Path, device: int | None = None, threshold_overr
                     last_trigger_time = now
                     consecutive_hits = 0
                     on_wake_word_detected(wake_word, prob, now, chime=enable_chime)
+                    buffer.fill(0)
+                    while not audio_queue.empty():
+                        try:
+                            audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
 
     except KeyboardInterrupt:
         print("\n\n🛑 Прослушивание остановлено пользователем.")
