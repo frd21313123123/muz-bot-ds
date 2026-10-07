@@ -26,11 +26,12 @@ try:
     CYAN = colorama.Fore.CYAN + colorama.Style.BRIGHT
     GREEN = colorama.Fore.GREEN + colorama.Style.BRIGHT
     YELLOW = colorama.Fore.YELLOW + colorama.Style.BRIGHT
+    MAGENTA = colorama.Fore.MAGENTA + colorama.Style.BRIGHT
     WHITE = colorama.Fore.WHITE + colorama.Style.BRIGHT
     RESET = colorama.Style.RESET_ALL
     DIM = colorama.Style.DIM
 except ImportError:
-    CYAN = GREEN = YELLOW = WHITE = RESET = DIM = ""
+    CYAN = GREEN = YELLOW = MAGENTA = WHITE = RESET = DIM = ""
 
 import interactive_listener
 import interactive_command_listener
