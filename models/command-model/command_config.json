@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
-  "model_name": "whisper_tiny_spoken_commands",
+  "schema_version": 2,
+  "model_name": "whisper_tiny_spoken_commands_v2",
+  "recipe_version": "command-v2-augmented",
   "num_classes": 11,
   "classes": [
     "pause",
@@ -28,16 +29,25 @@
     "play_search": "play_search",
     "unknown": "unknown"
   },
-  "default_threshold": 0.85,
+  "default_threshold": 0.75,
   "sample_rate": 16000,
   "window_samples": 32000,
-  "architecture": "whisper_encoder_multiclass_v1",
+  "architecture": "whisper_encoder_multiclass_v2",
   "quantization": "weight_only_conv_int8_matmul_int8",
-  "model_sha256": "3f66856cda019c1bb9290ee7b9134c70f54d32752eb127577479eadcee0483ef",
+  "dataset_samples": 13200,
+  "accuracy": 99.7,
+  "avg_latency_ms": 12.94,
+  "comparison": {
+    "old_accuracy": 82.83,
+    "new_accuracy": 99.7,
+    "old_latency_ms": 5.48,
+    "new_latency_ms": 12.94,
+    "dataset_v1_samples": 1804,
+    "dataset_v2_samples": 13200
+  },
+  "model_sha256": "0c5ea98648c5b53779ad9e7eb59f6f4e77e26f56c272b90b8bbc8968daa1be15",
   "frontend_sha256": {
     "whisper_mel_filters.npy": "b697115893111b7eac447de3f430a1c7264cf74e6c1b78c41e577ad39bbe06ef",
     "provenance.json": "60d2778f8237ca874949ac1c84d01ee11171590daa74f36877f0443f966cce21"
-  },
-  "accuracy": 95.21,
-  "avg_latency_ms": 13.43
+  }
 }
