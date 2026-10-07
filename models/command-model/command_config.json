@@ -29,7 +29,7 @@
     "play_search": "play_search",
     "unknown": "unknown"
   },
-  "default_threshold": 0.75,
+  "default_threshold": 0.88,
   "sample_rate": 16000,
   "window_samples": 32000,
   "architecture": "whisper_encoder_multiclass_v2",

@@ -77,7 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', type=Path, default=ROOT / 'models/command-model')
     parser.add_argument('--device', type=int, default=None)
-    parser.add_argument('--threshold', type=float, default=0.75)
+    parser.add_argument('--threshold', type=float, default=None, help='Detection threshold (default from model config: 0.88)')
     parser.add_argument('--hop', type=int, default=120)
     parser.add_argument('--cooldown', type=float, default=2.0, help='Cooldown in seconds after command trigger (default 2.0s)')
     parser.add_argument('--no-chime', action='store_true')
@@ -136,7 +136,10 @@ def main():
         return
 
     last_trigger_time = 0.0
-    last_action = ""
+    consecutive_hits = 0
+    candidate_action = ""
+    lockout_until_silence = False
+    silence_frames = 0
 
     with stream:
         try:
@@ -148,10 +151,23 @@ def main():
 
                 rms = float(np.sqrt(np.mean(chunk ** 2)))
                 rms_bar = make_bar(min(1.0, rms * 15), 10)
-
                 now = time.time()
-                in_cooldown = (now - last_trigger_time) < args.cooldown
 
+                # If speech is still ongoing after a trigger, wait until user finishes speaking
+                if lockout_until_silence:
+                    if rms < 0.012:
+                        silence_frames += 1
+                        if silence_frames >= 3:  # ~360ms of silence
+                            lockout_until_silence = False
+                            silence_frames = 0
+                    else:
+                        silence_frames = 0
+                    status_line = f"\r  Звук: [{rms_bar}] | {YELLOW}[ ⏳ ОЖИДАНИЕ ТИШИНЫ ]{RESET} Завершите фразу..."
+                    sys.stdout.write(status_line.ljust(78))
+                    sys.stdout.flush()
+                    continue
+
+                in_cooldown = (now - last_trigger_time) < args.cooldown
                 if in_cooldown:
                     cooldown_rem = max(0.0, args.cooldown - (now - last_trigger_time))
                     status_line = f"\r  Звук: [{rms_bar}] | {YELLOW}[ ⏳ ПАУЗА ]{RESET} Команда принята, пауза {cooldown_rem:.1f}с..."
@@ -159,8 +175,8 @@ def main():
                     sys.stdout.flush()
                     continue
 
-                # Run prediction only when there is acoustic activity above room noise
-                if rms > 0.006:
+                # Run prediction only when there is actual voice activity (speech RMS > 0.012)
+                if rms > 0.012:
                     res = detector.predict(audio_buffer)
                     conf = res["confidence"]
                     action = res["action"]
@@ -170,11 +186,28 @@ def main():
 
                 conf_bar = make_bar(conf, 12)
                 is_control = action in ["pause", "resume", "skip", "stop", "volume_up", "volume_down", "loop_on", "autoplay_on", "queue_clear", "play_search"]
-                triggered = is_control and conf >= threshold
+
+                # Multi-frame persistence: require 2 consecutive frames of the SAME control command
+                # at confidence >= threshold, OR a single ultra-confident peak (>= 0.96)
+                if is_control and conf >= threshold:
+                    if action == candidate_action:
+                        consecutive_hits += 1
+                    else:
+                        candidate_action = action
+                        consecutive_hits = 1
+                else:
+                    consecutive_hits = 0
+                    candidate_action = ""
+
+                triggered = is_control and (consecutive_hits >= 2 or conf >= 0.96)
 
                 if triggered:
                     last_trigger_time = now
-                    last_action = action
+                    consecutive_hits = 0
+                    candidate_action = ""
+                    lockout_until_silence = True
+                    silence_frames = 0
+
                     title, desc = ACTION_TITLES.get(action, (action.upper(), ""))
                     color = GREEN if action != "play_search" else YELLOW
                     print(f"\r  {color}[РАСПОЗНАНО] {title:<20} ({conf*100:5.1f}%) -> {desc}{RESET}")
@@ -182,7 +215,7 @@ def main():
                     if not args.no_chime:
                         threading.Thread(target=play_chime, daemon=True).start()
 
-                    # Clear buffer and drain queue to completely eliminate duplicate recognition
+                    # Clear buffer and drain queue
                     with buffer_lock:
                         audio_buffer.fill(0)
                     while not audio_queue.empty():
@@ -191,8 +224,7 @@ def main():
                         except queue.Empty:
                             break
                 else:
-                    if rms > 0.01:
-                        # Speaking
+                    if rms > 0.012:
                         lbl = ACTION_TITLES.get(action, (action, ""))[0]
                         line = f"\r  Звук: [{rms_bar}] | Распознавание: [{conf_bar}] {conf*100:5.1f}% | {lbl:<22}"
                     else:

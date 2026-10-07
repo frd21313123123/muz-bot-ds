@@ -153,6 +153,8 @@ def main():
     last_trigger_time = 0.0
     detected_count = 0
     consecutive_hits = 0
+    lockout_until_silence = False
+    silence_frames = 0
 
     def audio_callback(indata, frames, time_info, status):
         audio_queue.put(indata[:, 0].copy())
@@ -170,9 +172,19 @@ def main():
                 vol_pct = min(1.0, rms * 15.0)  # scale for mic visualization
 
                 now = time.time()
-                in_cooldown = (now - last_trigger_time) < args.cooldown
 
-                if in_cooldown:
+                if lockout_until_silence:
+                    if vol_pct < 0.10:
+                        silence_frames += 1
+                        if silence_frames >= 4:  # ~320ms of silence
+                            lockout_until_silence = False
+                            silence_frames = 0
+                    else:
+                        silence_frames = 0
+
+                in_cooldown = (now - last_trigger_time) < args.cooldown or lockout_until_silence
+
+                if in_cooldown or vol_pct < 0.06:
                     prob = 0.0
                     consecutive_hits = 0
                 else:
@@ -214,6 +226,8 @@ def main():
                 if is_wake:
                     last_trigger_time = now
                     consecutive_hits = 0
+                    lockout_until_silence = True
+                    silence_frames = 0
                     detected_count += 1
                     ts_str = time.strftime('%H:%M:%S', time.localtime(now))
                     
