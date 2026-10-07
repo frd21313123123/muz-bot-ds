@@ -3,11 +3,12 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { Track, YoutubeTrack } from '../types.js';
+import type { YoutubeTrack } from '../types.js';
 import { formatDuration, videoDuration } from './duration.js';
 import { MetadataRequests, metadataOptions, type MetadataInput, type MetadataOptions } from './MetadataRequests.js';
 import { countMetric, recordMetric, trackProcess } from './performance.js';
 import { terminateProcess } from './processes.js';
+import { youtubeMusicJson, type MusicEndpoint } from './youtubeMusic.js';
 
 const execFileAsync = promisify(execFile);
 const VENV_DIR = path.resolve('.runtime', 'yt-dlp');
@@ -205,6 +206,10 @@ export class YtdlpClient {
     return (await this.searchCandidates(query, 1, input))[0] ?? null;
   }
 
+  async musicJson(endpoint: MusicEndpoint, payload: Record<string, unknown>, signal?: AbortSignal): Promise<VideoInfo> {
+    return youtubeMusicJson(endpoint, payload, signal);
+  }
+
   async searchCandidates(query: string, limit = 5, input?: MetadataInput): Promise<VideoInfo[]> {
     const options = metadataOptions(input);
     const signal = options.signal;
@@ -219,13 +224,12 @@ export class YtdlpClient {
       countMetric('cache.hit'); return cached.entries.map(compactVideoInfo);
     }
 
-    // The songs section excludes podcasts and other ordinary YouTube videos.
-    // Do not fall back to unrestricted video search when no song is found.
-    const url = `https://music.youtube.com/search?q=${encodeURIComponent(query.trim())}#songs`;
+    // Main YouTube Music search includes official music videos as well as audio
+    // tracks. The parser accepts musical entries and preserves the top result.
     countMetric('cache.miss');
     const started = performance.now();
     const result = await this.requests.run(`search:${cacheKey}`, sharedSignal =>
-      this.json(['--flat-playlist', '--playlist-end', String(limit), url], 20_000, sharedSignal), options);
+      this.musicJson('search', { query: query.trim() }, sharedSignal), options);
     recordMetric('search', performance.now() - started);
     signal?.throwIfAborted();
     const seen = new Set<string>();
@@ -251,33 +255,25 @@ export class YtdlpClient {
     for (const [key, item] of this.videoCache) if (now - item.timestamp >= 30 * 60_000) this.videoCache.delete(key);
   }
 
-  async related(videoId: string, limit = 25, options: MetadataOptions & { excludeIds?: ReadonlySet<string> } = {}): Promise<Track[]> {
+  async related(videoId: string, limit = 25, options: MetadataOptions & { excludeIds?: ReadonlySet<string> } = {}): Promise<YoutubeTrack[]> {
     if (!/^[\w-]{11}$/.test(videoId)) return [];
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid recommendation limit');
     const signal = AbortSignal.any([AbortSignal.timeout(25_000), ...(options.signal ? [options.signal] : [])]);
     const requestOptions: MetadataOptions = { priority: options.priority ?? 'background', signal };
-    const candidateLimit = options.excludeIds ? 51 : Math.min(50, limit) + 1;
-    const result = await this.requests.run(`related:${videoId}:${candidateLimit}`, sharedSignal => this.json([
-      '--flat-playlist', '--playlist-items', `2:${candidateLimit}`,
-      `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`,
-    ], 25_000, sharedSignal), requestOptions);
+    const result = await this.requests.run(`related:${videoId}`, sharedSignal => this.musicJson('next', {
+      videoId, playlistId: `RDAMVM${videoId}`, params: 'wAEB', isAudioOnly: true,
+      enablePersistentPlaylistPanel: true, tunerSettingValue: 'AUTOMIX_SETTING_NORMAL',
+    }, sharedSignal), requestOptions);
+    signal.throwIfAborted();
     const seen = new Set([videoId]);
     const candidates = (result.entries ?? []).filter((entry) => {
       if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id) || options.excludeIds?.has(entry.id)) return false;
       seen.add(entry.id);
-      return !isNonSong(entry);
-    }).slice(0, 50);
-    // Flat radio entries lack categories. Verify them before queueing, with
-    // bounded concurrency and a shared deadline so a radio cannot stall playback.
-    const songs: VideoInfo[] = [];
-    for (let offset = 0; offset < candidates.length && songs.length < limit && !signal.aborted; offset++) {
-      const entry = candidates[offset]!;
-      try {
-        const info = await this.video(`https://www.youtube.com/watch?v=${entry.id}`, requestOptions);
-        if (info.id === entry.id && isSong(info)) songs.push(info);
-      } catch { if (signal.aborted) break; }
-    }
-    return songs.slice(0, limit).map((info) => toTrack(info, '🤖 Бесконечное', true));
+      return true;
+    }).slice(0, limit);
+    // Music already identifies songs and includes their duration. Ordinary
+    // YouTube metadata must not replace or reorder these suggestions.
+    return candidates.map((info) => toTrack(info, '🤖 Бесконечное', true));
   }
 }
 

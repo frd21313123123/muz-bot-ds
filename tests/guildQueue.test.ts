@@ -274,7 +274,7 @@ test('autoplay clears recommendations from old track when a new track is queued 
     queue.player.stop(true);
     await waitFor(() => queue.currentTrack?.videoId === 'rec_a1');
     assert.equal(calls[0], 'aaaaaaaaaaa');
-    assert.deepEqual(queue.tracks.map((t) => t.videoId), ['rec_a2']);
+    assert.equal(queue.tracks.length, 0);
 
     // User switches to new song bbbbbbbbbbb
     await queue.addTrack(track('bbbbbbbbbbb'));
@@ -290,13 +290,42 @@ test('autoplay clears recommendations from old track when a new track is queued 
     queue.player.stop(true);
     await waitFor(() => queue.currentTrack?.videoId === 'rec_b1');
     assert.equal(calls[1], 'bbbbbbbbbbb');
-    assert.deepEqual(queue.tracks.map((t) => t.videoId), ['rec_b2']);
+    assert.equal(queue.tracks.length, 0);
   } finally {
     await queue.stop();
   }
 });
 
-test('autoplay filters recently played recommendations and tries up to two recent seed tracks', async () => {
+test('autoplay follows the first recommendation from each newly played song', async () => {
+  const calls: string[] = [];
+  const suggestions: Record<string, string[]> = {
+    aaaaaaaaaaa: ['bbbbbbbbbbb', 'ccccccccccc'],
+    bbbbbbbbbbb: ['ddddddddddd', 'eeeeeeeeeee'],
+    ddddddddddd: ['fffffffffff'],
+  };
+  const client = { queues: new Map(), ytdlp: { related: async (id: string, limit: number) => {
+    calls.push(id);
+    assert.equal(limit, 1);
+    return (suggestions[id] ?? []).map(id => ({ ...track(id), isAutoplay: true }));
+  } } } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-autoplay-chain', client, () => {
+    const stream = new PassThrough();
+    return { stream, type: StreamType.Opus, destroy: () => stream.destroy() };
+  });
+  client.queues.set(queue.guildId, queue);
+  try {
+    queue.setAutoplay(true);
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    for (const id of ['bbbbbbbbbbb', 'ddddddddddd', 'fffffffffff']) {
+      queue.player.stop(true);
+      await waitFor(() => queue.currentTrack?.videoId === id);
+      assert.equal(queue.tracks.length, 0);
+    }
+    assert.deepEqual(calls, ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ddddddddddd']);
+  } finally { await queue.stop(); }
+});
+
+test('autoplay filters recently played recommendations without switching to older seed tracks', async () => {
   const streams: PassThrough[] = [];
   const calls: string[] = [];
   const suggestions: Record<string, Track[]> = {
@@ -321,10 +350,10 @@ test('autoplay filters recently played recommendations and tries up to two recen
       await waitFor(() => queue.currentTrack?.videoId === id);
     }
     queue.player.stop(true);
-    await waitFor(() => queue.currentTrack?.videoId === 'ddddddddddd');
-    assert.deepEqual(calls, ['ccccccccccc', 'bbbbbbbbbbb', 'aaaaaaaaaaa']);
+    await waitFor(() => queue.currentTrack === null);
+    assert.deepEqual(calls, ['ccccccccccc']);
     assert.equal(queue.tracks.length, 0);
-    assert.equal(streams.length, 4);
+    assert.equal(streams.length, 3);
   } finally { await queue.stop(); }
 });
 

@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isSong, YtdlpClient, ytdlpEnvironment, type VideoInfo } from '../src/utils/ytdlp.js';
+import type { MusicEndpoint } from '../src/utils/youtubeMusic.js';
+
+class MusicStub extends YtdlpClient {
+  calls: { endpoint: MusicEndpoint; payload: Record<string, unknown> }[] = [];
+  entries: VideoInfo[] = [];
+  constructor() { super({ command: 'unused', prefix: [] }); }
+  override async musicJson(endpoint: MusicEndpoint, payload: Record<string, unknown>): Promise<VideoInfo> {
+    this.calls.push({ endpoint, payload });
+    return { entries: this.entries };
+  }
+  override async json(): Promise<VideoInfo> { assert.fail('Music must never use ordinary YouTube extraction'); }
+}
 
 test('YouTube JS heap is bounded without overwriting explicit Node options', () => {
   assert.equal(ytdlpEnvironment({ NODE_OPTIONS: '--no-warnings' }).NODE_OPTIONS, '--no-warnings --max-old-space-size=128');
@@ -8,105 +20,7 @@ test('YouTube JS heap is bounded without overwriting explicit Node options', () 
   assert.equal(ytdlpEnvironment({ NODE_OPTIONS: '', YT_DLP_NODE_HEAP_MB: '0' }).NODE_OPTIONS, '');
 });
 
-test('search uses only the YouTube Music songs section, keeps order and removes invalid entries and duplicates', async () => {
-  const calls: string[][] = [];
-  class Stub extends YtdlpClient {
-    override async json(args: string[]): Promise<VideoInfo> {
-      calls.push(args);
-      return { entries: [{ id: 'bad', title: 'Bad' }, { id: 'aaaaaaaaaaa', title: 'First', duration: 180 },
-        { id: 'aaaaaaaaaaa', title: 'Duplicate' }, { id: 'bbbbbbbbbbb', title: 'Second' },
-        { id: 'ccccccccccc', title: ' ' }] };
-    }
-  }
-  const client = new Stub({ command: 'unused', prefix: [] });
-  assert.deepEqual((await client.searchCandidates('Numb')).map((entry) => entry.title), ['First', 'Second']);
-  assert.deepEqual(calls, [['--flat-playlist', '--playlist-end', '5', 'https://music.youtube.com/search?q=Numb#songs']]);
-  assert.deepEqual(await client.searchCandidates(''), []);
-  await assert.rejects(client.searchCandidates('Numb', 11));
-  const controller = new AbortController(); controller.abort();
-  await assert.rejects(client.searchCandidates('Numb', 5, controller.signal));
-  assert.equal(calls.length, 1);
-  await client.search('Numb');
-  assert.deepEqual(calls[1], ['--flat-playlist', '--playlist-end', '1', 'https://music.youtube.com/search?q=Numb#songs']);
-  await client.searchCandidates('  Кино & live #1  ', 3);
-  assert.equal(calls[2]?.[3], `https://music.youtube.com/search?q=${encodeURIComponent('Кино & live #1')}#songs`);
-});
-
-test('song search returns candidates immediately without blocking on video metadata', async () => {
-  let videoCalled = false;
-  class Stub extends YtdlpClient {
-    override async json(): Promise<VideoInfo> {
-      return { entries: [{ id: '5FHjH3NBFDI', title: 'Не дано' }, { id: 'bbbbbbbbbbb', title: 'Another' }] };
-    }
-    override async video(url: string): Promise<VideoInfo> {
-      videoCalled = true;
-      return { id: '5FHjH3NBFDI', title: 'Не дано', duration: 216 };
-    }
-  }
-  const client = new Stub({ command: 'unused', prefix: [] });
-  const candidates = await client.searchCandidates('Hi-Fi Не дано');
-  assert.equal(videoCalled, false, 'searchCandidates must not block on video metadata');
-  assert.equal(candidates[0]?.id, '5FHjH3NBFDI');
-  assert.equal(candidates[0]?.title, 'Не дано');
-  assert.equal(candidates[1]?.id, 'bbbbbbbbbbb');
-  assert.equal((await client.search('Hi-Fi Не дано'))?.id, '5FHjH3NBFDI');
-});
-
-test('search candidates and videos are cached, and clearCache resets them', async () => {
-  let jsonCalls = 0;
-  class Stub extends YtdlpClient {
-    override async json(): Promise<VideoInfo> {
-      jsonCalls++;
-      return { id: 'aaaaaaaaaaa', entries: [{ id: 'aaaaaaaaaaa', title: 'Cached Song' }] };
-    }
-  }
-  const client = new Stub({ command: 'unused', prefix: [] });
-  const first = await client.searchCandidates('Cached Song', 5);
-  const second = await client.searchCandidates('Cached Song', 5);
-  assert.equal(jsonCalls, 1);
-  assert.deepEqual(first, second);
-
-  // Video caching
-  await client.video('https://www.youtube.com/watch?v=aaaaaaaaaaa');
-  await client.video('https://www.youtube.com/watch?v=aaaaaaaaaaa');
-  assert.equal(jsonCalls, 2);
-
-  // Clear cache resets them
-  client.clearCache();
-  await client.searchCandidates('Cached Song', 5);
-  assert.equal(jsonCalls, 3);
-});
-
-test('radio recommendations skip the current video and duplicate entries', async () => {
-  const calls: string[][] = [];
-  class StubYtdlp extends YtdlpClient {
-    override async video(url: string): Promise<VideoInfo> {
-      return { id: new URL(url).searchParams.get('v')!, title: 'Song', categories: ['Music'] };
-    }
-    override async json(args: string[]): Promise<VideoInfo> {
-      calls.push(args);
-      return { entries: [
-        { id: 'aaaaaaaaaaa', title: 'Current' },
-        { id: 'bbbbbbbbbbb', title: 'Related' },
-        { id: 'bbbbbbbbbbb', title: 'Duplicate' },
-        { id: 'invalid', title: 'Invalid' },
-        { id: 'ccccccccccc', title: 'Another' },
-      ] };
-    }
-  }
-  const ytdlp = new StubYtdlp({ command: 'unused', prefix: [] });
-  const related = await ytdlp.related('aaaaaaaaaaa', 5);
-  assert.deepEqual(related.map((item) => item.videoId), ['bbbbbbbbbbb', 'ccccccccccc']);
-  assert.ok(related.every((item) => item.isAutoplay && item.requestedBy === '🤖 Бесконечное'));
-  assert.deepEqual(calls[0], [
-    '--flat-playlist', '--playlist-items', '2:6',
-    'https://www.youtube.com/watch?v=aaaaaaaaaaa&list=RDaaaaaaaaaaa',
-  ]);
-  assert.deepEqual(await ytdlp.related('bad'), []);
-  assert.equal(calls.length, 1);
-});
-
-test('song verification requires music metadata and excludes spoken content and broadcasts', () => {
+test('ordinary video song verification still requires music metadata and excludes spoken content and broadcasts', () => {
   const song: VideoInfo = { id: 'aaaaaaaaaaa', title: 'Artist — Song', categories: ['Music'] };
   assert.equal(isSong(song), true);
   assert.equal(isSong({ ...song, title: 'Song (Live at Wembley)', live_status: 'was_live' }), true);
@@ -123,62 +37,101 @@ test('song verification requires music metadata and excludes spoken content and 
   ]) assert.equal(isSong(info), false, JSON.stringify(info));
 });
 
-test('radio verifies full metadata, skips unavailable and non-music videos and caps songs in radio order', async () => {
-  const checked: string[] = [];
-  const entries: VideoInfo[] = [
-    { id: 'bbbbbbbbbbb', title: 'Artist podcast' },
-    { id: 'ccccccccccc', title: 'Looks like a song' },
-    { id: 'ddddddddddd', title: 'Unknown video' },
-    { id: 'eeeeeeeeeee', title: 'Unavailable song' },
-    { id: 'fffffffffff', title: 'First song' },
-    { id: 'ggggggggggg', title: 'Second song' },
-    { id: 'hhhhhhhhhhh', title: 'Third song' },
+test('main Music search preserves service order, removes invalid entries and returns the first musical result', async () => {
+  const client = new MusicStub();
+  client.entries = [{ id: 'bad', title: 'Bad' }, { id: 'aaaaaaaaaaa', title: 'First', duration: 180 },
+    { id: 'aaaaaaaaaaa', title: 'Duplicate' }, { id: 'bbbbbbbbbbb', title: 'Second' }, { id: 'ccccccccccc', title: ' ' }];
+  assert.deepEqual((await client.searchCandidates('Numb')).map(entry => entry.title), ['First', 'Second']);
+  assert.deepEqual(client.calls, [{ endpoint: 'search', payload: { query: 'Numb' } }]);
+  assert.equal((await client.search('Numb'))?.id, 'aaaaaaaaaaa');
+  assert.equal((await client.searchCandidates('Numb', 1)).length, 1);
+  assert.deepEqual(await client.searchCandidates(''), []);
+  await assert.rejects(client.searchCandidates('Numb', 11));
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(client.searchCandidates('Numb', 5, controller.signal));
+  assert.equal(client.calls.length, 2);
+  await client.searchCandidates('  Кино & live #1  ', 3);
+  assert.equal(client.calls[2]?.payload.query, 'Кино & live #1');
+});
+
+test('song search never blocks on ordinary YouTube video metadata', async () => {
+  class Stub extends MusicStub {
+    override async video(): Promise<VideoInfo> { assert.fail('search must not request ordinary video metadata'); }
+  }
+  const client = new Stub();
+  client.entries = [{ id: '5FHjH3NBFDI', title: 'Не дано', duration: 216 }];
+  assert.equal((await client.search('Hi-Fi Не дано'))?.id, '5FHjH3NBFDI');
+});
+
+test('Music search cache is isolated from callers and clearCache resets it', async () => {
+  const client = new MusicStub();
+  client.entries = [{ id: 'aaaaaaaaaaa', title: 'Cached Song', artists: ['Artist'] }];
+  const first = await client.searchCandidates('Cached Song', 5);
+  first[0]!.title = 'Changed'; first[0]!.artists!.push('Changed');
+  const second = await client.searchCandidates('cached song', 5);
+  assert.equal(client.calls.length, 1);
+  assert.equal(second[0]?.title, 'Cached Song');
+  assert.deepEqual(second[0]?.artists, ['Artist']);
+  client.clearCache();
+  await client.searchCandidates('Cached Song', 5);
+  assert.equal(client.calls.length, 2);
+});
+
+test('ordinary video metadata retains its independent cache', async () => {
+  let calls = 0;
+  class Stub extends YtdlpClient {
+    override async json(): Promise<VideoInfo> { calls++; return { id: 'aaaaaaaaaaa', title: 'Video' }; }
+  }
+  const client = new Stub({ command: 'unused', prefix: [] });
+  await client.video('https://www.youtube.com/watch?v=aaaaaaaaaaa');
+  await client.video('https://www.youtube.com/watch?v=aaaaaaaaaaa');
+  assert.equal(calls, 1);
+  client.clearCache();
+  await client.video('https://www.youtube.com/watch?v=aaaaaaaaaaa');
+  assert.equal(calls, 2);
+});
+
+test('recommendations use the current song Music mix, preserving order and excluding history and duplicates', async () => {
+  const client = new MusicStub();
+  client.entries = [
+    { id: 'aaaaaaaaaaa', title: 'Current' }, { id: 'bbbbbbbbbbb', title: 'Already played' },
+    { id: 'ccccccccccc', title: 'First fresh', duration: 200 }, { id: 'ccccccccccc', title: 'Duplicate' },
+    { id: 'invalid', title: 'Invalid' }, { id: 'ddddddddddd', title: 'Second fresh' },
   ];
-  class Stub extends YtdlpClient {
-    override async json(): Promise<VideoInfo> { return { entries }; }
-    override async video(url: string, signal?: AbortSignal): Promise<VideoInfo> {
-      assert.ok(signal);
-      const id = new URL(url).searchParams.get('v')!;
-      checked.push(id);
-      if (id === 'eeeeeeeeeee') throw new Error('Unavailable');
-      if (id === 'ccccccccccc') return { id, title: 'Conversation', categories: ['People & Blogs'] };
-      if (id === 'ddddddddddd') return { id, title: 'Unknown video' };
-      return { id, title: 'Confirmed song', categories: ['Music'], duration: 200 };
-    }
-  }
-  const client = new Stub({ command: 'unused', prefix: [] });
-  const songs = await client.related('aaaaaaaaaaa', 2);
-  assert.deepEqual(songs.map((track) => track.videoId), ['fffffffffff', 'ggggggggggg']);
-  assert.equal(checked.includes('bbbbbbbbbbb'), false, 'obvious podcasts must not trigger full extraction');
-  assert.ok(songs.every((track) => track.duration === '3:20'));
+  const songs = await client.related('aaaaaaaaaaa', 1, { excludeIds: new Set(['bbbbbbbbbbb']) });
+  assert.deepEqual(songs.map(track => track.videoId), ['ccccccccccc']);
+  assert.equal(songs[0]?.duration, '3:20');
+  assert.ok(songs.every(track => track.isAutoplay && track.requestedBy === '🤖 Бесконечное'));
+  assert.deepEqual(client.calls, [{ endpoint: 'next', payload: {
+    videoId: 'aaaaaaaaaaa', playlistId: 'RDAMVMaaaaaaaaaaa', params: 'wAEB', isAudioOnly: true,
+    enablePersistentPlaylistPanel: true, tunerSettingValue: 'AUTOMIX_SETTING_NORMAL',
+  } }]);
+  assert.deepEqual((await client.related('aaaaaaaaaaa', 5)).map(track => track.videoId), ['bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd']);
+  assert.deepEqual(await client.related('bad'), []);
   await assert.rejects(client.related('aaaaaaaaaaa', 0));
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(client.related('aaaaaaaaaaa', 1, { signal: controller.signal }));
+  assert.equal(client.calls.length, 2);
 });
 
-test('radio with no confirmed songs returns no tracks rather than unverified videos', async () => {
-  class Stub extends YtdlpClient {
-    override async json(): Promise<VideoInfo> {
-      return { entries: [{ id: 'bbbbbbbbbbb', title: 'Video' }, { id: 'ccccccccccc', title: 'Video' }] };
-    }
-    override async video(url: string): Promise<VideoInfo> {
-      return { id: new URL(url).searchParams.get('v')!, title: 'Video' };
-    }
-  }
-  const client = new Stub({ command: 'unused', prefix: [] });
-  assert.deepEqual(await client.related('aaaaaaaaaaa'), []);
-});
-
-test('empty song search does not fall back to ordinary videos and cancellation remains effective', async () => {
-  const calls: string[][] = [];
-  const controller = new AbortController();
-  class Stub extends YtdlpClient {
-    override async json(args: string[]): Promise<VideoInfo> { calls.push(args); return {}; }
-  }
-  const client = new Stub({ command: 'unused', prefix: [] });
+test('empty Music search and recommendations do not fall back to ordinary YouTube', async () => {
+  const client = new MusicStub();
   assert.equal(await client.search('Numb'), null);
   assert.equal(await client.search(' '), null);
-  assert.equal(calls.length, 1);
-  class Aborted extends Stub {
-    override async json(): Promise<VideoInfo> { controller.abort(); return { entries: [{ id: 'aaaaaaaaaaa', title: 'Song' }] }; }
+  assert.deepEqual(await client.related('aaaaaaaaaaa'), []);
+  assert.equal(client.calls.length, 2);
+});
+
+test('cancellation during Music response handling never returns a search or recommendation', async () => {
+  for (const operation of ['search', 'related']) {
+    const controller = new AbortController();
+    class Aborted extends MusicStub {
+      override async musicJson(): Promise<VideoInfo> {
+        controller.abort(); return { entries: [{ id: 'bbbbbbbbbbb', title: 'Song' }] };
+      }
+    }
+    const client = new Aborted();
+    await assert.rejects(operation === 'search' ? client.search('Numb', controller.signal)
+      : client.related('aaaaaaaaaaa', 1, { signal: controller.signal }));
   }
-  await assert.rejects(new Aborted({ command: 'unused', prefix: [] }).searchCandidates('Numb', 5, controller.signal));
 });

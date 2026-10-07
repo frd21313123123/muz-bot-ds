@@ -12,10 +12,31 @@ async function main(): Promise<void> {
   const candidates = await ytdlp.searchCandidates('Linkin Park Numb', 5);
   if (candidates.length < 2 || candidates.length > 5) throw new Error('Поиск не вернул несколько кандидатов.');
   if (new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) throw new Error('Поиск вернул дубликаты.');
-  // Flat YouTube Music search may omit duration; runtime hydrates it separately.
-  const selected = await ytdlp.video(`https://www.youtube.com/watch?v=${candidates[0]!.id}`);
+  const selected = await ytdlp.search('Linkin Park Numb');
+  if (!selected || selected.id !== candidates[0]!.id) throw new Error('Поиск не выбрал первый результат YouTube Music.');
   if (videoDuration(selected) === null) throw new Error('Метаданные выбранной песни не содержат длительность.');
   console.log(`Получено ${candidates.length} кандидатов поиска.`);
+  for (const query of ['Монеточка Монополия', 'Монеточки Монополия']) {
+    const monopoly = await ytdlp.search(query);
+    if (monopoly?.title !== 'Монополия' || monopoly.artist?.toLowerCase() !== 'монеточка') {
+      throw new Error('Поиск подменил «Монополию» Монеточки другой песней или исполнителем.');
+    }
+    console.log(`Проверка «${query}»: ${monopoly.title} — ${monopoly.artist} [${monopoly.id}]`);
+  }
+  const history = new Set([selected.id!]);
+  let seed = selected.id!;
+  for (let step = 0; step < 2; step++) {
+    const suggestions = await ytdlp.related(seed, 5, { excludeIds: history });
+    const next = (await ytdlp.related(seed, 1, { excludeIds: history }))[0];
+    // Each request can create a new Music mix, so assert exclusions rather than
+    // identical songs across independently generated radio responses.
+    if (!suggestions.length || !next || history.has(next.videoId) || next.videoId === seed) {
+      throw new Error('Не получено продолжение микса YouTube Music без повторов.');
+    }
+    console.log(`Микс ${seed}: ${next.title} [${next.videoId}]`);
+    history.add(next.videoId);
+    seed = next.videoId;
+  }
   const searched = await resolveQuery('Rick Astley Never Gonna Give You Up', 'Smoke', ytdlp);
   if (searched?.type !== 'single') throw new Error('Текстовый поиск не вернул видео.');
   if (searched.track.isLive) throw new Error('Песня поиска неверно определена как эфир.');

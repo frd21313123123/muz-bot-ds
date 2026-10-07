@@ -155,7 +155,7 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
   signal.throwIfAborted();
   // A parsed music request is a search query, not a label the model must know.
   // Laya is reserved for player controls; artist/title queries go straight to
-  // YouTube with its own spelling correction and relevance order.
+  // YouTube Music with its own spelling correction and relevance order.
   diagnostic?.({ stage: 'routing', ms: 0, nextTool: request.kind === 'video' ? 'direct_youtube_video' : 'youtube_music_search',
     policy: 'play_first_result' });
   let candidates: VideoInfo[];
@@ -172,7 +172,7 @@ export async function resolveMusicRequest(message: string, requestedBy: string, 
   const seen = new Set<string>();
   const usable = candidates.flatMap((info) => {
     try {
-      if (isNonSong(info)) return [];
+      if (request.kind === 'video' && isNonSong(info)) return [];
       const track = toTrack(info, requestedBy);
       if (seen.has(track.videoId)) return [];
       seen.add(track.videoId);

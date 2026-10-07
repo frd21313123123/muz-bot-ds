@@ -131,6 +131,13 @@ test('plain and version requests preserve search order without calling a selecto
   assert.equal(JSON.stringify(live.events).includes('Numb'), false);
 });
 
+test('a valid first YouTube Music song is kept even when its title resembles spoken content', async () => {
+  const h = harness({}, { searchCandidates: async () => [
+    { id: 'aaaaaaaaaaa', title: 'Interview', artist: 'Artist', duration: 180 }, entries[1]!,
+  ] });
+  assert.equal((await h.resolve('включи песню Interview'))?.videoId, 'aaaaaaaaaaa');
+});
+
 test('v3 state contains the parsed original query and canonical video URL', () => {
   const request = extractMusicRequest('включи песню Numb концертная версия')!;
   assert.deepEqual(musicState('включи песню Numb концертная версия', request).parsed_request,

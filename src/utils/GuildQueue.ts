@@ -19,7 +19,6 @@ import { countMetric, recordMetric } from './performance.js';
 
 const IDLE_MS = 5 * 60_000;
 const AUTOPLAY_HISTORY_LIMIT = 500;
-const AUTOPLAY_SEED_LIMIT = 3;
 // yt-dlp/FFmpeg can briefly stop producing PCM while downloading or filtering.
 // Voice defaults to only five missing 20 ms frames (100 ms), which stops an
 // otherwise open stream and makes Idle incorrectly consume the next track.
@@ -483,28 +482,20 @@ export class GuildQueue {
   }
 
   private async lookupAutoplayTracks(videoId: string, epoch: number, autoEpoch: number, signal: AbortSignal): Promise<Track[]> {
-    const seeds = [videoId, ...this.recentTrackIds.slice().reverse().filter((id) => id !== videoId)]
-      .slice(0, AUTOPLAY_SEED_LIMIT);
-    for (const seed of seeds) {
-      try {
-        const excluded = new Set(this.recentTrackIdSet);
-        for (const track of this.pending.items) {
-          if (track.source !== 'radio') excluded.add(track.videoId);
-        }
-        if (signal.aborted) return [];
-        const related = await this.client.ytdlp.related(seed, 3, { signal, priority: 'background', excludeIds: excluded });
-        if (signal.aborted || this.closed || !this.autoplay || epoch !== this.playbackEpoch || autoEpoch !== this.autoplayEpoch) return [];
-        const fresh: Track[] = [];
-        for (const track of related) {
-          if (track.source === 'radio' || excluded.has(track.videoId)) continue;
-          excluded.add(track.videoId);
-          fresh.push(track);
-        }
-        if (fresh.length) return fresh.slice(0, 3);
-      } catch (error) {
-        if (signal.aborted || this.closed || !this.autoplay || epoch !== this.playbackEpoch || autoEpoch !== this.autoplayEpoch) return [];
-        console.error(`[Queue:${this.guildId}] recommendations unavailable`);
+    try {
+      const excluded = new Set(this.recentTrackIdSet);
+      for (const track of this.pending.items) {
+        if (track.source !== 'radio') excluded.add(track.videoId);
       }
+      if (signal.aborted) return [];
+      const related = await this.client.ytdlp.related(videoId, 1, { signal, priority: 'background', excludeIds: excluded });
+      if (signal.aborted || this.closed || !this.autoplay || epoch !== this.playbackEpoch || autoEpoch !== this.autoplayEpoch) return [];
+      // Queue one suggestion, then derive the following one from that song.
+      const next = related.find(track => !excluded.has(track.videoId));
+      return next ? [next] : [];
+    } catch {
+      if (signal.aborted || this.closed || !this.autoplay || epoch !== this.playbackEpoch || autoEpoch !== this.autoplayEpoch) return [];
+      console.error(`[Queue:${this.guildId}] recommendations unavailable`);
     }
     return [];
   }

@@ -68,15 +68,14 @@ test('video cache deduplicates cold requests, prunes expiry and drops unused yt-
   assert.deepEqual((await client.video('single')).categories, ['Music']);
 });
 
-test('autoplay excludes history before metadata verification and caps newly verified songs', async () => {
-  const checked: string[] = [];
+test('autoplay excludes history and caps Music recommendations without ordinary video metadata requests', async () => {
   class Stub extends YtdlpClient {
-    override async json(): Promise<VideoInfo> { return { entries: ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd', 'eeeeeeeeeee']
+    override async musicJson(): Promise<VideoInfo> { return { entries: ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd', 'eeeeeeeeeee']
       .map(id => ({ id, title: 'Song' })) }; }
-    override async video(url: string): Promise<VideoInfo> { const id = new URL(url).searchParams.get('v')!; checked.push(id); return { id, title: 'Song', categories: ['Music'] }; }
+    override async video(): Promise<VideoInfo> { assert.fail('Music recommendations must not fetch ordinary YouTube metadata'); }
   }
   const client = new Stub({ command: 'unused', prefix: [] });
   const tracks = await client.related('aaaaaaaaaaa', 3, { excludeIds: new Set(['bbbbbbbbbbb']) });
-  assert.deepEqual(checked, ['ccccccccccc', 'ddddddddddd', 'eeeeeeeeeee']);
+  assert.deepEqual(tracks.map(track => track.videoId), ['ccccccccccc', 'ddddddddddd', 'eeeeeeeeeee']);
   assert.equal(tracks.length, 3);
 });
