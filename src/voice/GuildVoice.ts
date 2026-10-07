@@ -48,10 +48,20 @@ export class GuildVoice {
       wakeName: () => this.queue.wakeName,
       paused: () => this.queue.isPaused,
       radio: () => this.queue.isRadio,
-      present: (userId) => Boolean(!this.queue.closed && this.queue.voiceChannel
-        && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(this.queue.client.user?.id ?? '')?.channelId === this.queue.voiceChannel.id
-        && this.queue.client.guilds.cache.get(this.queue.guildId)?.voiceStates.cache.get(userId)?.channelId === this.queue.voiceChannel.id
-        && !this.queue.client.users.cache.get(userId)?.bot),
+      present: (userId) => {
+        const clientUserId = this.queue.client.user?.id;
+        if (!userId || userId === clientUserId) return false;
+        const guild = this.queue.client.guilds.cache.get(this.queue.guildId);
+        const botChannelId = guild?.voiceStates.cache.get(clientUserId ?? '')?.channelId;
+        const userChannelId = guild?.voiceStates.cache.get(userId)?.channelId;
+        const user = this.queue.client.users.cache.get(userId);
+        const member = guild?.members?.cache?.get(userId);
+        const isBot = Boolean(user?.bot || member?.user?.bot);
+        return Boolean(!this.queue.closed && this.queue.voiceChannel
+          && botChannelId === this.queue.voiceChannel.id
+          && userChannelId === this.queue.voiceChannel.id
+          && !isBot);
+      },
       cue: (signal) => this.queue.playVoiceCue(signal),
       duck: (enabled) => this.queue.setVoiceDucking(enabled),
       diagnostic,
@@ -64,7 +74,7 @@ export class GuildVoice {
         { stt: this.runtime.sttModelName ?? null, nli: this.runtime.modelName ?? null }) : undefined,
       feedback: (key, signal) => this.confirm(key, signal),
       playRadio: async (station, userId, signal, valid) => {
-        const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
+        const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members?.cache?.get(userId);
         const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
         try {
           const changed = await this.queue.playRadio(station, requestedBy, { signal, valid, userId });
@@ -77,7 +87,7 @@ export class GuildVoice {
         }
       },
       playMusic: async (message, userId, signal, valid, report = diagnostic) => {
-        const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members.cache.get(userId);
+        const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members?.cache?.get(userId);
         const requestedBy = member?.displayName ?? this.queue.client.users.cache.get(userId)?.username ?? 'Участник';
         const track = await resolveMusicRequest(message, requestedBy, this.runtime, this.queue.client.ytdlp, signal, report, {
           connected: Boolean(this.queue.connection), playing: this.queue.player.state.status === AudioPlayerStatus.Playing,
@@ -209,6 +219,13 @@ export class GuildVoice {
   }
 
   private receive(userId: string): void {
+    const clientUserId = this.queue.client.user?.id;
+    if (!userId || userId === clientUserId) return;
+    if (this.queue.isSpeakingVoiceAudio) return;
+    const user = this.queue.client.users.cache.get(userId);
+    if (user?.bot) return;
+    const member = this.queue.client.guilds.cache.get(this.queue.guildId)?.members?.cache?.get(userId);
+    if (member?.user?.bot) return;
     if (!this.enabled || !this.runtime.ready || !this.connection
       || this.connection.state.status !== VoiceConnectionStatus.Ready || this.captures.has(userId)) return;
     const capture = this.session.begin(userId);

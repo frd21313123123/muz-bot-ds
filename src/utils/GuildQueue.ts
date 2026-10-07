@@ -56,6 +56,8 @@ export class GuildQueue {
   private readonly mediaFactory: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream;
   private voiceDucking = false;
   private cueState: { resumeAfter: boolean; finish(): void } | null = null;
+  private speakingVoiceAudioUntil = 0;
+  get isSpeakingVoiceAudio(): boolean { return performance.now() < this.speakingVoiceAudioUntil; }
   private radioRequest: { controller: AbortController; userId?: string } | null = null;
   private radioRecovery: AbortController | null = null;
   private playbackEpoch = 0;
@@ -184,12 +186,14 @@ export class GuildQueue {
     configureMusicEncoder(resource);
     const wasPlaying = this.player.state.status === AudioPlayerStatus.Playing;
     if (wasPlaying) this.player.pause();
+    this.speakingVoiceAudioUntil = performance.now() + timeoutMs;
     await new Promise<void>((resolve, reject) => {
       let finished = false;
       const abort = (): void => finish(new Error('Cue cancelled'));
       const finish = (error?: Error): void => {
         if (finished) return;
         finished = true;
+        this.speakingVoiceAudioUntil = performance.now() + 400;
         clearTimeout(timer);
         signal.removeEventListener('abort', abort);
         const resumeAfter = this.cueState?.resumeAfter ?? false;

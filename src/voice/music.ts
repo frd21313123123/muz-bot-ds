@@ -90,6 +90,7 @@ export function isNonMusicBareQuery(cleaned: string): boolean {
   if (/^(?:я|мы|ты|вы|он|она|оно|они|мне|мое|меня|тебе|твое|тебя|нам|нас|вам|вас|им|их|это|то|мне нравится)(?: |$)/u.test(bare)) return true;
 
   if (/(?:^| )(?:next|skip|pause|resume|stop|louder|quieter)(?: |$)/u.test(bare)) return true;
+  if (/(?:^| )(?:выйди|выйти|выходи|покинь|покинуть|уйди|уходи|отключись|отсоединись)(?: |$)/u.test(bare)) return true;
   if (/(?:^| )(?:включи|включить|включай|ключи|ключить|поставь|поставить|сыграй|сыграть|воспроизведи|воспроизвести|запусти|запустить|проиграй|проиграть)(?: |$)/u.test(bare)) return true;
 
   return false;
