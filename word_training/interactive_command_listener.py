@@ -136,10 +136,13 @@ def main():
         return
 
     last_trigger_time = 0.0
-    consecutive_hits = 0
-    candidate_action = ""
-    lockout_until_silence = False
-    silence_frames = 0
+    is_speaking = False
+    speech_chunks = 0
+    trailing_silence = 0
+
+    VAD_SPEECH = 0.014      # RMS threshold for active speech
+    TRAIL_CHUNKS = 2        # 2 hops of 120ms = 240ms silence to mark phrase end
+    MIN_SPEECH_CHUNKS = 2   # Require at least 240ms speech (filters clicks/mic noise)
 
     with stream:
         try:
@@ -153,20 +156,6 @@ def main():
                 rms_bar = make_bar(min(1.0, rms * 15), 10)
                 now = time.time()
 
-                # If speech is still ongoing after a trigger, wait until user finishes speaking
-                if lockout_until_silence:
-                    if rms < 0.012:
-                        silence_frames += 1
-                        if silence_frames >= 3:  # ~360ms of silence
-                            lockout_until_silence = False
-                            silence_frames = 0
-                    else:
-                        silence_frames = 0
-                    status_line = f"\r  Звук: [{rms_bar}] | {YELLOW}[ ⏳ ОЖИДАНИЕ ТИШИНЫ ]{RESET} Завершите фразу..."
-                    sys.stdout.write(status_line.ljust(78))
-                    sys.stdout.flush()
-                    continue
-
                 in_cooldown = (now - last_trigger_time) < args.cooldown
                 if in_cooldown:
                     cooldown_rem = max(0.0, args.cooldown - (now - last_trigger_time))
@@ -175,62 +164,70 @@ def main():
                     sys.stdout.flush()
                     continue
 
-                # Run prediction only when there is actual voice activity (speech RMS > 0.012)
-                if rms > 0.012:
-                    res = detector.predict(audio_buffer)
-                    conf = res["confidence"]
-                    action = res["action"]
-                else:
-                    conf = 0.0
-                    action = "unknown"
+                # 1. Active speech detected: accumulate audio in rolling buffer
+                if rms >= VAD_SPEECH:
+                    if not is_speaking:
+                        is_speaking = True
+                        speech_chunks = 0
+                    speech_chunks += 1
+                    trailing_silence = 0
 
-                conf_bar = make_bar(conf, 12)
-                is_control = action in ["pause", "resume", "skip", "stop", "volume_up", "volume_down", "loop_on", "autoplay_on", "queue_clear", "play_search"]
-
-                # Multi-frame persistence: require 2 consecutive frames of the SAME control command
-                # at confidence >= threshold, OR a single ultra-confident peak (>= 0.96)
-                if is_control and conf >= threshold:
-                    if action == candidate_action:
-                        consecutive_hits += 1
-                    else:
-                        candidate_action = action
-                        consecutive_hits = 1
-                else:
-                    consecutive_hits = 0
-                    candidate_action = ""
-
-                triggered = is_control and (consecutive_hits >= 2 or conf >= 0.96)
-
-                if triggered:
-                    last_trigger_time = now
-                    consecutive_hits = 0
-                    candidate_action = ""
-                    lockout_until_silence = True
-                    silence_frames = 0
-
-                    title, desc = ACTION_TITLES.get(action, (action.upper(), ""))
-                    color = GREEN if action != "play_search" else YELLOW
-                    print(f"\r  {color}[РАСПОЗНАНО] {title:<20} ({conf*100:5.1f}%) -> {desc}{RESET}")
-
-                    if not args.no_chime:
-                        threading.Thread(target=play_chime, daemon=True).start()
-
-                    # Clear buffer and drain queue
-                    with buffer_lock:
-                        audio_buffer.fill(0)
-                    while not audio_queue.empty():
-                        try:
-                            audio_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                else:
-                    if rms > 0.012:
-                        lbl = ACTION_TITLES.get(action, (action, ""))[0]
-                        line = f"\r  Звук: [{rms_bar}] | Распознавание: [{conf_bar}] {conf*100:5.1f}% | {lbl:<22}"
-                    else:
-                        line = f"\r  Звук: [{rms_bar}] | Ожидание команды..."
-                    sys.stdout.write(line.ljust(78))
+                    status_line = f"\r  Звук: [{rms_bar}] | {CYAN}[ 🎙️ СЛУШАЮ... ]{RESET} Говорите команду..."
+                    sys.stdout.write(status_line.ljust(78))
                     sys.stdout.flush()
+                    continue
+
+                # 2. Silence / speech pause
+                if is_speaking:
+                    trailing_silence += 1
+
+                    # If silence is brief (< 240ms), keep waiting for speech completion
+                    if trailing_silence < TRAIL_CHUNKS:
+                        status_line = f"\r  Звук: [{rms_bar}] | {CYAN}[ ⏳ ОБРАБОТКА... ]{RESET} Завершение фразы..."
+                        sys.stdout.write(status_line.ljust(78))
+                        sys.stdout.flush()
+                        continue
+
+                    # 3. Speech Boundary Reached! The full utterance is now in the buffer!
+                    is_speaking = False
+                    trailing_silence = 0
+
+                    if speech_chunks >= MIN_SPEECH_CHUNKS:
+                        res = detector.predict(audio_buffer)
+                        conf = res["confidence"]
+                        action = res["action"]
+                        is_control = action in ["pause", "resume", "skip", "stop", "volume_up", "volume_down", "loop_on", "autoplay_on", "queue_clear", "play_search"]
+
+                        if is_control and conf >= threshold:
+                            last_trigger_time = now
+                            title, desc = ACTION_TITLES.get(action, (action.upper(), ""))
+                            color = GREEN if action != "play_search" else YELLOW
+                            print(f"\r  {color}[РАСПОЗНАНО] {title:<20} ({conf*100:5.1f}%) -> {desc}{RESET}")
+
+                            if not args.no_chime:
+                                threading.Thread(target=play_chime, daemon=True).start()
+
+                            # Clear buffer and drain queue
+                            with buffer_lock:
+                                audio_buffer.fill(0)
+                            while not audio_queue.empty():
+                                try:
+                                    audio_queue.get_nowait()
+                                except queue.Empty:
+                                    break
+                            continue
+                        elif conf >= 0.40 and action != "unknown":
+                            title, _ = ACTION_TITLES.get(action, (action, ""))
+                            status_line = f"\r  Звук: [{rms_bar}] | {YELLOW}[ ⚠️ НЕДОСТАТОЧНО УВЕРЕННОСТИ ]{RESET} {title} ({conf*100:.1f}% < {threshold*100:.0f}%)"
+                            sys.stdout.write(status_line.ljust(78))
+                            sys.stdout.flush()
+                            time.sleep(0.3)
+                            continue
+
+                # 4. Idle room silence
+                status_line = f"\r  Звук: [{rms_bar}] | Ожидание команды..."
+                sys.stdout.write(status_line.ljust(78))
+                sys.stdout.flush()
 
         except KeyboardInterrupt:
             print(f"\n\n{CYAN}Остановлено пользователем.{RESET}")
