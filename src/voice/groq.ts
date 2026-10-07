@@ -1,4 +1,5 @@
 import type { SpeechMetrics } from './session.js';
+import { recordMetric } from '../utils/performance.js';
 
 export const GROQ_STT_MODEL = 'whisper-large-v3-turbo';
 export type SttProvider = 'groq' | 'local';
@@ -9,6 +10,7 @@ export function sttProvider(value = process.env.STT_PROVIDER): SttProvider {
 }
 
 interface Request {
+  queuedAt: number;
   pcm: Buffer;
   wakeName?: string;
   priority: boolean;
@@ -58,7 +60,7 @@ export class GroqSpeech {
         if (index >= 0) this.waiting.splice(index, 1);
         controller.abort(); request.cleanup(); reject(new Error('Голосовой запрос отменён.'));
       };
-      const request: Request = { pcm, signal, priority, wakeName, diagnostic, resolve, reject, controller,
+      const request: Request = { pcm, signal, priority, wakeName, diagnostic, resolve, reject, controller, queuedAt: performance.now(),
         cleanup: () => signal.removeEventListener('abort', abort) };
       if (this.waiting.length >= 12) {
         let index = -1;
@@ -89,6 +91,7 @@ export class GroqSpeech {
     const request = this.waiting.shift();
     if (!request) return;
     this.active = request;
+    recordMetric('speech.wait', performance.now() - request.queuedAt);
     void this.send(request).then(request.resolve, request.reject).finally(() => {
       request.cleanup(); this.active = null; this.pump();
     });

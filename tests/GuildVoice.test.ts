@@ -337,7 +337,7 @@ test('failed search and unsupported requests speak feedback without changing the
   }
 });
 
-test('successful voice actions speak the matching confirmation once, with a separate queued reply', async () => {
+test('voice actions confirm once except immediate skip and stop, with a separate queued reply', async () => {
   const h = musicHarness();
   const replies: Confirmation[] = [];
   const pcm = Buffer.alloc(4800);
@@ -351,9 +351,11 @@ test('successful voice actions speak the matching confirmation once, with a sepa
     for (const [message, action] of [['Поставь на паузу', 'pause'], ['Продолжи музыку', 'resume'],
       ['Следующий трек', 'skip'], ['Громкость 70', 'volume_set'], ['Громче', 'volume_up'], ['Тише', 'volume_down']] as const) {
       h.runtime.classify = async () => ({ action, confidence: 1 });
+      const before = replies.length;
       const { capture, processing } = await h.command(message);
       await processing; await capture.complete(Buffer.alloc(2));
-      assert.equal(replies.at(-1), action);
+      if (action === 'skip') assert.equal(replies.length, before);
+      else assert.equal(replies.at(-1), action);
     }
     h.queue.pause = () => false;
     const count = replies.length;
@@ -362,7 +364,7 @@ test('successful voice actions speak the matching confirmation once, with a sepa
     assert.equal(replies.length, count, 'no successful-action reply for a no-op');
     h.runtime.classify = async () => ({ action: 'stop', confidence: 1 });
     await (await h.command('Останови музыку')).processing;
-    assert.equal(replies.at(-1), 'stop');
+    assert.equal(replies.length, count);
     assert.equal(h.queue.closed, true);
     assert.equal(h.voice.session.phase, 'disabled');
   } finally { await h.queue.stop(); }
@@ -384,7 +386,7 @@ test('TTS playback failure does not discard accepted music or prevent a stop', a
 });
 
 test('leaving, voice off, stop and reset during spoken confirmation cancel audio and any delayed action', async () => {
-  for (const action of ['play', 'skip', 'stop'] as const) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
+  for (const action of ['play'] as const) for (const cancel of ['leave', 'off', 'stop', 'reset']) {
     const h = musicHarness();
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
@@ -395,10 +397,9 @@ test('leaving, voice off, stop and reset during spoken confirmation cancel audio
     };
     let skips = 0;
     h.queue.skip = () => { skips++; return true; };
-    h.runtime.classify = async () => ({ action: action === 'play' ? 'unknown' : action, confidence: 1 });
+    h.runtime.classify = async () => ({ action: 'unknown', confidence: 1 });
     try {
-      if (action !== 'play') await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Existing' }, 'Bob'));
-      const { capture, processing } = await h.command(action === 'play' ? 'включи Numb' : action === 'skip' ? 'Следующий трек' : 'Останови музыку');
+      const { capture, processing } = await h.command('включи Numb');
       await started;
       if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
       else if (cancel === 'off') h.voice.setEnabled(false);

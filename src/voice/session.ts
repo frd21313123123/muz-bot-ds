@@ -1,4 +1,5 @@
 import { contextualCommand, isWakePhrase, modeCommand, normalizeSpeech, playerControlRequest, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { recordMetric } from '../utils/performance.js';
 import { extractMusicRequest, type MusicBackend, type MusicDiagnostic, type MusicPlayerState } from './music.js';
 import type { TrainingExample } from './training.js';
 import { extractRadioRequest, type RadioStation } from '../utils/radio.js';
@@ -35,6 +36,8 @@ export interface VoiceBackend extends MusicBackend {
     diagnostic?: (metrics: SpeechMetrics) => void): Promise<string>;
   classify(text: string, signal: AbortSignal): Promise<VoiceDecision>;
   detectWake?(pcm: Buffer, signal: AbortSignal, threshold?: number): Promise<{ wake: boolean; probability: number }>;
+  supportsWake?(name: string): boolean;
+  detectCommand?(pcm: Buffer, signal: AbortSignal, threshold?: number): Promise<{ class: string; action: string; confidence: number; matched: boolean }>;
 }
 export interface SpeechMetrics { vadMs: number; segments: number; rejectedSegments: number }
 export interface VoiceHost {
@@ -47,7 +50,7 @@ export interface VoiceHost {
   archiveAudio?(pcm: Buffer): void;
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
-  execute(intent: VoiceIntent, signal: AbortSignal): Promise<void | boolean>;
+  execute(intent: VoiceIntent, signal: AbortSignal, executed?: () => void): Promise<void | boolean>;
   playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean,
     diagnostic?: (event: VoiceDiagnostic) => void): Promise<boolean>;
   playRadio?(station: RadioStation, userId: string, signal: AbortSignal, valid: () => boolean): Promise<boolean>;
@@ -139,12 +142,21 @@ export class VoiceSession {
       silenceMs: command ? 800 : 400,
       cancel,
       complete: async (pcm) => {
+        const started = performance.now();
         if (finished || controller.signal.aborted) return;
         finished = true;
         this.capturing.delete(userId);
         const valid = (): boolean => !controller.signal.aborted && epoch === this.epoch && this.host.present(userId);
         let example: TrainingExample | null = null;
+        let executionMeasured = false;
+        const executed = (): void => {
+          if (executionMeasured) return;
+          executionMeasured = true;
+          recordMetric('voice.action', performance.now() - started);
+          recordMetric('voice.total', performance.now() - started + (command ? 800 : 400));
+        };
         const report = (event: VoiceDiagnostic): void => {
+          if (event.stage === 'execution' && event.changed) executed();
           if (example && example.diagnostics.length < 32) example.diagnostics.push({ ...event });
           this.host.diagnostic?.(event);
         };
@@ -157,7 +169,7 @@ export class VoiceSession {
           }
 
           let localWakeDetected = false;
-          if (!command && this.backend.detectWake) {
+          if (!command && this.backend.detectWake && (this.backend.supportsWake?.(this.host.wakeName()) ?? true)) {
             const wakeStart = performance.now();
             let wakeResult: { wake: boolean; probability: number };
             try {
@@ -202,9 +214,31 @@ export class VoiceSession {
           if (command || localWakeDetected) {
             try { this.host.archiveAudio?.(pcm); } catch { /* Archiving cannot interrupt recognition. */ }
           }
+          if ((command || localWakeDetected) && this.backend.detectCommand) {
+            try {
+              const cmdStart = performance.now();
+              const cmdRes = await this.backend.detectCommand(pcm, controller.signal);
+              const controlActions = ['pause', 'resume', 'skip', 'stop', 'volume_up', 'volume_down', 'loop_on', 'autoplay_on', 'queue_clear'];
+              if (valid() && cmdRes.matched && controlActions.includes(cmdRes.action)) {
+                const intent: VoiceIntent = { action: cmdRes.action as any };
+                report({
+                  stage: 'recognition', kind: 'command',
+                  audioMs: Math.round(pcm.length / 32), rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak,
+                  ms: Math.round(performance.now() - cmdStart), matched: true, confidence: cmdRes.confidence,
+                  action: intent.action,
+                });
+                const changed = await this.host.execute(intent, controller.signal, executed);
+                report({ stage: 'execution', action: intent.action, changed: changed !== false });
+                return;
+              }
+            } catch {
+              // Proceed to fallback STT if local command detection threw
+            }
+          }
           const asrStart = performance.now();
           const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName(),
             (value) => { metrics = value; });
+          recordMetric('speech.recognize', performance.now() - asrStart);
           const paused = this.host.paused?.() ?? false;
           const text = command ? contextualCommand(transcript, paused, this.host.radio?.() ?? false) : contextualCommand(transcript, paused, this.host.radio?.() ?? false);
           const direct = modeCommand(text);
@@ -274,7 +308,7 @@ export class VoiceSession {
             }
             if (intent.action !== 'unknown') {
               if (example) { example.route = 'control'; example.validated_intent = intent; }
-              const changed = await this.host.execute(intent, controller.signal);
+              const changed = await this.host.execute(intent, controller.signal, executed);
               if (example) example.outcome = changed === false ? (valid() ? 'no_op' : 'cancelled') : 'changed';
               report({ stage: 'execution', action: intent.action, changed: changed !== false });
             } else if (music && valid()) {

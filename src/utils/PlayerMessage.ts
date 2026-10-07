@@ -10,6 +10,7 @@ export class PlayerMessage {
   private updating = false;
   private queued = false;
   private revision = 0;
+  private lastPayload: string | null = null;
 
   constructor(private readonly client: MusicClient, private readonly queue: GuildQueue) {}
 
@@ -22,6 +23,7 @@ export class PlayerMessage {
   async replace(message: Message, channelId: string): Promise<void> {
     await this.removeMessage();
     this.message = message;
+    this.lastPayload = null;
     this.setChannel(channelId);
   }
 
@@ -31,17 +33,26 @@ export class PlayerMessage {
     this.updating = true;
     const revision = this.revision;
     try {
+      // Collapse a burst of synchronous state changes into one final payload.
+      await Promise.resolve();
+      if (revision !== this.revision || this.queue.closed || !this.channelId) return;
       const payload = { embeds: [playerEmbed(this.queue)], components: [playerActionRow(this.queue)] };
+      const serialized = JSON.stringify(payload);
       if (this.message) {
-        try { await this.message.edit(payload); return; }
-        catch { this.message = null; }
+        if (serialized === this.lastPayload) return;
+        const message = this.message;
+        try { await message.edit(payload); if (revision === this.revision && this.message === message) this.lastPayload = serialized; return; }
+        catch {
+          if (revision !== this.revision || this.message !== message) return;
+          this.message = null;
+        }
       }
       const channel = await this.client.channels.fetch(this.channelId).catch(() => null);
       if (revision !== this.revision || this.queue.closed) return;
       if (channel && 'send' in channel && typeof channel.send === 'function') {
         const message = await channel.send(payload) as Message;
         if (revision !== this.revision || this.queue.closed) await message.delete().catch(() => {});
-        else this.message = message;
+        else { this.message = message; this.lastPayload = serialized; }
       }
     } catch (error) {
       console.error('[PlayerMessage]', error);
@@ -57,6 +68,7 @@ export class PlayerMessage {
   async removeMessage(): Promise<void> {
     const previous = this.message;
     this.message = null;
+    this.lastPayload = null;
     if (previous) await previous.delete().catch(() => {});
   }
 

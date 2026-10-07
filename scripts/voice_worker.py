@@ -354,6 +354,34 @@ def load_wake_detector():
         return None
 
 
+def load_command_detector():
+    cmd_dir = os.environ.get("COMMAND_MODEL_PATH", "").strip()
+    if not cmd_dir:
+        for candidate in [
+            ROOT / "models" / "command-model",
+            ROOT / "scripts" / "wakeword",
+        ]:
+            if (candidate / "command_model.onnx").is_file():
+                cmd_dir = str(candidate)
+                break
+    if not cmd_dir or not (Path(cmd_dir) / "command_model.onnx").is_file():
+        return None
+    try:
+        import sys
+        if str(Path(cmd_dir)) not in sys.path:
+            sys.path.insert(0, str(Path(cmd_dir)))
+        if str(ROOT / "scripts" / "wakeword") not in sys.path:
+            sys.path.insert(0, str(ROOT / "scripts" / "wakeword"))
+        from command_audio import CommandDetector
+        detector = CommandDetector(cmd_dir)
+        import numpy as np
+        detector.predict(np.zeros(32000, dtype=np.float32))
+        return detector
+    except Exception as e:
+        print(f"Warning: Failed to load CommandDetector: {e}", file=sys.stderr, flush=True)
+        return None
+
+
 def models(prepare=False):
     # PyTorch's Windows wheel bundles the CUDA/cuDNN DLLs needed by CTranslate2.
     # Keep DLL-directory handles alive for the lifetime of the worker.
@@ -366,12 +394,13 @@ def models(prepare=False):
             os.environ['PATH'] = torch_lib + os.pathsep + os.environ.get('PATH', '')
             dll_handles.append(os.add_dll_directory(torch_lib))
     wake_detector = load_wake_detector()
+    command_detector = load_command_detector()
     if STT_PROVIDER == 'groq':
         # STT runs in Node through Groq; this worker handles wake detection (and Laya in heavy profile)
         if PROFILE == 'light':
-            if wake_detector is None:
+            if wake_detector is None and command_detector is None:
                 raise ValueError('Groq light profile requires a local wake detector')
-            return None, None, None, wake_detector
+            return None, None, None, wake_detector, command_detector
         torch.set_num_threads(max(1, min(8, int(os.environ.get('VOICE_CPU_THREADS', '4')))))
         device = os.environ.get('VOICE_DEVICE', 'cpu').strip().lower()
         if device not in ('cpu', 'cuda'):
@@ -392,7 +421,7 @@ def models(prepare=False):
             temporary.write_text(json.dumps({'profile': PROFILE, 'stt_provider': 'groq',
                                             'laya': laya_model, 'laya_revision': revision}), encoding='utf-8')
             temporary.replace(marker)
-        return None, None, agent, wake_detector
+        return None, None, agent, wake_detector, command_detector
     from faster_whisper import WhisperModel
     import numpy as np
 
@@ -490,20 +519,23 @@ def models(prepare=False):
                                         "whisper_path": str(custom_whisper.relative_to(ROOT)) if custom_whisper and custom_whisper.is_relative_to(ROOT) else str(custom_whisper) if custom_whisper else None,
                                         "laya": laya_model, "laya_revision": revision}), encoding="utf-8")
         temporary.replace(marker)
-    return whisper, wake_whisper, agent, wake_detector
+    return whisper, wake_whisper, agent, wake_detector, command_detector
 
 
 def main():
     prepare = "--prepare" in sys.argv
     with redirect_stdout(sys.stderr):
-        whisper, wake_whisper, agent, wake_detector = models(prepare)
+        whisper, wake_whisper, agent, wake_detector, command_detector = models(prepare)
     if prepare:
         return
     wake_model_name = (wake_detector.config.get("recipe_version", "bot-v5-acc90") if wake_detector
                        else (wake_whisper.runtime_name if wake_whisper else 'whisper-large-v3-turbo'))
+    command_model_name = (command_detector.config.get("model_name", "whisper_tiny_spoken_commands") if command_detector else None)
     print(json.dumps({"ready": True, "modelName": agent.cfg.get("model_name", "laya-multilingual") if agent else 'rules',
                       "sttModelName": whisper.runtime_name if whisper else 'whisper-large-v3-turbo',
                       "wakeModelName": wake_model_name,
+                      "commandModelName": command_model_name,
+                      "wakeNames": [wake_detector.config.get("wake_word_ru", "бот"), wake_detector.config.get("wake_word_en", "bot")] if wake_detector else [],
                       "inferenceDevice": whisper.model.device if whisper else (str(agent.device).split(':')[0] if agent else 'cpu')}), flush=True)
     import numpy as np
     for line in sys.stdin:
@@ -541,6 +573,19 @@ def main():
                             result = {"wake": bool(res["wake"]), "probability": float(res["probability"])}
                     else:
                         result = {"wake": False, "probability": 0.0}
+                elif request["op"] == "command_detect":
+                    pcm = base64.b64decode(request["pcm"], validate=True)
+                    if not pcm or len(pcm) > 480_000 or len(pcm) % 2:
+                        raise ValueError("Invalid audio")
+                    audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+                    if command_detector is not None:
+                        res = command_detector.predict(audio)
+                        threshold = request.get("threshold")
+                        if isinstance(threshold, (int, float)):
+                            res["matched"] = res["confidence"] >= float(threshold)
+                        result = res
+                    else:
+                        result = {"class": "unknown", "action": "unknown", "confidence": 0.0, "matched": False}
                 elif agent is None:
                     raise ValueError('Light worker accepts only audio; actions are parsed in TypeScript')
                 elif request["op"] == "classify":

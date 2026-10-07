@@ -9,6 +9,7 @@ import { resolveQuery } from './utils/resolve.js';
 import { canControl, memberVoiceChannel } from './utils/voiceAccess.js';
 import { MIN_SPEED, MAX_SPEED } from './utils/audio.js';
 import { extractRadioRequest, findRadioStation, type RadioStation } from './utils/radio.js';
+import { acknowledgeCommand } from './utils/performance.js';
 
 async function startRadio(interaction: ChatInputCommandInteraction, client: MusicClient, station: RadioStation): Promise<unknown> {
   if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
@@ -46,7 +47,7 @@ const radio: Command = {
     .addStringOption(option => option.setName('station').setDescription('Название радиостанции')
       .setRequired(true).setAutocomplete(true).setMinLength(1).setMaxLength(100)),
   async execute(interaction, client) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await acknowledgeCommand(interaction, interaction.deferReply({ flags: MessageFlags.Ephemeral }));
     const station = findRadioStation(interaction.options.getString('station', true));
     if (!station) return interaction.editReply('❌ Радиостанция не поддерживается. Выберите станцию из подсказок /radio.');
     return startRadio(interaction, client, station);
@@ -54,7 +55,7 @@ const radio: Command = {
 };
 
 const privateReply = (interaction: ChatInputCommandInteraction, content: string): Promise<unknown> =>
-  interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  acknowledgeCommand(interaction, interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } }));
 
 const voice: Command = {
   data: new SlashCommandBuilder().setName('voice').setDescription('🎙 Голосовое управление')
@@ -75,7 +76,7 @@ const voice: Command = {
       return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nПрофиль: ${runtime?.profile ?? 'light'}. Распознавание: ${stt}. Обработчик ${runtime?.ready ? 'готов' : runtime?.prepared ? 'запустится при включении прослушивания' : 'не подготовлен — проверьте .env и выполните npm run setup:voice'}.`);
     }
     if (!await requireController(interaction, queue)) return;
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await acknowledgeCommand(interaction, interaction.deferReply({ flags: MessageFlags.Ephemeral }));
     if (action === 'name') {
       const value = interaction.options.getString('value');
       if (!client.voiceSettings) return interaction.editReply('❌ Хранилище настроек недоступно.');
@@ -109,7 +110,7 @@ async function requireController(interaction: ChatInputCommandInteraction, queue
 const join: Command = {
   data: new SlashCommandBuilder().setName('join').setDescription('🎙 Войти в ваш голосовой канал и слушать команды'),
   async execute(interaction, client) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await acknowledgeCommand(interaction, interaction.deferReply({ flags: MessageFlags.Ephemeral }));
     if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
     const channel = memberVoiceChannel(interaction);
     if (!channel) return interaction.editReply('❌ Войдите в голосовой канал.');
@@ -163,7 +164,7 @@ const play: Command = {
       .setRequired(true).setMinLength(1).setMaxLength(500))
     .addBooleanOption((option) => option.setName('infinite').setDescription('Добавлять рекомендации после очереди')),
   async execute(interaction, client) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await acknowledgeCommand(interaction, interaction.deferReply({ flags: MessageFlags.Ephemeral }));
     const radioRequest = extractRadioRequest(interaction.options.getString('query', true), true);
     if (radioRequest?.kind === 'station') return startRadio(interaction, client, radioRequest.station);
     if (radioRequest?.kind === 'rejected') return interaction.editReply('❌ Укажите одну станцию или песню без отрицания.');
@@ -191,17 +192,20 @@ const play: Command = {
         : interaction.user.username;
       const playlistLimit = (infinite ?? queue.autoplay) ? 25 : 1;
       const query = interaction.options.getString('query', true);
-
-      const [, result] = await Promise.all([
-        queue.join(channel),
-        resolveQuery(query, requestedBy, client.ytdlp, playlistLimit, { fast: true }),
-      ]);
+      const request = queue.beginMetadataRequest(interaction.user.id);
+      let result;
+      try {
+        [, result] = await Promise.all([
+          queue.join(channel),
+          resolveQuery(query, requestedBy, client.ytdlp, playlistLimit, { fast: true, signal: request.signal }),
+        ]);
+      } finally { request.finish(); }
       if (memberVoiceChannel(interaction)?.id !== channel.id || queue.closed) {
-        if (created && !queue.closed && !queue.currentTrack && !queue.tracks.length) await queue.stop();
+        if (created && !queue.closed && !queue.currentTrack && !queue.tracks.length && !queue.hasMetadataRequests) await queue.stop();
         return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /play.');
       }
       if (!result) {
-        if (created && !queue.closed && !queue.currentTrack && !queue.tracks.length) await queue.stop();
+        if (created && !queue.closed && !queue.currentTrack && !queue.tracks.length && !queue.hasMetadataRequests) await queue.stop();
         return interaction.editReply('❌ Ничего не найдено.');
       }
       queue.setPlayerChannel(interaction.channelId);
@@ -222,7 +226,7 @@ const play: Command = {
         allowedMentions: { parse: [] },
       });
     } catch (error) {
-      if (created) await queue.stop().catch(() => {});
+      if (created && !queue.currentTrack && !queue.tracks.length && !queue.hasMetadataRequests) await queue.stop().catch(() => {});
       console.error('[play]', error);
       return interaction.editReply(`❌ Не удалось запустить трек: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -324,7 +328,7 @@ const nowplaying: Command = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId!);
     if (!queue?.currentTrack) return privateReply(interaction, '❌ Сейчас ничего не играет.');
-    return interaction.reply({ embeds: [nowPlayingEmbed(queue.currentTrack, queue.autoplay, queue.speed)], flags: MessageFlags.Ephemeral });
+    return acknowledgeCommand(interaction, interaction.reply({ embeds: [nowPlayingEmbed(queue.currentTrack, queue.autoplay, queue.speed)], flags: MessageFlags.Ephemeral }));
   },
 };
 
@@ -334,7 +338,7 @@ const queueCommand: Command = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId!);
     if (!queue?.currentTrack && !queue?.tracks.length) return privateReply(interaction, '📋 Очередь пуста.');
-    return interaction.reply({ embeds: [queueEmbed(queue, interaction.options.getInteger('page') ?? 1)], flags: MessageFlags.Ephemeral });
+    return acknowledgeCommand(interaction, interaction.reply({ embeds: [queueEmbed(queue, interaction.options.getInteger('page') ?? 1)], flags: MessageFlags.Ephemeral }));
   },
 };
 
@@ -343,7 +347,7 @@ const player: Command = {
   async execute(interaction, client) {
     const queue = client.queues.get(interaction.guildId!);
     if (!queue?.connection) return privateReply(interaction, 'ℹ️ Бот не в голосовом канале.');
-    await interaction.deferReply();
+    await acknowledgeCommand(interaction, interaction.deferReply());
     const message = await interaction.editReply({ embeds: [playerEmbed(queue)], components: [playerActionRow(queue)] });
     await queue.showPlayer(message, interaction.channelId);
   },
@@ -352,7 +356,7 @@ const player: Command = {
 const watch: Command = {
   data: new SlashCommandBuilder().setName('watch').setDescription('📺 Запустить Watch Together'),
   async execute(interaction, client) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await acknowledgeCommand(interaction, interaction.deferReply({ flags: MessageFlags.Ephemeral }));
     const channel = memberVoiceChannel(interaction);
     if (!channel || !interaction.guild) return interaction.editReply('❌ Войдите в голосовой канал.');
     const me = interaction.guild.members.me ?? await interaction.guild.members.fetchMe();

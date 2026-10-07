@@ -15,13 +15,22 @@ import { GuildVoice } from '../voice/GuildVoice.js';
 import { configureMusicEncoder, validateSpeed, type MusicPlaybackOptions } from './audio.js';
 import { formatDuration, parseDuration, videoDuration } from './duration.js';
 import { isLiveVideo } from './ytdlp.js';
+import { countMetric, recordMetric } from './performance.js';
 
 const IDLE_MS = 5 * 60_000;
 const AUTOPLAY_HISTORY_LIMIT = 500;
 const AUTOPLAY_SEED_LIMIT = 3;
+// yt-dlp/FFmpeg can briefly stop producing PCM while downloading or filtering.
+// Voice defaults to only five missing 20 ms frames (100 ms), which stops an
+// otherwise open stream and makes Idle incorrectly consume the next track.
+// Allow bounded buffering; EOF and stream errors still finish immediately.
+const AUDIO_STALL_TIMEOUT_MS = 30_000;
 
 export class GuildQueue {
-  readonly player: AudioPlayer = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
+  readonly player: AudioPlayer = createAudioPlayer({ behaviors: {
+    noSubscriber: NoSubscriberBehavior.Pause,
+    maxMissedFrames: AUDIO_STALL_TIMEOUT_MS / 20,
+  } });
   readonly pending = new TrackQueue();
   readonly playerMessage: PlayerMessage;
   voiceChannel: VoiceBasedChannel | null = null;
@@ -39,7 +48,6 @@ export class GuildQueue {
   private joining: Promise<void> | null = null;
   private stopping: Promise<void> | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
-  private fadeTimer: NodeJS.Timeout | null = null;
   private trackOffset = 0;
   private trackSpeed = 1;
   private pauseRequested = false;
@@ -56,9 +64,30 @@ export class GuildQueue {
   private readonly recentTrackIdSet = new Set<string>();
   private readonly radioFactory: (url: string) => ManagedAudioStream;
   private voiceWanted = true;
-  private prepared: { track: Track; media: ManagedAudioStream; epoch: number } | null = null;
+  private prepared: { track: Track; media: ManagedAudioStream; epoch: number; speed: number; cleanup(): void } | null = null;
   private prefetchTimer: NodeJS.Timeout | null = null;
   private prefetchPromise: Promise<void> | null = null;
+  private prefetchController: AbortController | null = null;
+  private preparationGeneration = 0;
+  private recommendationTimer: NodeJS.Timeout | null = null;
+  private recommendations: { videoId: string; epoch: number; autoEpoch: number;
+    controller: AbortController; promise: Promise<Track[]> } | null = null;
+  private readonly hydration = new Map<Track, AbortController>();
+  private playbackStartedAt = 0;
+  private transitionStartedAt = 0;
+  private readonly metadataConsumers = new Map<AbortController, string>();
+  get hasMetadataRequests(): boolean { return this.metadataConsumers.size > 0; }
+
+  beginMetadataRequest(userId: string): { signal: AbortSignal; finish(): void } {
+    const controller = new AbortController();
+    this.metadataConsumers.set(controller, userId);
+    return { signal: controller.signal, finish: () => { controller.abort(); this.metadataConsumers.delete(controller); } };
+  }
+  cancelMetadataRequests(userId?: string): void {
+    for (const [controller, owner] of this.metadataConsumers) {
+      if (!userId || owner === userId) { controller.abort(); this.metadataConsumers.delete(controller); }
+    }
+  }
 
   constructor(readonly guildId: string, readonly client: MusicClient,
     mediaFactory?: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream,
@@ -78,7 +107,22 @@ export class GuildQueue {
     });
     this.player.on(AudioPlayerStatus.Playing, () => {
       if (this.pauseRequested) this.player.pause(false);
+      else {
+        if (this.playbackStartedAt) {
+          recordMetric('audio.start', performance.now() - this.playbackStartedAt);
+          this.playbackStartedAt = 0;
+        }
+        if (this.transitionStartedAt) {
+          recordMetric('audio.transition', performance.now() - this.transitionStartedAt);
+          this.transitionStartedAt = 0;
+        }
+        this.schedulePrefetch(this.playbackEpoch);
+      }
     });
+    this.player.on(AudioPlayerStatus.Buffering, () => this.clearPreparationTimers());
+    const suspendPreparation = (): void => { this.clearPrepared(); this.clearPreparationTimers(); this.cancelRecommendations(); };
+    this.player.on(AudioPlayerStatus.Paused, suspendPreparation);
+    this.player.on(AudioPlayerStatus.AutoPaused, suspendPreparation);
   }
 
   get tracks(): Track[] { return this.pending.items; }
@@ -105,7 +149,7 @@ export class GuildQueue {
   setVoiceDucking(enabled: boolean): void {
     this.voiceDucking = enabled;
     const state = this.player.state;
-    if (state.status !== AudioPlayerStatus.Idle && !this.fadeTimer) {
+    if (state.status !== AudioPlayerStatus.Idle) {
       state.resource.volume?.setVolume(this.volume * (enabled ? 0.2 : 1));
     }
   }
@@ -180,33 +224,47 @@ export class GuildQueue {
     this.idleTimer = setTimeout(() => { if (!this.currentTrack) void this.stop(); }, IDLE_MS);
   }
 
-  private clearFade(): void {
-    if (this.fadeTimer) clearInterval(this.fadeTimer);
-    this.fadeTimer = null;
-  }
-
   private destroyStream(): void {
     this.activeStream?.destroy();
     this.activeStream = null;
   }
 
   private clearPrepared(): void {
+    this.preparationGeneration++;
+    this.prefetchController?.abort(); this.prefetchController = null;
+    this.prefetchPromise = null;
     if (this.prefetchTimer) {
       clearTimeout(this.prefetchTimer);
       this.prefetchTimer = null;
     }
     if (this.prepared) {
+      this.prepared.cleanup();
       this.prepared.media.destroy();
       this.prepared = null;
     }
   }
 
+  private clearPreparationTimers(): void {
+    if (this.prefetchTimer) clearTimeout(this.prefetchTimer);
+    if (this.recommendationTimer) clearTimeout(this.recommendationTimer);
+    this.prefetchTimer = null; this.recommendationTimer = null;
+  }
+
+  private cancelRecommendations(): void {
+    if (this.recommendationTimer) clearTimeout(this.recommendationTimer);
+    this.recommendationTimer = null;
+    this.recommendations?.controller.abort(); this.recommendations = null;
+  }
+
+  private cancelHydration(): void {
+    for (const controller of this.hydration.values()) controller.abort();
+    this.hydration.clear();
+  }
+
   private schedulePrefetch(epoch: number): void {
-    if (this.prefetchTimer) {
-      clearTimeout(this.prefetchTimer);
-      this.prefetchTimer = null;
-    }
-    if (this.closed || epoch !== this.playbackEpoch || !this.currentTrack || this.isRadio) {
+    this.clearPreparationTimers();
+    if (this.closed || epoch !== this.playbackEpoch || !this.currentTrack || this.isRadio
+      || this.isPaused || this.cueState || this.player.state.status !== AudioPlayerStatus.Playing) {
       return;
     }
     const nextTrack = this.loopCurrent ? this.currentTrack : this.pending.items[0];
@@ -220,72 +278,80 @@ export class GuildQueue {
     }
 
     const elapsedSec = this.sourcePosition();
-    const remainingSec = durationSec - elapsedSec;
+    const remainingSec = (durationSec - elapsedSec) / this.trackSpeed;
+    const current = this.currentTrack;
+    if (!nextTrack && this.autoplay && current.source !== 'radio') {
+      this.recommendationTimer = setTimeout(() => {
+        this.recommendationTimer = null;
+        if (this.currentTrack !== current || this.isPaused || this.closed) return;
+        if ((durationSec - this.sourcePosition()) / this.trackSpeed > 60.05) {
+          this.schedulePrefetch(epoch); return;
+        }
+        const autoEpoch = this.autoplayEpoch;
+        void this.findAutoplayTracks(current.videoId, epoch).then(tracks => {
+          if (this.currentTrack !== current || this.closed || this.advancing || !this.autoplay || autoEpoch !== this.autoplayEpoch || !tracks.length) return;
+          if (!this.pending.items.length) this.pending.addMany(tracks);
+          this.schedulePrefetch(epoch);
+          void this.playerMessage.update();
+        });
+      }, Math.max(0, Math.round((remainingSec - 60) * 1000)));
+      return;
+    }
     const delayMs = Math.max(0, Math.round((remainingSec - 20) * 1000));
 
     this.prefetchTimer = setTimeout(() => {
       this.prefetchTimer = null;
+      if (this.currentTrack !== current) return;
+      if ((durationSec - this.sourcePosition()) / this.trackSpeed > 20.05) {
+        this.schedulePrefetch(epoch); return;
+      }
       void this.triggerPrefetch(epoch);
     }, delayMs);
   }
 
   private async triggerPrefetch(epoch: number): Promise<void> {
-    if (this.closed || epoch !== this.playbackEpoch || !this.currentTrack || this.isRadio) {
+    if (this.closed || epoch !== this.playbackEpoch || !this.currentTrack || this.isRadio || this.isPaused) {
       return;
     }
-    if (this.prepared && this.prepared.epoch === epoch) {
+    if (this.prepared && this.prepared.epoch === epoch && this.prepared.speed === this.speed
+      && this.prepared.track === (this.loopCurrent ? this.currentTrack : this.pending.items[0])) {
       return;
     }
 
-    let nextTrack = this.loopCurrent ? this.currentTrack : this.pending.items[0];
-    if (!nextTrack && this.autoplay && this.currentTrack.source !== 'radio') {
-      try {
-        const targetId = this.currentTrack.videoId;
-        const autoEpoch = this.autoplayEpoch;
-        const related = await this.findAutoplayTracks(targetId, epoch);
-        if (!this.closed && this.autoplay && epoch === this.playbackEpoch && autoEpoch === this.autoplayEpoch && related.length) {
-          this.pending.addMany(related);
-          void this.playerMessage.update();
-          nextTrack = this.pending.items[0];
-        }
-      } catch {
-        // Ignored in prefetch
-      }
-    }
+    if (this.prefetchPromise) return this.prefetchPromise;
+    this.clearPrepared();
+    const nextTrack = this.loopCurrent ? this.currentTrack : this.pending.items[0];
 
     if (!nextTrack || this.closed || epoch !== this.playbackEpoch) {
       return;
     }
 
+    const generation = this.preparationGeneration;
+    const speed = this.speed;
+    const controller = new AbortController(); this.prefetchController = controller;
     const currentPromise = (async () => {
+      let media: ManagedAudioStream | null = null;
       try {
-        const media = nextTrack.source === 'radio'
+        media = nextTrack.source === 'radio'
           ? this.radioFactory(nextTrack.streamUrl)
-          : this.mediaFactory(nextTrack.url, { speed: this.speed, startSeconds: 0 });
-
-        const onStreamError = (): void => {
-          if (this.prepared?.media === media) {
-            this.clearPrepared();
-          }
-        };
+          : this.mediaFactory(nextTrack.url, { speed, startSeconds: 0 });
+        // Cancellation immediately releases child processes, not just the waiter.
+        const candidate = media;
+        const abort = (): void => candidate.destroy();
+        controller.signal.addEventListener('abort', abort, { once: true });
+        try { await waitForAudio(media, controller.signal); }
+        finally { controller.signal.removeEventListener('abort', abort); }
+        if (this.closed || epoch !== this.playbackEpoch || generation !== this.preparationGeneration
+          || speed !== this.speed || this.isPaused
+          || nextTrack !== (this.loopCurrent ? this.currentTrack : this.pending.items[0])) return;
+        const onStreamError = (): void => { if (this.prepared?.media === candidate) this.clearPrepared(); };
         media.stream.once('error', onStreamError);
-
-        if (this.closed || epoch !== this.playbackEpoch) {
-          media.destroy();
-          return;
-        }
-
-        if (this.prepared) {
-          this.prepared.media.destroy();
-        }
-        this.prepared = {
-          track: nextTrack,
-          media,
-          epoch,
-        };
+        this.prepared = { track: nextTrack, media, epoch, speed,
+          cleanup: () => candidate.stream.off('error', onStreamError) };
+        media = null;
       } catch {
-        // Ignored in prefetch; advance() will retry
-      }
+        if (!controller.signal.aborted) countMetric('audio.prefetch.failed');
+      } finally { media?.destroy(); }
     })();
 
     this.prefetchPromise = currentPromise;
@@ -294,6 +360,7 @@ export class GuildQueue {
     } finally {
       if (this.prefetchPromise === currentPromise) {
         this.prefetchPromise = null;
+        this.prefetchController = null;
       }
     }
   }
@@ -301,10 +368,14 @@ export class GuildQueue {
   private async hydrateTrackMetadata(track: Track, epoch: number): Promise<void> {
     if (track.source === 'radio') return;
     if (typeof this.client.ytdlp?.video !== 'function') return;
+    if (this.hydration.has(track)) return;
+    const controller = new AbortController(); this.hydration.set(track, controller);
     const videoId = track.videoId;
     try {
-      const info = await this.client.ytdlp.video(`https://www.youtube.com/watch?v=${videoId}`);
-      if (this.closed || epoch !== this.playbackEpoch) return;
+      const info = await this.client.ytdlp.video(`https://www.youtube.com/watch?v=${videoId}`,
+        { signal: controller.signal, priority: 'background' });
+      if (this.closed || controller.signal.aborted || epoch !== this.playbackEpoch
+        || (this.currentTrack !== track && !this.pending.items.includes(track))) return;
       if (info.id === videoId) {
         let changed = false;
         if ((track.title === 'Загрузка…' || !track.title.trim()) && info.title?.trim()) {
@@ -337,12 +408,16 @@ export class GuildQueue {
       }
     } catch {
       // Non-fatal background error
-    }
+    } finally { if (this.hydration.get(track) === controller) this.hydration.delete(track); }
   }
 
   private playTrack(track: Track, startSeconds = 0, paused = false, speed = this.speed,
     preparedMedia?: ManagedAudioStream): void {
     this.cueState?.finish();
+    this.clearPrepared();
+    this.clearPreparationTimers();
+    this.cancelRecommendations();
+    this.playbackStartedAt = performance.now();
     const media = preparedMedia ?? (track.source === 'radio' ? this.radioFactory(track.streamUrl)
       : this.mediaFactory(track.url, { speed, startSeconds }));
     let resource;
@@ -373,7 +448,6 @@ export class GuildQueue {
     oldStream?.destroy();
     void this.playerMessage.update();
     console.log(`[Queue:${this.guildId}] ▶ ${track.title} [${track.source === 'radio' ? track.stationId : track.videoId}] • ${track.isLive ? 'live' : track.duration}`);
-    this.schedulePrefetch(this.playbackEpoch);
     if (track.source !== 'radio' && (track.duration === '?' || track.title === 'Загрузка…')) {
       void this.hydrateTrackMetadata(track, this.playbackEpoch);
     }
@@ -390,27 +464,42 @@ export class GuildQueue {
     }
   }
 
-  private async findAutoplayTracks(videoId: string, epoch: number): Promise<Track[]> {
+  private findAutoplayTracks(videoId: string, epoch: number): Promise<Track[]> {
+    const autoEpoch = this.autoplayEpoch;
+    const previous = this.recommendations;
+    if (previous && previous.videoId === videoId && previous.epoch === epoch && previous.autoEpoch === autoEpoch) return previous.promise;
+    this.cancelRecommendations();
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(25_000)]);
+    const promise = this.lookupAutoplayTracks(videoId, epoch, autoEpoch, signal);
+    const request = { videoId, epoch, autoEpoch, controller, promise };
+    this.recommendations = request;
+    void promise.finally(() => { if (this.recommendations === request) this.recommendations = null; });
+    return promise;
+  }
+
+  private async lookupAutoplayTracks(videoId: string, epoch: number, autoEpoch: number, signal: AbortSignal): Promise<Track[]> {
     const seeds = [videoId, ...this.recentTrackIds.slice().reverse().filter((id) => id !== videoId)]
       .slice(0, AUTOPLAY_SEED_LIMIT);
     for (const seed of seeds) {
       try {
-        const related = await this.client.ytdlp.related(seed);
-        if (this.closed || !this.autoplay || epoch !== this.playbackEpoch) return [];
         const excluded = new Set(this.recentTrackIdSet);
         for (const track of this.pending.items) {
           if (track.source !== 'radio') excluded.add(track.videoId);
         }
+        if (signal.aborted) return [];
+        const related = await this.client.ytdlp.related(seed, 3, { signal, priority: 'background', excludeIds: excluded });
+        if (signal.aborted || this.closed || !this.autoplay || epoch !== this.playbackEpoch || autoEpoch !== this.autoplayEpoch) return [];
         const fresh: Track[] = [];
         for (const track of related) {
           if (track.source === 'radio' || excluded.has(track.videoId)) continue;
           excluded.add(track.videoId);
           fresh.push(track);
         }
-        if (fresh.length) return fresh;
+        if (fresh.length) return fresh.slice(0, 3);
       } catch (error) {
-        console.error(`[Queue:${this.guildId}] recommendations from ${seed}:`, error);
-        if (this.closed || !this.autoplay || epoch !== this.playbackEpoch) return [];
+        if (signal.aborted || this.closed || !this.autoplay || epoch !== this.playbackEpoch || autoEpoch !== this.autoplayEpoch) return [];
+        console.error(`[Queue:${this.guildId}] recommendations unavailable`);
       }
     }
     return [];
@@ -460,7 +549,7 @@ export class GuildQueue {
       this.advancePending = false;
       this.cancelRadioRecovery();
       this.clearPrepared();
-      this.clearFade(); this.pending.clear();
+      this.cancelRecommendations(); this.cancelHydration(); this.pending.clear();
       this.autoplay = false; this.loopCurrent = false; this.speed = 1;
       void this.playerMessage.update();
       return true;
@@ -500,12 +589,9 @@ export class GuildQueue {
     this.advancePending = false;
     const epoch = this.playbackEpoch;
     this.activeResource = null;
-    this.clearFade();
+    this.transitionStartedAt = performance.now();
     this.destroyStream();
-    if (this.prefetchTimer) {
-      clearTimeout(this.prefetchTimer);
-      this.prefetchTimer = null;
-    }
+    this.clearPreparationTimers();
     try {
       if (this.currentTrack?.source === 'radio') {
         if (this.pauseRequested) return;
@@ -513,9 +599,6 @@ export class GuildQueue {
         try { if (await this.recoverRadio(this.currentTrack, controller)) return; }
         finally { if (this.radioRecovery === controller) this.radioRecovery = null; }
         if (controller.signal.aborted || epoch !== this.playbackEpoch || this.closed) return;
-      }
-      if (this.prefetchPromise) {
-        await Promise.race([this.prefetchPromise, delay(500)]).catch(() => {});
       }
       let next = this.loopCurrent && this.currentTrack ? this.currentTrack : this.pending.shift();
       if (!next && this.autoplay && this.currentTrack && this.currentTrack.source !== 'radio') {
@@ -531,13 +614,23 @@ export class GuildQueue {
       while (next && !this.closed && epoch === this.playbackEpoch) {
         try {
           let preparedMedia: ManagedAudioStream | undefined;
-          if (this.prepared && this.prepared.track === next && this.prepared.epoch === epoch) {
+          if (this.prepared && this.prepared.track === next && this.prepared.epoch === epoch
+            && this.prepared.speed === this.speed && !this.prepared.media.stream.destroyed
+            && this.prepared.media.stream.readableLength > 0) {
+            this.prepared.cleanup();
             preparedMedia = this.prepared.media;
             this.prepared = null;
+            countMetric('audio.prefetch.hit');
           } else {
             this.clearPrepared();
           }
-          this.playTrack(next, 0, false, this.speed, preparedMedia);
+          try { this.playTrack(next, 0, false, this.speed, preparedMedia); }
+          catch (error) {
+            if (!preparedMedia) throw error;
+            preparedMedia.destroy();
+            countMetric('audio.prefetch.failed');
+            this.playTrack(next, 0, false, this.speed);
+          }
           return;
         }
         catch (error) {
@@ -638,6 +731,7 @@ export class GuildQueue {
   async addTrack(track: Track): Promise<void> {
     this.cancelRadioRequest();
     if (!track.isAutoplay) {
+      this.cancelRecommendations(); this.clearPrepared();
       this.pending.clearAutoplay();
       this.autoplayEpoch++;
     }
@@ -656,6 +750,7 @@ export class GuildQueue {
   async addTracks(tracks: Track[]): Promise<void> {
     this.cancelRadioRequest();
     if (tracks.some((track) => !track.isAutoplay)) {
+      this.cancelRecommendations(); this.clearPrepared();
       this.pending.clearAutoplay();
       this.autoplayEpoch++;
     }
@@ -678,7 +773,7 @@ export class GuildQueue {
     this.cancelRadioRecovery();
     this.clearPrepared();
     this.activeResource = null;
-    this.clearFade(); this.destroyStream();
+    this.cancelRecommendations(); this.cancelHydration(); this.destroyStream();
     this.currentTrack = null; this.pauseRequested = false;
     this.player.stop(true);
     void this.playerMessage.update();
@@ -690,26 +785,8 @@ export class GuildQueue {
     if (!this.currentTrack) return false;
     if (this.isRadio) { this.leaveRadio(); this.requestAdvance(); return true; }
     this.loopCurrent = false;
-    const fading = Boolean(this.fadeTimer);
-    this.clearFade();
-    const state = this.player.state;
-    const resource = state.status === AudioPlayerStatus.Idle ? null : state.resource;
-    if (!fading && this.player.state.status === AudioPlayerStatus.Playing && resource?.volume) {
-      let step = 10;
-      const initial = resource.volume.volume;
-      this.fadeTimer = setInterval(() => {
-        step--;
-        resource.volume?.setVolume(Math.max(0, initial * step / 10));
-        if (step <= 0) {
-          this.clearFade();
-          this.destroyStream();
-          this.player.stop(true);
-        }
-      }, 150);
-    } else {
-      this.destroyStream();
-      this.player.stop(true);
-    }
+    this.destroyStream();
+    this.player.stop(true);
     return true;
   }
 
@@ -725,6 +802,7 @@ export class GuildQueue {
     if ((this.player.state.status !== AudioPlayerStatus.Playing && this.player.state.status !== AudioPlayerStatus.Buffering)
       || this.pauseRequested) return false;
     this.pauseRequested = true;
+    this.clearPrepared(); this.clearPreparationTimers(); this.cancelRecommendations();
     if (this.player.state.status === AudioPlayerStatus.Playing) this.player.pause();
     void this.playerMessage.update();
     return true;
@@ -766,9 +844,8 @@ export class GuildQueue {
     if (this.isRadio) throw new Error('Скорость прямого эфира всегда 1×.');
     if (this.closed) throw new Error('Очередь уже остановлена.');
     if (speed === this.speed) return;
-    if (this.fadeTimer) throw new Error('Подождите завершения переключения трека.');
     this.cueState?.finish();
-    this.clearPrepared();
+    this.clearPrepared(); this.clearPreparationTimers(); this.cancelRecommendations();
     if (this.currentTrack && this.activeResource) {
       const paused = this.pauseRequested || this.player.state.status === AudioPlayerStatus.Paused;
       this.playTrack(this.currentTrack, this.sourcePosition(), paused, speed);
@@ -780,13 +857,14 @@ export class GuildQueue {
   setVolume(percent: number): void {
     this.volume = Math.max(0.01, Math.min(1.5, percent / 100));
     const state = this.player.state;
-    if (state.status !== AudioPlayerStatus.Idle && !this.fadeTimer) state.resource.volume?.setVolume(this.volume * (this.voiceDucking ? 0.2 : 1));
+    if (state.status !== AudioPlayerStatus.Idle) state.resource.volume?.setVolume(this.volume * (this.voiceDucking ? 0.2 : 1));
     void this.playerMessage.update();
   }
 
   setAutoplay(value: boolean): boolean {
     if (this.isRadio && value) throw new Error('Рекомендации недоступны во время радио.');
     this.autoplay = value;
+    this.cancelRecommendations();
     if (value) this.loopCurrent = false;
     this.pending.clearAutoplay();
     this.autoplayEpoch++;
@@ -802,6 +880,7 @@ export class GuildQueue {
   setLoop(value: boolean): boolean {
     if (this.isRadio && value) throw new Error('Повтор недоступен во время радио.');
     this.loopCurrent = value;
+    this.cancelRecommendations();
     if (value) this.autoplay = false;
     this.clearPrepared();
     this.schedulePrefetch(this.playbackEpoch);
@@ -809,6 +888,7 @@ export class GuildQueue {
     return this.loopCurrent;
   }
   clearQueue(): number {
+    this.cancelRecommendations(); this.cancelHydration();
     this.autoplayEpoch++;
     this.clearPrepared();
     const count = this.pending.clear();
@@ -823,16 +903,17 @@ export class GuildQueue {
   async stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.closed = true;
+    this.cancelMetadataRequests();
     this.playbackEpoch++;
     this.cancelRadioRequest(); this.cancelRadioRecovery();
     this.clearPrepared();
     this.stopping = (async () => {
+      this.clearPreparationTimers(); this.cancelRecommendations(); this.cancelHydration();
       this.voiceWanted = false; this.client.voiceRuntime?.release?.(this);
       this.voice?.destroy();
       this.voice = null;
       this.cueState?.finish();
       this.clearIdleTimer();
-      this.clearFade();
       this.destroyStream();
       this.pending.clear();
       this.currentTrack = null;

@@ -21,6 +21,8 @@
     "test:tts": "npm run build && node dist/integration/tts.js",
     "test:voice": "npm run build && node dist/integration/voice.js",
     "test:groq": "npm run build && node dist/integration/groq.js",
+    "test:performance": "npm run build && node dist/integration/performance.js",
+    "test:voice:regression": "npm run build && node dist/integration/voice-regression.js",
     "export:nli": "npm run build && node dist/src/export-nli.js"
   },
   "engines": {

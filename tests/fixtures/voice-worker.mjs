@@ -4,7 +4,7 @@ const crashMarker = process.argv.includes('--crash-once') ? process.argv[process
 const crash = crashMarker && !existsSync(crashMarker);
 if (crash) writeFileSync(crashMarker, 'started');
 console.log(JSON.stringify({ ready: true, modelName: process.argv.includes('--v3') ? 'laya-muz-bot-ds-v3' : 'test',
-  sttModelName: 'large-v3-turbo', wakeModelName: 'small', inferenceDevice: 'cuda' }));
+  sttModelName: 'large-v3-turbo', wakeModelName: 'small', commandModelName: 'whisper_tiny_spoken_commands', wakeNames: ['бот', 'bot'], inferenceDevice: 'cuda' }));
 createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
   if (crash) process.exit(17);
@@ -26,6 +26,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   if (request.op === 'wake_detect') {
     console.log(JSON.stringify({ id: request.id, result: { wake: true, probability: 0.99 } })); return;
+  }
+  if (request.op === 'command_detect') {
+    console.log(JSON.stringify({ id: request.id, result: { class: 'skip', action: 'skip', confidence: 0.99, matched: true } })); return;
   }
   setTimeout(() => console.log(JSON.stringify({ id: request.id,
     result: request.op === 'transcribe' ? String(Buffer.from(request.pcm, 'base64')[0])

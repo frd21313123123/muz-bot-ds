@@ -7,6 +7,8 @@ import './join.test.js';
 import './stream.test.js';
 import './audio.test.js';
 import './ytdlp.test.js';
+import './metadataRequests.test.js';
+import './playerMessage.test.js';
 import './duration.test.js';
 import './voice.test.js';
 import './voiceRuntime.test.js';

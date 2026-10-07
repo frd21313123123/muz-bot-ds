@@ -91,7 +91,7 @@ export class GuildVoice {
         if (valid() && !this.queue.closed) await this.confirm(queued ? 'queued' : 'play', signal);
         return true;
       },
-      execute: async (intent, signal) => {
+      execute: async (intent, signal, executed) => {
         signal.throwIfAborted();
         let changed: boolean;
         switch (intent.action) {
@@ -100,6 +100,7 @@ export class GuildVoice {
             if (this.queue.isRadio && enabled) { await this.confirm('unknown', signal); return false; }
             changed = this.queue.autoplay !== enabled || (enabled && this.queue.loopCurrent);
             this.queue.setAutoplay(enabled);
+            if (changed) executed?.();
             await this.confirm(intent.action, signal);
             return changed;
           }
@@ -108,6 +109,7 @@ export class GuildVoice {
             if (this.queue.isRadio && enabled) { await this.confirm('unknown', signal); return false; }
             changed = this.queue.loopCurrent !== enabled || (enabled && this.queue.autoplay);
             this.queue.setLoop(enabled);
+            if (changed) executed?.();
             await this.confirm(intent.action, signal);
             return changed;
           }
@@ -121,17 +123,13 @@ export class GuildVoice {
             return this.queue.setVoiceEnabled(false);
           case 'skip':
             if (!this.queue.currentTrack) return false;
-            // Finish the confirmation before skip's fade/advance replaces the
-            // music resource. Cancellation must not trigger a delayed skip.
-            await this.confirm('skip', signal);
             signal.throwIfAborted();
-            return this.queue.skip();
+            changed = this.queue.skip(); if (changed) executed?.(); return changed;
           case 'pause': changed = this.queue.pause(); break;
           case 'resume': changed = this.queue.resume(); break;
           case 'stop':
-            await this.confirm('stop', signal);
             signal.throwIfAborted();
-            await this.queue.stop(); return true;
+            { const stopping = this.queue.stop(); executed?.(); await stopping; return true; }
           case 'volume_set': this.queue.setVolume(intent.level); changed = true; break;
           case 'volume_up': {
             const before = this.queue.volume;
@@ -145,7 +143,7 @@ export class GuildVoice {
           }
           case 'unknown': return false;
         }
-        if (changed) await this.confirm(intent.action, signal);
+        if (changed) { executed?.(); await this.confirm(intent.action, signal); }
         return changed;
       },
     });

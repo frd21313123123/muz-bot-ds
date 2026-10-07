@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { StreamType } from '@discordjs/voice';
+import { StreamType, NoSubscriberBehavior } from '@discordjs/voice';
 import { AudioPlayerStatus, VoiceConnectionStatus, type AudioPlayer, type VoiceConnection } from '@discordjs/voice';
 import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { MusicClient, Track } from '../src/types.js';
@@ -20,6 +20,74 @@ const waitFor = async (predicate: () => boolean): Promise<void> => {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 };
+
+test('a temporary audio stall resumes the same resource and EOF still advances promptly', async () => {
+  const streams: PassThrough[] = [];
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-stall', client, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+  });
+  let subscription: { unsubscribe(): void } | undefined;
+  let packets = 0;
+  const connection = {
+    state: { status: VoiceConnectionStatus.Ready },
+    onSubscriptionRemoved: () => {}, setSpeaking: () => {},
+    prepareAudioPacket: () => { packets++; }, dispatchAudio: () => true,
+    destroy: () => { subscription?.unsubscribe(); connection.state.status = VoiceConnectionStatus.Destroyed; },
+  } as unknown as VoiceConnection;
+  queue.connection = connection;
+  subscription = Reflect.apply(Reflect.get(queue.player, 'subscribe'), queue.player, [connection]);
+  try {
+    await queue.addTracks([track('aaaaaaaaaaa'), track('bbbbbbbbbbb')]);
+    streams[0]!.write(Buffer.alloc(3840));
+    await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing);
+    const original = queue.player.state;
+    assert.ok(original.status !== AudioPlayerStatus.Idle);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa', 'a download gap must not skip the track');
+    assert.equal(streams[0]!.destroyed, false);
+    assert.equal(queue.player.state.status, AudioPlayerStatus.Playing);
+    assert.equal(queue.player.state.resource, original.resource);
+    const elapsed = original.resource.playbackDuration;
+    const previousPackets = packets;
+    streams[0]!.write(Buffer.alloc(3840 * 10));
+    await waitFor(() => original.resource.playbackDuration > elapsed && packets > previousPackets);
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    streams[0]!.end();
+    await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
+    assert.equal(streams.length, 2);
+    assert.equal(queue.tracks.length, 0);
+  } finally { await queue.stop(); }
+});
+
+test('stream error followed by Idle advances only once while recommendations load', async () => {
+  let resolveRelated: ((tracks: Track[]) => void) | undefined;
+  let requested = false;
+  const related = new Promise<Track[]>(resolve => { resolveRelated = resolve; });
+  const streams: PassThrough[] = [];
+  const client = { queues: new Map(), ytdlp: { related: async () => {
+    requested = true; return related;
+  } } } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-error-idle', client, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+  });
+  try {
+    queue.setAutoplay(true);
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    streams[0]!.destroy(new Error('temporary download failure'));
+    await waitFor(() => requested);
+    assert.equal(queue.player.state.status, AudioPlayerStatus.Idle);
+    await queue.addTracks([track('bbbbbbbbbbb'), track('ccccccccccc')]);
+    resolveRelated?.([]);
+    await waitFor(() => queue.currentTrack?.videoId !== 'aaaaaaaaaaa');
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(queue.currentTrack?.videoId, 'bbbbbbbbbbb');
+    assert.deepEqual(queue.tracks.map(item => item.videoId), ['ccccccccccc']);
+    assert.equal(streams.length, 2);
+  } finally { resolveRelated?.([]); await queue.stop(); }
+});
 
 test('skip advances to the next manual track and stops the old stream', async () => {
   const streams: PassThrough[] = [];
@@ -362,7 +430,7 @@ test('a track setup failure skips to the next queued track', async () => {
   }
 });
 
-test('ducking preserves user volume and applies to subsequent tracks, without interrupting a skip fade', async () => {
+test('ducking preserves user volume and applies to subsequent tracks after immediate skip', async () => {
   const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
   const queue = new GuildQueue('guild-duck', client, () => {
     const stream = new PassThrough();
@@ -465,15 +533,21 @@ test('next track is prefetched when remaining duration is under 20s, and advance
   const queue = new GuildQueue('guild-prefetch', client, () => {
     const stream = new PassThrough();
     streams.push(stream);
-    return { stream, type: StreamType.OggOpus, destroy: () => stream.destroy() };
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
   });
+  Reflect.set(Reflect.get(queue.player, 'behaviors'), 'noSubscriber', NoSubscriberBehavior.Play);
   client.queues.set(queue.guildId, queue);
   try {
     const track1: Track = { ...track('aaaaaaaaaaa'), duration: '0:15' };
     const track2: Track = { ...track('bbbbbbbbbbb'), duration: '1:00' };
     await queue.addTrack(track1);
     await queue.addTrack(track2);
+    assert.equal(streams.length, 1, 'buffering must not arm preparation');
+    streams[0]!.write(Buffer.alloc(3840 * 4));
     await waitFor(() => streams.length >= 2);
+    assert.equal(Reflect.get(queue, 'prepared'), null, 'process creation is not audio readiness');
+    streams[1]!.write(Buffer.alloc(3840 * 4));
+    await waitFor(() => Reflect.get(queue, 'prepared') !== null);
     assert.equal(streams.length, 2, 'Track 2 should have been prefetched while Track 1 is playing');
     assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
     queue.player.stop(true);
@@ -520,4 +594,102 @@ test('background metadata hydration updates track title, duration, and thumbnail
   } finally {
     await queue.stop();
   }
+});
+
+for (const speed of [0.5, 2]) test(`prefetch uses real remaining time at ${speed}x and pause cancels pending media`, async context => {
+  const streams: PassThrough[] = [];
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const queue = new GuildQueue(`prefetch-speed-${speed}`, client, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+  });
+  Reflect.set(Reflect.get(queue.player, 'behaviors'), 'noSubscriber', NoSubscriberBehavior.Play);
+  try {
+    queue.setSpeed(speed);
+    await queue.addTracks([track('aaaaaaaaaaa'), track('bbbbbbbbbbb')]);
+    streams[0]!.write(Buffer.alloc(3840 * 5));
+    await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing);
+    queue.pause();
+    const resource = Reflect.get(queue, 'activeResource'); resource.playbackDuration = 0;
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    queue.resume();
+    const delay = (60 / speed - 20) * 1000;
+    context.mock.timers.tick(delay - 1); assert.equal(streams.length, 1);
+    resource.playbackDuration = delay;
+    context.mock.timers.tick(1); assert.equal(streams.length, 2);
+    assert.equal(Reflect.get(queue, 'prepared'), null, 'must wait for first PCM');
+    queue.pause(); await Promise.resolve();
+    assert.equal(streams[1]!.destroyed, true);
+    assert.equal(Reflect.get(queue, 'prepared'), null);
+  } finally { await queue.stop(); context.mock.timers.reset(); }
+});
+
+test('prefetch rechecks consumed audio when the scheduled deadline follows a stall', async context => {
+  const streams: PassThrough[] = [];
+  const queue = new GuildQueue('prepare-stall-time', { queues: new Map() } as unknown as MusicClient, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+  });
+  Reflect.set(Reflect.get(queue.player, 'behaviors'), 'noSubscriber', NoSubscriberBehavior.Play);
+  try {
+    await queue.addTracks([track('aaaaaaaaaaa'), track('bbbbbbbbbbb')]);
+    streams[0]!.write(Buffer.alloc(3840 * 5));
+    await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing);
+    queue.pause();
+    const resource = Reflect.get(queue, 'activeResource'); resource.playbackDuration = 0;
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    queue.resume();
+    context.mock.timers.tick(40_000);
+    assert.equal(streams.length, 1, 'a wall-clock deadline alone cannot prepare early');
+    resource.playbackDuration = 40_000;
+    context.mock.timers.tick(40_000);
+    assert.equal(streams.length, 2);
+  } finally { await queue.stop(); context.mock.timers.reset(); }
+});
+
+test('stale and failed prepared streams are discarded and skip starts a fresh stream immediately', async () => {
+  const streams: PassThrough[] = [];
+  const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
+  const queue = new GuildQueue('prepare-stale', client, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+  });
+  Reflect.set(Reflect.get(queue.player, 'behaviors'), 'noSubscriber', NoSubscriberBehavior.Play);
+  try {
+    await queue.addTracks([{ ...track('aaaaaaaaaaa'), duration: '0:15' }, track('bbbbbbbbbbb')]);
+    streams[0]!.write(Buffer.alloc(3840 * 5));
+    await waitFor(() => streams.length === 2);
+    streams[1]!.destroy(new Error('prefetch failed'));
+    await waitFor(() => Reflect.get(queue, 'prefetchPromise') === null);
+    const started = performance.now(); queue.skip();
+    assert.equal(queue.currentTrack?.videoId, 'bbbbbbbbbbb');
+    assert.ok(performance.now() - started < 200);
+    assert.equal(streams.length, 3);
+    // Prepare another track then invalidate it while it is still buffering.
+    await queue.addTrack(track('ccccccccccc'));
+    const task = Reflect.apply(Reflect.get(queue, 'triggerPrefetch'), queue, [Reflect.get(queue, 'playbackEpoch')]);
+    const stale = streams.at(-1)!;
+    queue.clearQueue(); await task;
+    assert.equal(stale.destroyed, true); assert.equal(Reflect.get(queue, 'prepared'), null);
+  } finally { await queue.stop(); }
+});
+
+test('a prepared stream closed without an error falls back to the same next track', async () => {
+  const streams: PassThrough[] = [];
+  const queue = new GuildQueue('prepare-closed', { queues: new Map() } as unknown as MusicClient, () => {
+    const stream = new PassThrough(); streams.push(stream);
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+  });
+  Reflect.set(Reflect.get(queue.player, 'behaviors'), 'noSubscriber', NoSubscriberBehavior.Play);
+  try {
+    await queue.addTracks([{ ...track('aaaaaaaaaaa'), duration: '0:15' }, track('bbbbbbbbbbb')]);
+    streams[0]!.write(Buffer.alloc(3840 * 5));
+    await waitFor(() => streams.length === 2);
+    streams[1]!.write(Buffer.alloc(3840));
+    await waitFor(() => Reflect.get(queue, 'prepared') !== null);
+    streams[1]!.destroy();
+    queue.skip();
+    assert.equal(queue.currentTrack?.videoId, 'bbbbbbbbbbb');
+    assert.equal(streams.length, 3);
+  } finally { await queue.stop(); }
 });

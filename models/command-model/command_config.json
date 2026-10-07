@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "model_name": "whisper_tiny_spoken_commands",
+  "num_classes": 11,
+  "classes": [
+    "pause",
+    "resume",
+    "skip",
+    "stop",
+    "volume_up",
+    "volume_down",
+    "loop_toggle",
+    "autoplay_toggle",
+    "queue_clear",
+    "play_search",
+    "unknown"
+  ],
+  "class_to_action": {
+    "pause": "pause",
+    "resume": "resume",
+    "skip": "skip",
+    "stop": "stop",
+    "volume_up": "volume_up",
+    "volume_down": "volume_down",
+    "loop_toggle": "loop_on",
+    "autoplay_toggle": "autoplay_on",
+    "queue_clear": "queue_clear",
+    "play_search": "play_search",
+    "unknown": "unknown"
+  },
+  "default_threshold": 0.85,
+  "sample_rate": 16000,
+  "window_samples": 32000,
+  "architecture": "whisper_encoder_multiclass_v1",
+  "quantization": "weight_only_conv_int8_matmul_int8",
+  "model_sha256": "3f66856cda019c1bb9290ee7b9134c70f54d32752eb127577479eadcee0483ef",
+  "frontend_sha256": {
+    "whisper_mel_filters.npy": "b697115893111b7eac447de3f430a1c7264cf74e6c1b78c41e577ad39bbe06ef",
+    "provenance.json": "60d2778f8237ca874949ac1c84d01ee11171590daa74f36877f0443f966cce21"
+  },
+  "accuracy": 95.21,
+  "avg_latency_ms": 13.43
+}

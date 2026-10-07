@@ -5,12 +5,28 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { Track, YoutubeTrack } from '../types.js';
 import { formatDuration, videoDuration } from './duration.js';
+import { MetadataRequests, metadataOptions, type MetadataInput, type MetadataOptions } from './MetadataRequests.js';
+import { countMetric, recordMetric, trackProcess } from './performance.js';
+import { terminateProcess } from './processes.js';
 
 const execFileAsync = promisify(execFile);
 const VENV_DIR = path.resolve('.runtime', 'yt-dlp');
 const COMMON_ARGS = ['--ignore-config', '--no-warnings', '--js-runtimes', `node:${process.execPath}`];
 
 interface Runtime { command: string; prefix: string[] }
+
+// YouTube's EJS subprocess can otherwise grow to hundreds of MiB. This affects
+// only yt-dlp's Node runtime, not the bot or the audio encoder.
+export function ytdlpEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...source };
+  if (!/(?:^|\s)--max[-_]old[-_]space[-_]size(?:=|\s)/.test(env.NODE_OPTIONS ?? '')) {
+    const mb = Number(env.YT_DLP_NODE_HEAP_MB ?? 128);
+    if (Number.isInteger(mb) && mb >= 96 && mb <= 1024) {
+      env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --max-old-space-size=${mb}`.trim();
+    }
+  }
+  return env;
+}
 
 export interface VideoInfo {
   id?: string;
@@ -28,6 +44,15 @@ export interface VideoInfo {
   channel?: string;
   uploader?: string;
   entries?: VideoInfo[];
+}
+
+// yt-dlp's full output contains large format/subtitle collections we never use.
+export function compactVideoInfo(info: VideoInfo): VideoInfo {
+  const { id, title, duration, duration_string, thumbnail, webpage_url, artist, track,
+    is_live, live_status, channel, uploader } = info;
+  return { id, title, duration, duration_string, thumbnail, webpage_url, artist, track,
+    is_live, live_status, channel, uploader, artists: info.artists?.slice(), categories: info.categories?.slice(),
+    ...(info.entries ? { entries: info.entries.map(compactVideoInfo) } : {}) };
 }
 
 async function probe(command: string, args: string[]): Promise<boolean> {
@@ -97,6 +122,7 @@ export async function prepareYtdlp(update = false): Promise<YtdlpClient> {
 }
 
 export class YtdlpClient {
+  private readonly requests = new MetadataRequests<VideoInfo>();
   private readonly searchCache = new Map<string, { entries: VideoInfo[]; timestamp: number }>();
   private readonly videoCache = new Map<string, { info: VideoInfo; timestamp: number }>();
 
@@ -108,35 +134,60 @@ export class YtdlpClient {
   }
 
   spawn(args: string[]): ChildProcess {
-    return spawn(this.runtime.command, [...this.runtime.prefix, ...COMMON_ARGS, ...args], {
-      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    const child = spawn(this.runtime.command, [...this.runtime.prefix, ...COMMON_ARGS, ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: ytdlpEnvironment(),
     });
+    trackProcess(child);
+    return child;
   }
 
   async json(args: string[], timeout = 20_000, signal?: AbortSignal): Promise<VideoInfo> {
-    const { stdout } = await execFileAsync(this.runtime.command,
-      [...this.runtime.prefix, ...COMMON_ARGS, '-J', ...args],
-      { timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true, signal },
-    );
-    return JSON.parse(stdout) as VideoInfo;
+    signal?.throwIfAborted();
+    const stdout = await new Promise<string>((resolve, reject) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const cleanup = (): void => { if (timer) clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+      const fail = (): void => {
+        if (settled) return;
+        settled = true; cleanup();
+        void terminateProcess(child).then(() => reject(new Error(signal?.aborted ? 'Metadata request cancelled' : 'yt-dlp metadata unavailable')));
+      };
+      const abort = (): void => fail();
+      const child = execFile(this.runtime.command, [...this.runtime.prefix, ...COMMON_ARGS, '-J', ...args],
+        { maxBuffer: 16 * 1024 * 1024, windowsHide: true, env: ytdlpEnvironment() }, (error, output) => {
+          if (error) { fail(); return; }
+          if (!settled) { settled = true; cleanup(); resolve(output); }
+        });
+      trackProcess(child);
+      timer = setTimeout(fail, timeout);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) fail();
+    });
+    return compactVideoInfo(JSON.parse(stdout) as VideoInfo);
   }
 
   async getStreamUrl(url: string, signal?: AbortSignal): Promise<string> {
     const { stdout } = await execFileAsync(this.runtime.command,
       [...this.runtime.prefix, ...COMMON_ARGS, '-g', '-f', 'bestaudio/best', '--no-playlist', url],
-      { timeout: 20_000, maxBuffer: 1024 * 1024, windowsHide: true, signal },
+      { timeout: 20_000, maxBuffer: 1024 * 1024, windowsHide: true, signal, env: ytdlpEnvironment() },
     );
     return stdout.trim().split(/\r?\n/)[0] ?? '';
   }
 
-  async video(url: string, signal?: AbortSignal): Promise<VideoInfo> {
+  async video(url: string, input?: MetadataInput): Promise<VideoInfo> {
+    const options = metadataOptions(input);
+    options.signal?.throwIfAborted();
+    this.pruneCaches();
     const cached = this.videoCache.get(url);
     if (cached && Date.now() - cached.timestamp < 30 * 60_000) {
-      return cached.info;
+      countMetric('cache.hit'); return compactVideoInfo(cached.info);
     }
-    const info = await this.json(['--no-playlist', url], 20_000, signal);
+    countMetric('cache.miss');
+    const info = compactVideoInfo(await this.requests.run(`video:${url}`,
+      signal => this.json(['--no-playlist', url], 20_000, signal), options));
+    options.signal?.throwIfAborted();
     if (info.id) {
-      this.videoCache.set(url, { info, timestamp: Date.now() });
+      this.videoCache.set(url, { info: compactVideoInfo(info), timestamp: Date.now() });
       if (this.videoCache.size > 500) {
         const first = this.videoCache.keys().next().value;
         if (first) this.videoCache.delete(first);
@@ -145,39 +196,47 @@ export class YtdlpClient {
     return info;
   }
 
-  async playlist(url: string, limit: number): Promise<VideoInfo> {
-    return this.json(['--flat-playlist', '--playlist-items', `1:${limit}`, url], 30_000);
+  async playlist(url: string, limit: number, input?: MetadataInput): Promise<VideoInfo> {
+    return this.requests.run(`playlist:${url}:${limit}`, signal =>
+      this.json(['--flat-playlist', '--playlist-items', `1:${limit}`, url], 30_000, signal), metadataOptions(input));
   }
 
-  async search(query: string): Promise<VideoInfo | null> {
-    return (await this.searchCandidates(query, 1))[0] ?? null;
+  async search(query: string, input?: MetadataInput): Promise<VideoInfo | null> {
+    return (await this.searchCandidates(query, 1, input))[0] ?? null;
   }
 
-  async searchCandidates(query: string, limit = 5, signal?: AbortSignal): Promise<VideoInfo[]> {
+  async searchCandidates(query: string, limit = 5, input?: MetadataInput): Promise<VideoInfo[]> {
+    const options = metadataOptions(input);
+    const signal = options.signal;
     signal?.throwIfAborted();
     if (!query.trim()) return [];
     if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('Invalid search limit');
 
     const cacheKey = `${query.trim().toLowerCase()}:${limit}`;
+    this.pruneCaches();
     const cached = this.searchCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < 15 * 60_000) {
-      return cached.entries;
+      countMetric('cache.hit'); return cached.entries.map(compactVideoInfo);
     }
 
     // The songs section excludes podcasts and other ordinary YouTube videos.
     // Do not fall back to unrestricted video search when no song is found.
     const url = `https://music.youtube.com/search?q=${encodeURIComponent(query.trim())}#songs`;
-    const result = await this.json(['--flat-playlist', '--playlist-end', String(limit), url], 20_000, signal);
+    countMetric('cache.miss');
+    const started = performance.now();
+    const result = await this.requests.run(`search:${cacheKey}`, sharedSignal =>
+      this.json(['--flat-playlist', '--playlist-end', String(limit), url], 20_000, sharedSignal), options);
+    recordMetric('search', performance.now() - started);
     signal?.throwIfAborted();
     const seen = new Set<string>();
     const candidates = (result.entries ?? (result.id ? [result] : [])).filter((entry) => {
       if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id)) return false;
       seen.add(entry.id);
       return true;
-    }).slice(0, limit);
+    }).slice(0, limit).map(compactVideoInfo);
 
     if (candidates.length) {
-      this.searchCache.set(cacheKey, { entries: candidates, timestamp: Date.now() });
+      this.searchCache.set(cacheKey, { entries: candidates.map(compactVideoInfo), timestamp: Date.now() });
       if (this.searchCache.size > 200) {
         const first = this.searchCache.keys().next().value;
         if (first) this.searchCache.delete(first);
@@ -186,31 +245,37 @@ export class YtdlpClient {
     return candidates;
   }
 
-  async related(videoId: string, limit = 25): Promise<Track[]> {
+  private pruneCaches(): void {
+    const now = Date.now();
+    for (const [key, item] of this.searchCache) if (now - item.timestamp >= 15 * 60_000) this.searchCache.delete(key);
+    for (const [key, item] of this.videoCache) if (now - item.timestamp >= 30 * 60_000) this.videoCache.delete(key);
+  }
+
+  async related(videoId: string, limit = 25, options: MetadataOptions & { excludeIds?: ReadonlySet<string> } = {}): Promise<Track[]> {
     if (!/^[\w-]{11}$/.test(videoId)) return [];
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid recommendation limit');
-    const result = await this.json([
-      '--flat-playlist', '--playlist-items', `2:${Math.min(50, limit) + 1}`,
+    const signal = AbortSignal.any([AbortSignal.timeout(25_000), ...(options.signal ? [options.signal] : [])]);
+    const requestOptions: MetadataOptions = { priority: options.priority ?? 'background', signal };
+    const candidateLimit = options.excludeIds ? 51 : Math.min(50, limit) + 1;
+    const result = await this.requests.run(`related:${videoId}:${candidateLimit}`, sharedSignal => this.json([
+      '--flat-playlist', '--playlist-items', `2:${candidateLimit}`,
       `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`,
-    ], 25_000);
+    ], 25_000, sharedSignal), requestOptions);
     const seen = new Set([videoId]);
     const candidates = (result.entries ?? []).filter((entry) => {
-      if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id)) return false;
+      if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id) || options.excludeIds?.has(entry.id)) return false;
       seen.add(entry.id);
       return !isNonSong(entry);
     }).slice(0, 50);
     // Flat radio entries lack categories. Verify them before queueing, with
     // bounded concurrency and a shared deadline so a radio cannot stall playback.
-    const signal = AbortSignal.timeout(25_000);
     const songs: VideoInfo[] = [];
-    for (let offset = 0; offset < candidates.length && songs.length < limit && !signal.aborted; offset += 4) {
-      const batch = await Promise.all(candidates.slice(offset, offset + 4).map(async (entry) => {
-        try {
-          const info = await this.video(`https://www.youtube.com/watch?v=${entry.id}`, signal);
-          return info.id === entry.id && isSong(info) ? info : null;
-        } catch { return null; }
-      }));
-      songs.push(...batch.filter((info): info is VideoInfo => info !== null));
+    for (let offset = 0; offset < candidates.length && songs.length < limit && !signal.aborted; offset++) {
+      const entry = candidates[offset]!;
+      try {
+        const info = await this.video(`https://www.youtube.com/watch?v=${entry.id}`, requestOptions);
+        if (info.id === entry.id && isSong(info)) songs.push(info);
+      } catch { if (signal.aborted) break; }
     }
     return songs.slice(0, limit).map((info) => toTrack(info, '🤖 Бесконечное', true));
   }

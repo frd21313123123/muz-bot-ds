@@ -631,6 +631,18 @@ test('neural wake detector rejects non-wake audio locally without invoking cloud
   } finally { h.session.disable(); }
 });
 
+test('unavailable or incompatible wake detector falls back to STT and preserves custom names', async () => {
+  let calls = 0;
+  const h = harness({ supportsWake: () => false,
+    detectWake: async () => { assert.fail('unsupported detector must not gate the session'); },
+    transcribe: async () => { calls++; return 'Муза'; },
+  });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    assert.equal(calls, 1); assert.equal(h.cues, 1); assert.equal(h.session.phase, 'awaiting');
+  } finally { h.session.disable(); }
+});
+
 test('neural wake detector on compound command activates cloud STT and executes immediately', async () => {
   let cloudTranscribed = false;
   const h = harness({
@@ -684,3 +696,61 @@ test('compound utterance with math expression does not enqueue music', async () 
     assert.deepEqual(feedbackCalls, ['unknown']);
   } finally { h.session.disable(); }
 });
+
+test('neural command detector executes control actions immediately without calling STT', async () => {
+  let cloudTranscribed = false;
+  let commandDetected = false;
+  const shortWake = Buffer.alloc(800 * 32);
+  const h = harness({
+    detectWake: async () => ({ wake: true, probability: 0.99 }),
+    detectCommand: async () => {
+      commandDetected = true;
+      return { class: 'pause', action: 'pause', confidence: 0.98, matched: true };
+    },
+    transcribe: async () => {
+      cloudTranscribed = true;
+      return 'пауза';
+    },
+  });
+  try {
+    await h.session.begin('alice')!.complete(shortWake);
+    assert.equal(h.session.phase, 'awaiting');
+    await h.session.begin('alice')!.complete(audio);
+    assert.equal(commandDetected, true, 'command detector was invoked');
+    assert.equal(cloudTranscribed, false, 'cloud STT was bypassed!');
+    assert.deepEqual(h.actions, [{ action: 'pause' }]);
+  } finally { h.session.disable(); }
+});
+
+test('neural command detector falls back to cloud STT for arbitrary music search', async () => {
+  let cloudTranscribed = false;
+  let commandDetected = false;
+  let musicSearched = false;
+  const shortWake = Buffer.alloc(800 * 32);
+  const h = harness({
+    detectWake: async () => ({ wake: true, probability: 0.99 }),
+    detectCommand: async () => {
+      commandDetected = true;
+      return { class: 'play_search', action: 'play_search', confidence: 0.95, matched: true };
+    },
+    transcribe: async () => {
+      cloudTranscribed = true;
+      return 'включи Linkin Park Numb';
+    },
+  }, {
+    playMusic: async () => {
+      musicSearched = true;
+      return true;
+    },
+  });
+  try {
+    await h.session.begin('alice')!.complete(shortWake);
+    assert.equal(h.session.phase, 'awaiting');
+    await h.session.begin('alice')!.complete(audio);
+    assert.equal(commandDetected, true, 'command detector was invoked');
+    assert.equal(cloudTranscribed, true, 'cloud STT was invoked for song search');
+    assert.equal(musicSearched, true, 'music search was triggered');
+  } finally { h.session.disable(); }
+});
+
+

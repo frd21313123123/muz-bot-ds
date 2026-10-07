@@ -33,23 +33,24 @@ except ImportError:
     CYAN = GREEN = YELLOW = WHITE = RESET = DIM = ""
 
 import interactive_listener
+import interactive_command_listener
 import quick_test
 
 
 def show_menu():
     os.system('cls' if os.name == 'nt' else 'clear')
     print(CYAN + "=" * 74)
-    print("   🤖 НЕЙРОСЕТЕВОЙ ДЕТЕКТОР ВЕЙК-ВОРДА «БОТ» (РЕЖИМ АЛИСЫ)")
+    print("   🤖 НЕЙРОСЕТЕВОЙ ГОЛОСОВОЙ КОНТРОЛЛЕР (РЕЖИМ АЛИСЫ + КОМАНДЫ)")
     print("=" * 74 + RESET)
-    print(f"  {WHITE}Модель:{RESET}     bot-v6-hardneg-opt (Full INT8 ONNX)")
-    print(f"  {WHITE}Качество:{RESET}   Recall: ≥91% | Защита от созвучных слов («боб», «болт» и др.)")
-    print(f"  {WHITE}Размер:{RESET}     7.7 МБ (сверхкомпактная INT8)")
+    print(f"  {WHITE}Вейк-ворд:{RESET}   «БОТ» (Recall ≥91%, защита от «боб»/«болт», INT8 7.7 МБ)")
+    print(f"  {WHITE}Команды:{RESET}     11 классов (пауза, стоп, скип, громче, тише, повтор...)")
     print(CYAN + "-" * 74 + RESET)
     print(f"  {WHITE}Выберите режим работы:{RESET}\n")
-    print(f"   {GREEN}[1]{RESET} Запустить детектор с микрофона (Калиброванный порог — Рекомендуется)")
+    print(f"   {GREEN}[1]{RESET} Запустить детектор вейк-ворда «БОТ» (Калиброванный порог)")
     print(f"   {YELLOW}[2]{RESET} Запустить с повышенной чувствительностью для тихой речи (Порог 98%)")
     print(f"   {CYAN}[3]{RESET} Выбрать конкретный микрофон из списка устройств")
     print(f"   {WHITE}[4]{RESET} Быстрый тест на готовых аудиозаписях (без микрофона)")
+    print(f"   {MAGENTA}[5]{RESET} 🎧 Живое распознавание команд плеера с микрофона (Offline INT8)")
     print(f"   {DIM}[0] Выход{RESET}")
     print(CYAN + "=" * 74 + RESET)
 
@@ -65,7 +66,7 @@ def main():
     while True:
         show_menu()
         try:
-            choice = input("\nВведите номер пункта [0-4]: ").strip()
+            choice = input("\nВведите номер пункта [0-5]: ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nВыход.")
             break
@@ -103,6 +104,10 @@ def main():
             safe_pause()
         elif choice == '4':
             quick_test.main()
+            safe_pause()
+        elif choice == '5':
+            sys.argv = ['interactive_command_listener.py']
+            interactive_command_listener.main()
             safe_pause()
         elif choice == '0':
             print("\nДо свидания!")

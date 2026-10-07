@@ -31,6 +31,19 @@ test('light controls and song selection work without starting any model process'
   assert.equal(runtime.ready, false); runtime.close();
 });
 
+test('runtime advertises wake capability per name and awaited close releases IPC', async () => {
+  const runtime = fake();
+  assert.equal(runtime.supportsWake('бот'), false);
+  assert.equal(await runtime.start(), true);
+  assert.equal(runtime.supportsWake(' БОТ '), true);
+  assert.equal(runtime.supportsWake('bot'), true);
+  assert.equal(runtime.supportsWake('Муза'), false);
+  const child = Reflect.get(runtime, 'child');
+  await runtime.close();
+  assert.equal(child.stdin.destroyed, true); assert.equal(child.stdout.destroyed, true);
+  assert.equal(runtime.supportsWake('бот'), false);
+});
+
 test('voice worker stays loaded for all owners, unloads after the last one and can reload', async () => {
   const runtime = fake([], { idleTimeoutMs: 35 });
   const first = {}, second = {}; let launches = 0;
@@ -200,3 +213,18 @@ test('runtime detectWake runs wake detection request through worker', async () =
     assert.equal(result.probability, 0.99);
   } finally { runtime.close(); }
 });
+
+test('runtime detectCommand runs command detection request through worker', async () => {
+  const runtime = fake();
+  try {
+    assert.equal(await runtime.start(), true);
+    assert.equal(runtime.hasCommandDetector, true);
+    const audio = Buffer.alloc(16000 * 2);
+    const result = await runtime.detectCommand(audio, new AbortController().signal);
+    assert.equal(result.class, 'skip');
+    assert.equal(result.action, 'skip');
+    assert.equal(result.confidence, 0.99);
+    assert.equal(result.matched, true);
+  } finally { runtime.close(); }
+});
+

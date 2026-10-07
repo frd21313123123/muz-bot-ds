@@ -3,6 +3,7 @@ import type { MusicClient } from '../types.js';
 import { commands } from '../commands.js';
 import { canControl } from '../utils/voiceAccess.js';
 import { radioSuggestions } from '../utils/radio.js';
+import { beginCommand, finishCommand } from '../utils/performance.js';
 
 const byName = new Map(commands.map((command) => [command.data.name, command]));
 
@@ -14,6 +15,7 @@ export async function onInteraction(interaction: Interaction, client: MusicClien
   if (interaction.isChatInputCommand()) {
     const command = byName.get(interaction.commandName);
     if (!command) return;
+    beginCommand(interaction);
     try {
       await command.execute(interaction, client);
     } catch (error) {
@@ -21,7 +23,7 @@ export async function onInteraction(interaction: Interaction, client: MusicClien
       const payload = { content: '❌ Ошибка выполнения команды.', flags: MessageFlags.Ephemeral as const };
       if (interaction.deferred || interaction.replied) await interaction.followUp(payload).catch(() => {});
       else await interaction.reply(payload).catch(() => {});
-    }
+    } finally { finishCommand(interaction); }
     return;
   }
 

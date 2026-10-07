@@ -9,8 +9,10 @@ import { VoiceSettings } from './voice/settings.js';
 import { LocalTts } from './voice/tts.js';
 import { VoiceTrainingLog } from './voice/training.js';
 import { VoiceDriveArchive } from './voice/drive.js';
+import { startPerformanceMonitor } from './utils/performance.js';
 
 async function main(): Promise<void> {
+  const stopPerformanceMonitor = startPerformanceMonitor();
   if (!process.env.DISCORD_TOKEN) throw new Error('Укажите DISCORD_TOKEN в .env');
   requireFfmpeg();
   const ytdlp = await prepareYtdlp();
@@ -46,6 +48,7 @@ async function main(): Promise<void> {
   client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     if (oldState.channelId !== newState.channelId) {
       client.queues.get(oldState.guild.id)?.cancelRadioRequest(oldState.id === client.user?.id ? undefined : oldState.id);
+      client.queues.get(oldState.guild.id)?.cancelMetadataRequests(oldState.id === client.user?.id ? undefined : oldState.id);
       const voice = client.queues.get(oldState.guild.id)?.voice;
       if (oldState.id === client.user?.id) voice?.reset(); else voice?.cancelUser(oldState.id);
     }
@@ -57,7 +60,8 @@ async function main(): Promise<void> {
   });
   const shutdown = async (): Promise<void> => {
     await Promise.allSettled([...client.queues.values()].map((queue) => queue.stop()));
-    client.voiceRuntime?.close();
+    stopPerformanceMonitor();
+    await client.voiceRuntime?.close();
     await client.voiceTrainingLog?.flush();
     await client.voiceDriveArchive?.close();
     client.destroy();

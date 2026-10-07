@@ -4,6 +4,17 @@ import { createRequire } from 'node:module';
 import { StreamType } from '@discordjs/voice';
 import type { YtdlpClient } from './ytdlp.js';
 import { musicPcmArguments, type MusicPlaybackOptions } from './audio.js';
+import { performanceEnabled, recordMetric, trackProcess } from './performance.js';
+import { terminateProcess } from './processes.js';
+
+function observeFirstAudio(stream: Readable, started: number): void {
+  if (!performanceEnabled()) return;
+  const first = (): void => {
+    if (stream.readableLength > 0) { recordMetric('audio.first', performance.now() - started); cleanup(); }
+  };
+  const cleanup = (): void => { stream.off('readable', first); stream.off('close', cleanup); };
+  stream.on('readable', first); stream.once('close', cleanup);
+}
 
 let ffmpegCommand: string | null = null;
 const require = createRequire(import.meta.url);
@@ -35,6 +46,7 @@ export interface ManagedAudioStream {
 }
 
 export function createRadioStream(url: string): ManagedAudioStream {
+  const started = performance.now();
   const parsed = new URL(url);
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Некорректный адрес радио.');
   const child = spawn(requireFfmpeg(), [
@@ -43,14 +55,15 @@ export function createRadioStream(url: string): ManagedAudioStream {
     ...musicPcmArguments(),
   ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const output = child.stdout;
+  trackProcess(child); observeFirstAudio(output, started);
   let closed = false;
   const destroy = (): void => {
     if (closed) return;
-    closed = true; child.kill(); output.destroy();
+    closed = true; void terminateProcess(child); output.destroy();
   };
   const fail = (): void => {
     if (closed) return;
-    closed = true; child.kill(); output.destroy(new Error('Не удалось открыть эфир радиостанции.'));
+    closed = true; output.destroy(new Error('Не удалось открыть эфир радиостанции.')); void terminateProcess(child);
   };
   // Never expose stream URLs, tokens or server error bodies in ordinary logs.
   child.stderr.resume();
@@ -82,6 +95,7 @@ export async function waitForAudio(media: ManagedAudioStream, signal: AbortSigna
 }
 
 export function createYtdlpStream(ytdlp: YtdlpClient, url: string, options: MusicPlaybackOptions = {}): ManagedAudioStream {
+  const started = performance.now();
   const audioArgs = musicPcmArguments(options);
   const ffmpeg = requireFfmpeg();
   const downloader = ytdlp.spawn([
@@ -92,14 +106,17 @@ export function createYtdlpStream(ytdlp: YtdlpClient, url: string, options: Musi
     ...audioArgs,
   ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 
-  return createProcessStream(downloader, transcoder, StreamType.Raw);
+  trackProcess(transcoder);
+  const media = createProcessStream(downloader, transcoder, StreamType.Raw);
+  observeFirstAudio(media.stream, started);
+  return media;
 }
 
 export function createProcessStream(downloader: ChildProcess, transcoder: ChildProcess, type = StreamType.OggOpus): ManagedAudioStream {
   const output = transcoder.stdout;
   if (!downloader.stdout || !downloader.stderr || !transcoder.stdin || !output || !transcoder.stderr) {
-    downloader.kill();
-    transcoder.kill();
+    void terminateProcess(downloader);
+    void terminateProcess(transcoder);
     throw new Error('Не удалось создать аудиопоток.');
   }
   downloader.stdout.pipe(transcoder.stdin);
@@ -118,19 +135,19 @@ export function createProcessStream(downloader: ChildProcess, transcoder: ChildP
     if (closed) return;
     closed = true;
     downloader.stdout?.unpipe();
-    downloader.kill();
+    void terminateProcess(downloader);
     transcoder.stdin?.destroy();
-    transcoder.kill();
+    void terminateProcess(transcoder);
     output.destroy();
   };
   const fail = (message: string): void => {
     if (closed) return;
     closed = true;
-    downloader.stdout?.unpipe();
-    downloader.kill();
-    transcoder.stdin?.destroy();
-    transcoder.kill();
     output.destroy(new Error(message));
+    downloader.stdout?.unpipe();
+    void terminateProcess(downloader);
+    transcoder.stdin?.destroy();
+    void terminateProcess(transcoder);
   };
   downloader.on('error', (error) => fail(`yt-dlp: ${error.message}`));
   transcoder.on('error', (error) => fail(`FFmpeg: ${error.message}`));

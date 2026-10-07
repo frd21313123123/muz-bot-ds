@@ -1,10 +1,11 @@
 import type { YoutubeTrack } from '../types.js';
 import { toTrack, type VideoInfo } from './ytdlp.js';
+import type { MetadataInput } from './MetadataRequests.js';
 
 export interface MetadataClient {
-  video(url: string): Promise<VideoInfo>;
-  playlist(url: string, limit: number): Promise<VideoInfo>;
-  search(query: string): Promise<VideoInfo | null>;
+  video(url: string, options?: MetadataInput): Promise<VideoInfo>;
+  playlist(url: string, limit: number, options?: MetadataInput): Promise<VideoInfo>;
+  search(query: string, options?: MetadataInput): Promise<VideoInfo | null>;
 }
 
 export type ResolveResult = { type: 'single'; track: YoutubeTrack }
@@ -40,7 +41,8 @@ export function classifyQuery(query: string): { kind: 'video' | 'playlist' | 'se
 }
 
 export async function resolveQuery(query: string, requestedBy: string, metadata: MetadataClient,
-  playlistLimit = 1, options: { fast?: boolean } = {}): Promise<ResolveResult> {
+  playlistLimit = 1, options: { fast?: boolean; signal?: AbortSignal } = {}): Promise<ResolveResult> {
+  options.signal?.throwIfAborted();
   const target = classifyQuery(query);
   if (target.kind === 'video') {
     if (options.fast) {
@@ -61,17 +63,17 @@ export async function resolveQuery(query: string, requestedBy: string, metadata:
         };
       }
     }
-    return { type: 'single', track: toTrack(await metadata.video(target.value), requestedBy) };
+    return { type: 'single', track: toTrack(await metadata.video(target.value, options.signal), requestedBy) };
   }
   if (target.kind === 'playlist') {
     const limit = Math.max(1, Math.min(25, Math.floor(playlistLimit)));
-    const info = await metadata.playlist(target.value, limit);
+    const info = await metadata.playlist(target.value, limit, options.signal);
     const tracks = (info.entries ?? []).flatMap((entry) => {
       try { return [toTrack(entry, requestedBy)]; } catch { return []; }
     }).slice(0, limit);
     return tracks.length ? { type: 'playlist', name: info.title || 'Плейлист', tracks } : null;
   }
   if (!target.value) return null;
-  const result = await metadata.search(target.value);
+  const result = await metadata.search(target.value, options.signal);
   return result ? { type: 'single', track: toTrack(result, requestedBy) } : null;
 }

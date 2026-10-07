@@ -72,7 +72,9 @@ class WakeDetector:
             if Path(name).name != name or hashlib.sha256((directory / name).read_bytes()).hexdigest() != expected:
                 raise ValueError('Incompatible pretrained frontend hash')
         options = ort.SessionOptions()
-        options.intra_op_num_threads = 2; options.inter_op_num_threads = 1
+        import os
+        options.intra_op_num_threads = max(1, min(8, int(os.environ.get('VOICE_CPU_THREADS', '1'))))
+        options.inter_op_num_threads = 1
         self.session = ort.InferenceSession(str(directory / 'wake_model.onnx'), options, providers=['CPUExecutionProvider'])
         self.frontend = make_frontend(self.config, directory)
 

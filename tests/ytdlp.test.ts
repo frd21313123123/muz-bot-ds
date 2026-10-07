@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isSong, YtdlpClient, type VideoInfo } from '../src/utils/ytdlp.js';
+import { isSong, YtdlpClient, ytdlpEnvironment, type VideoInfo } from '../src/utils/ytdlp.js';
+
+test('YouTube JS heap is bounded without overwriting explicit Node options', () => {
+  assert.equal(ytdlpEnvironment({ NODE_OPTIONS: '--no-warnings' }).NODE_OPTIONS, '--no-warnings --max-old-space-size=128');
+  assert.equal(ytdlpEnvironment({ NODE_OPTIONS: '--max-old-space-size=256' }).NODE_OPTIONS, '--max-old-space-size=256');
+  assert.equal(ytdlpEnvironment({ NODE_OPTIONS: '', YT_DLP_NODE_HEAP_MB: '0' }).NODE_OPTIONS, '');
+});
 
 test('search uses only the YouTube Music songs section, keeps order and removes invalid entries and duplicates', async () => {
   const calls: string[][] = [];
