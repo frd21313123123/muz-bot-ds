@@ -1,0 +1,34 @@
+{
+  "train": {
+    "rows": 716,
+    "typed_questions": 1744,
+    "intent_rows": 312,
+    "search_rerank_rows": 96,
+    "tool_routing_rows": 168,
+    "tool_result_rows": 140
+  },
+  "calibration": {
+    "rows": 188,
+    "typed_questions": 480,
+    "intent_rows": 104,
+    "search_rerank_rows": 32,
+    "tool_routing_rows": 32,
+    "tool_result_rows": 20
+  },
+  "eval": {
+    "rows": 188,
+    "typed_questions": 480,
+    "intent_rows": 104,
+    "search_rerank_rows": 32,
+    "tool_routing_rows": 32,
+    "tool_result_rows": 20
+  },
+  "total": {
+    "rows": 1092,
+    "typed_questions": 2704,
+    "intent_rows": 520,
+    "search_rerank_rows": 160,
+    "tool_routing_rows": 232,
+    "tool_result_rows": 180
+  }
+}
