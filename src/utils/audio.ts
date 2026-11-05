@@ -10,6 +10,10 @@ const stereo = 'aformat=channel_layouts=stereo';
 // Some FFmpeg builds emit NaN for all-silent loudnorm input. Converting NaN
 // straight to int16 produces full-scale DC; restore silence before conversion.
 const finite = "aeval=exprs='if(isnan(val(0)),0,val(0))|if(isnan(val(1)),0,val(1))'";
+// loudnorm outputs 192 kHz. Downsample (still float) before the per-sample
+// aeval, which then runs on a quarter of the samples; the result is
+// bit-identical for finite audio. Only then convert to dithered s16.
+const downsample = 'aresample=48000';
 const resample = 'aresample=48000:osf=s16:dither_method=triangular';
 
 export interface LoudnessMeasurement {
@@ -34,7 +38,7 @@ export function loudnessFilter(measured?: LoudnessMeasurement | null, report = f
   const mode = measured
     ? `linear=true:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}`
     : 'linear=false';
-  return `${stereo},loudnorm=${target}:${mode}${report ? ':print_format=json' : ''},${finite},${resample}`;
+  return `${stereo},loudnorm=${target}:${mode}${report ? ':print_format=json' : ''},${downsample},${finite},${resample}`;
 }
 
 export const MIN_SPEED = 0.5;

@@ -21,6 +21,8 @@ Run `npm run deploy` after changing slash-command definitions. Set `GUILD_ID` fo
 - `src/utils/stream.ts` owns yt-dlp → FFmpeg child processes and their cleanup. Keep certificate verification enabled. FFmpeg must provide `libopus`.
 - `GuildQueue` owns per-guild voice and player state; `TrackQueue` orders manual tracks before autoplay tracks; `PlayerMessage` updates the public player.
 - Keep `opusscript` for Windows without Visual Studio. Do not add a native `@discordjs/opus` requirement.
+- `src/voice/decoder.ts` decodes incoming speech with a private opusscript WASM instance. Never move decoders onto the shared opusscript heap: its growth would detach the music encoders' PCM views.
+- In `loudnessFilter`, `aeval` (NaN cleanup) runs after downsampling loudnorm's 192 kHz output to 48 kHz; keep that order for CPU.
 - All command replies are ephemeral **except `/player`**, which deliberately creates a public, updating message. Control buttons reply ephemerally when appropriate. Do not add unrelated channel messages.
 - Commands and buttons that change playback require the invoker to be in the bot's voice channel. `/play` can start a new queue from an empty voice connection.
 - Volume is 1–150%; idle disconnect occurs after five minutes. Without `infinite`, `/play` takes only the first playlist track.
