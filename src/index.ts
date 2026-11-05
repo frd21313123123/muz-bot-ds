@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { Client, Events, GatewayIntentBits, Options } from 'discord.js';
 import type { MusicClient } from './types.js';
 import { onInteraction } from './events/interactionCreate.js';
 import { prepareYtdlp } from './utils/ytdlp.js';
@@ -18,6 +18,16 @@ async function main(): Promise<void> {
   const ytdlp = await prepareYtdlp();
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+    // The Guilds intent delivers emojis, stickers, events and similar data the
+    // bot never reads. Skip caching it; channels, roles, members and voice
+    // states (used for permissions and voice control) keep default caching.
+    makeCache: Options.cacheWithLimits({
+      ...Options.DefaultMakeCacheSettings,
+      ApplicationEmojiManager: 0, AutoModerationRuleManager: 0, BaseGuildEmojiManager: 0,
+      EntitlementManager: 0, GuildBanManager: 0, GuildEmojiManager: 0, GuildInviteManager: 0,
+      GuildScheduledEventManager: 0, GuildStickerManager: 0, PresenceManager: 0,
+      ReactionManager: 0, ReactionUserManager: 0, StageInstanceManager: 0, ThreadMemberManager: 0,
+    }),
   }) as MusicClient;
   client.queues = new Map();
   client.ytdlp = ytdlp;

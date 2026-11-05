@@ -25,6 +25,20 @@ const AUTOPLAY_HISTORY_LIMIT = 500;
 // Allow bounded buffering; EOF and stream errors still finish immediately.
 const AUDIO_STALL_TIMEOUT_MS = 30_000;
 
+let cueTone: Buffer | null = null;
+/** 220 ms 880 Hz sine tone with a short envelope, raw 48 kHz stereo PCM. */
+function voiceCueTone(): Buffer {
+  if (cueTone) return cueTone;
+  const samples = 10_560;
+  const pcm = Buffer.alloc(samples * 4);
+  for (let i = 0; i < samples; i++) {
+    const envelope = Math.min(1, i / 480, (samples - i) / 480);
+    const value = Math.round(Math.sin(2 * Math.PI * 880 * i / 48_000) * 6000 * envelope);
+    pcm.writeInt16LE(value, i * 4); pcm.writeInt16LE(value, i * 4 + 2);
+  }
+  return cueTone = pcm;
+}
+
 export class GuildQueue {
   readonly player: AudioPlayer = createAudioPlayer({ behaviors: {
     noSubscriber: NoSubscriberBehavior.Pause,
@@ -156,15 +170,8 @@ export class GuildQueue {
   }
 
   async playVoiceCue(signal: AbortSignal): Promise<void> {
-    // 220 ms sine tone with a short envelope, raw 48 kHz stereo PCM.
-    const samples = 10_560;
-    const pcm = Buffer.alloc(samples * 4);
-    for (let i = 0; i < samples; i++) {
-      const envelope = Math.min(1, i / 480, (samples - i) / 480);
-      const value = Math.round(Math.sin(2 * Math.PI * 880 * i / 48_000) * 6000 * envelope);
-      pcm.writeInt16LE(value, i * 4); pcm.writeInt16LE(value, i * 4 + 2);
-    }
-    await this.playVoiceAudio(pcm, signal, 2000);
+    // playVoiceAudio copies its input, so the constant tone is shared.
+    await this.playVoiceAudio(voiceCueTone(), signal, 2000);
   }
 
   async playVoiceAudio(pcm: Buffer, signal: AbortSignal, timeoutMs = 15000): Promise<void> {

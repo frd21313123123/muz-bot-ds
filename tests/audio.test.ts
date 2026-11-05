@@ -169,3 +169,10 @@ test('two-pass file normalization writes a lossless copy and refuses to overwrit
     await rm(output, { force: true }); await rm(input, { force: true }); await rmdir(directory);
   }
 });
+
+test('NaN cleanup runs after downsampling loudnorm output, before dithered s16 conversion', () => {
+  for (const filter of [loudnessFilter(), loudnessFilter(null, true)]) {
+    const order = ['loudnorm=', 'aresample=48000,aeval=', 'aresample=48000:osf=s16'].map(part => filter.indexOf(part));
+    assert.ok(order.every((index, i) => index >= 0 && (i === 0 || index > order[i - 1]!)), filter);
+  }
+});
