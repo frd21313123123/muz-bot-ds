@@ -19,6 +19,7 @@ Run `npm run deploy` after changing slash-command definitions. Set `GUILD_ID` fo
 - TypeScript ESM, Node.js 24.17+, strict type checking. `src/commands.ts` is the command registry used by runtime and deployment.
 - `src/utils/ytdlp.ts` owns search, metadata, playlists, recommendations, and the yt-dlp process. It uses Node as the YouTube JavaScript runtime and installs `yt-dlp[default]` into `.runtime/yt-dlp` on first launch unless `YT_DLP_PATH` is set. Python 3.11+ is required.
 - `src/utils/stream.ts` owns yt-dlp → FFmpeg child processes and their cleanup. Keep certificate verification enabled. FFmpeg must provide `libopus`.
+- SoundCloud tracks are `source: 'soundcloud'` with `videoId: 'sc:<id>'`; they reuse the same yt-dlp → FFmpeg path (`classifyQuery`/`resolveQuery` in `src/utils/resolve.ts`, `searchSoundCloud`/`toSoundCloudTrack` in `ytdlp.ts`). YouTube Music recommendations ignore them.
 - `GuildQueue` owns per-guild voice and player state; `TrackQueue` orders manual tracks before autoplay tracks; `PlayerMessage` updates the public player.
 - Keep `opusscript` for Windows without Visual Studio. Do not add a native `@discordjs/opus` requirement.
 - All command replies are ephemeral **except `/player`**, which deliberately creates a public, updating message. Control buttons reply ephemerally when appropriate. Do not add unrelated channel messages.

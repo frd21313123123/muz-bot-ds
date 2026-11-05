@@ -68,3 +68,58 @@ test('fast resolve on video url creates track immediately without calling metada
   }
   assert.equal(seen.length, 0, 'metadata.video must not be called in fast mode');
 });
+
+const soundcloudEntry: VideoInfo = {
+  id: '2408461857', title: 'Dâu Hào Môn Lofi', duration: 244.1, thumbnail: 'https://i1.sndcdn.com/a-t500x500.jpg',
+  webpage_url: 'https://soundcloud.com/some-artist/some-track',
+};
+
+test('SoundCloud links are classified without tracking parameters', () => {
+  assert.deepEqual(classifyQuery('https://soundcloud.com/some-artist/some-track?si=abc&utm_source=clipboard'), {
+    kind: 'video', value: 'https://soundcloud.com/some-artist/some-track', source: 'soundcloud',
+  });
+  assert.deepEqual(classifyQuery('https://m.soundcloud.com/some-artist/sets/mix'), {
+    kind: 'playlist', value: 'https://soundcloud.com/some-artist/sets/mix', source: 'soundcloud',
+  });
+  assert.equal(classifyQuery('https://soundcloud.com/some-artist').kind, 'playlist');
+  assert.equal(classifyQuery('https://soundcloud.com/some-artist/tracks').kind, 'playlist');
+  assert.equal(classifyQuery('https://soundcloud.com/some-artist/some-track/s-Secret1').kind, 'video');
+  assert.equal(classifyQuery('https://on.soundcloud.com/AbC123').source, 'soundcloud');
+  assert.throws(() => classifyQuery('https://soundcloud.com/'), /SoundCloud/);
+  assert.throws(() => classifyQuery('https://soundcloud.com.evil.example/a/b'));
+});
+
+test('SoundCloud track resolves with a namespaced id and its own url', async () => {
+  const result = await resolveQuery('https://soundcloud.com/some-artist/some-track', 'Alice',
+    { ...metadata, async video() { return soundcloudEntry; } }, 1, { fast: true });
+  assert.equal(result?.type, 'single');
+  if (result?.type === 'single') {
+    assert.equal(result.track.source, 'soundcloud');
+    assert.equal(result.track.videoId, 'sc:2408461857');
+    assert.equal(result.track.url, 'https://soundcloud.com/some-artist/some-track');
+    assert.equal(result.track.duration, '4:04');
+  }
+});
+
+test('SoundCloud set uses entry urls and a short link to one track becomes a single track', async () => {
+  const set = { title: 'Mix', entries: [{ id: '1', title: 'One', url: 'https://soundcloud.com/a/one' },
+    { id: '2', title: 'Two', url: 'https://soundcloud.com/a/two' }, { id: 'bad', title: 'Bad' }] };
+  const result = await resolveQuery('https://soundcloud.com/a/sets/mix', 'Alice',
+    { ...metadata, async playlist() { return set; } }, 25);
+  assert.equal(result?.type, 'playlist');
+  if (result?.type === 'playlist') assert.deepEqual(result.tracks.map(track => track.videoId), ['sc:1', 'sc:2']);
+  const single = await resolveQuery('https://on.soundcloud.com/AbC123', 'Alice',
+    { ...metadata, async playlist() { return soundcloudEntry; } });
+  assert.equal(single?.type, 'single');
+});
+
+test('SoundCloud search is used only when requested', async () => {
+  const queries: string[] = [];
+  const client: MetadataClient = { ...metadata, async searchSoundCloud(query) { queries.push(query); return soundcloudEntry; } };
+  seen.length = 0;
+  const result = await resolveQuery('lofi', 'Alice', client, 1, { source: 'soundcloud' });
+  assert.equal(result?.type === 'single' && result.track.source, 'soundcloud');
+  assert.deepEqual(queries, ['lofi']);
+  assert.equal(seen.length, 0, 'YouTube search must not run');
+  await assert.rejects(resolveQuery('lofi', 'Alice', metadata, 1, { source: 'soundcloud' }), /недоступен/);
+});
