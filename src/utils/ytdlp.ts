@@ -35,7 +35,9 @@ export interface VideoInfo {
   duration?: number;
   duration_string?: string;
   thumbnail?: string;
+  thumbnails?: { id?: string; url?: string }[];
   webpage_url?: string;
+  url?: string;
   artist?: string;
   artists?: string[];
   track?: string;
@@ -49,9 +51,12 @@ export interface VideoInfo {
 
 // yt-dlp's full output contains large format/subtitle collections we never use.
 export function compactVideoInfo(info: VideoInfo): VideoInfo {
-  const { id, title, duration, duration_string, thumbnail, webpage_url, artist, track,
+  const { id, title, duration, duration_string, webpage_url, url, artist, track,
     is_live, live_status, channel, uploader } = info;
-  return { id, title, duration, duration_string, thumbnail, webpage_url, artist, track,
+  // Flat SoundCloud results list only `thumbnails`; keep a mid-sized one.
+  const thumbnail = info.thumbnail
+    || (info.thumbnails?.find(item => item.id === 't500x500') ?? info.thumbnails?.at(-1))?.url;
+  return { id, title, duration, duration_string, thumbnail, webpage_url, url, artist, track,
     is_live, live_status, channel, uploader, artists: info.artists?.slice(), categories: info.categories?.slice(),
     ...(info.entries ? { entries: info.entries.map(compactVideoInfo) } : {}) };
 }
@@ -249,6 +254,38 @@ export class YtdlpClient {
     return candidates;
   }
 
+  async searchSoundCloud(query: string, input?: MetadataInput): Promise<VideoInfo | null> {
+    const options = metadataOptions(input);
+    options.signal?.throwIfAborted();
+    const text = query.trim().replace(/\s+/g, ' ');
+    if (!text) return null;
+
+    const cacheKey = `soundcloud:${text.toLowerCase()}`;
+    this.pruneCaches();
+    const cached = this.searchCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 15 * 60_000) {
+      countMetric('cache.hit'); return cached.entries[0] ? compactVideoInfo(cached.entries[0]) : null;
+    }
+
+    countMetric('cache.miss');
+    const started = performance.now();
+    // The query is part of one argument, so it cannot be read as a yt-dlp option.
+    const result = await this.requests.run(`search:${cacheKey}`, signal =>
+      this.json(['--flat-playlist', `scsearch5:${text}`], 30_000, signal), options);
+    recordMetric('search', performance.now() - started);
+    options.signal?.throwIfAborted();
+    const candidates = (result.entries ?? []).filter(entry => soundCloudTrackUrl(entry) !== null && entry.title?.trim());
+    // Prefer a normal-length track over the DJ sets and mixes SoundCloud is full of.
+    const best = candidates.find(entry => entry.duration === undefined || entry.duration <= 20 * 60) ?? candidates[0];
+    if (!best) return null;
+    this.searchCache.set(cacheKey, { entries: [compactVideoInfo(best)], timestamp: Date.now() });
+    if (this.searchCache.size > 200) {
+      const first = this.searchCache.keys().next().value;
+      if (first) this.searchCache.delete(first);
+    }
+    return compactVideoInfo(best);
+  }
+
   private pruneCaches(): void {
     const now = Date.now();
     for (const [key, item] of this.searchCache) if (now - item.timestamp >= 15 * 60_000) this.searchCache.delete(key);
@@ -306,6 +343,39 @@ export function toTrack(info: VideoInfo, requestedBy: string, isAutoplay = false
     requestedBy,
     isAutoplay,
     isLive: isLiveVideo(info),
+  };
+}
+
+const SOUNDCLOUD_HOSTS = new Set(['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'api.soundcloud.com']);
+
+// Flat playlist entries carry the page in `url`, search results in `webpage_url`.
+export function soundCloudTrackUrl(info: VideoInfo): string | null {
+  for (const candidate of [info.webpage_url, info.url]) {
+    if (!candidate) continue;
+    try {
+      const url = new URL(candidate);
+      if (url.protocol === 'https:' && SOUNDCLOUD_HOSTS.has(url.hostname.toLowerCase())) return url.href;
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
+
+export function toSoundCloudTrack(info: VideoInfo, requestedBy: string): YoutubeTrack {
+  const url = soundCloudTrackUrl(info);
+  if (!info.id || !/^\d+$/.test(info.id) || !url) {
+    throw new Error('SoundCloud не вернул корректную информацию о треке.');
+  }
+  const seconds = videoDuration(info);
+  return {
+    source: 'soundcloud',
+    url,
+    videoId: `sc:${info.id}`,
+    title: info.title?.trim() || 'Без названия',
+    duration: seconds === null ? '?' : formatDuration(seconds),
+    thumbnail: info.thumbnail || null,
+    requestedBy,
+    isAutoplay: false,
+    isLive: false,
   };
 }
 

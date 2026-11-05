@@ -373,9 +373,10 @@ export class GuildQueue {
     if (typeof this.client.ytdlp?.video !== 'function') return;
     if (this.hydration.has(track)) return;
     const controller = new AbortController(); this.hydration.set(track, controller);
-    const videoId = track.videoId;
+    const soundcloud = track.source === 'soundcloud';
+    const videoId = soundcloud ? track.videoId.slice('sc:'.length) : track.videoId;
     try {
-      const info = await this.client.ytdlp.video(`https://www.youtube.com/watch?v=${videoId}`,
+      const info = await this.client.ytdlp.video(soundcloud ? track.url : `https://www.youtube.com/watch?v=${videoId}`,
         { signal: controller.signal, priority: 'background' });
       if (this.closed || controller.signal.aborted || epoch !== this.playbackEpoch
         || (this.currentTrack !== track && !this.pending.items.includes(track))) return;

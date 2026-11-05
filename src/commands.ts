@@ -160,8 +160,10 @@ const join: Command = {
 
 const play: Command = {
   data: new SlashCommandBuilder().setName('play').setDescription('▶ Воспроизвести трек или включить радио')
-    .addStringOption((option) => option.setName('query').setDescription('Ссылка YouTube, название песни или радиостанции')
+    .addStringOption((option) => option.setName('query').setDescription('Ссылка YouTube/SoundCloud, название песни или радиостанции')
       .setRequired(true).setMinLength(1).setMaxLength(500))
+    .addStringOption((option) => option.setName('source').setDescription('Где искать песню по названию (по умолчанию YouTube)')
+      .addChoices({ name: 'YouTube Music', value: 'youtube' }, { name: 'SoundCloud', value: 'soundcloud' }))
     .addBooleanOption((option) => option.setName('infinite').setDescription('Добавлять рекомендации после очереди')),
   async execute(interaction, client) {
     await acknowledgeCommand(interaction, interaction.deferReply({ flags: MessageFlags.Ephemeral }));
@@ -197,7 +199,9 @@ const play: Command = {
       try {
         [, result] = await Promise.all([
           queue.join(channel),
-          resolveQuery(query, requestedBy, client.ytdlp, playlistLimit, { fast: true, signal: request.signal }),
+          resolveQuery(query, requestedBy, client.ytdlp, playlistLimit, {
+            fast: true, signal: request.signal, source: interaction.options.getString('source') === 'soundcloud' ? 'soundcloud' : 'youtube',
+          }),
         ]);
       } finally { request.finish(); }
       if (memberVoiceChannel(interaction)?.id !== channel.id || queue.closed) {

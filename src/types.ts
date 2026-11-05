@@ -17,8 +17,10 @@ interface TrackInfo {
   isLive?: boolean;
 }
 
+// Tracks that yt-dlp resolves and streams. `videoId` is the YouTube video id, or
+// `sc:<numeric id>` for SoundCloud, so ids from both services never collide.
 export interface YoutubeTrack extends TrackInfo {
-  source?: 'youtube';
+  source?: 'youtube' | 'soundcloud';
   videoId: string;
 }
 
