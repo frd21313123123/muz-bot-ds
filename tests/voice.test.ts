@@ -851,7 +851,7 @@ test('stale short-name verification cannot start a late cue', async context => {
   } finally { h.session.disable(); }
 });
 
-test('two similar isolated misses from one speaker may verify only the exact name, once per cooldown', async context => {
+test('an extremely low local score still verifies the first standalone name per microphone', async context => {
   let now = 100, calls = 0, text = 'бот, стоп';
   context.mock.method(performance, 'now', () => now);
   const h = harness({ detectWake: async () => ({ wake: false, probability: .001 }),
@@ -860,29 +860,22 @@ test('two similar isolated misses from one speaker may verify only the exact nam
   try {
     h.setName('бот');
     await h.session.begin('alice')!.complete(burst);
-    now += 1000;
-    await h.session.begin('bob')!.complete(burst);
-    assert.equal(calls, 0);
-    now += 1000;
-    await h.session.begin('bob')!.complete(burst);
     assert.equal(calls, 1); assert.deepEqual(h.actions, []); assert.equal(h.cues, 0);
+    await h.session.begin('alice')!.complete(burst);
+    assert.equal(calls, 1, 'a failing microphone is rate limited');
     text = 'бот';
-    now += 1000;
-    await h.session.begin('bob')!.complete(burst);
-    assert.equal(calls, 1);
-    now += 5000;
-    await h.session.begin('bob')!.complete(burst);
-    assert.equal(calls, 1, 'an old utterance cannot count as a retry');
-    now += 900;
     await h.session.begin('bob')!.complete(burst);
     assert.equal(calls, 2); assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
+    h.session.cancel();
+    now += 4100;
+    await h.session.begin('alice')!.complete(burst);
+    assert.equal(calls, 3); assert.equal(h.cues, 2); assert.ok(h.session.awaits('alice'));
   } finally { h.session.disable(); }
 });
 
 test('steady noise, long speech and a near-homophone cannot wake through the short recheck', async () => {
   let transcriptions = 0;
-  let probability = 0.71;
-  const h = harness({ detectWake: async () => ({ wake: false, probability }),
+  const h = harness({ detectWake: async () => ({ wake: false, probability: .001 }),
     transcribe: async () => { transcriptions++; return 'вот'; } });
   h.setName('бот');
   try {
@@ -892,13 +885,19 @@ test('steady noise, long speech and a near-homophone cannot wake through the sho
     tone.fill(0, 0, 120 * 32);
     await h.session.begin('alice')!.complete(tone);
     assert.equal(transcriptions, 0);
-    probability = 0.001;
-    await h.session.begin('alice')!.complete(tone.subarray(0, 500 * 32));
-    assert.equal(transcriptions, 0, 'isolated sounds with negligible name probability stay local');
-    probability = 0.71;
     await h.session.begin('alice')!.complete(tone.subarray(0, 500 * 32));
     assert.equal(transcriptions, 1);
     assert.equal(h.cues, 0); assert.equal(h.ducked, false);
+  } finally { h.session.disable(); }
+});
+
+test('a short name surrounded by more than 1.2 seconds of silence still reaches STT', async () => {
+  const h = harness({ detectWake: async () => ({ wake: false, probability: .001 }),
+    transcribe: async () => 'бот' });
+  try {
+    h.setName('бот');
+    await h.session.begin('bob')!.complete(Buffer.concat([Buffer.alloc(800 * 32), isolatedBurst()]));
+    assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
   } finally { h.session.disable(); }
 });
 

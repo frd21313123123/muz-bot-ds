@@ -608,6 +608,32 @@ test('two open microphones each need the wake name before a command can change p
   } finally { await h.queue.stop(); }
 });
 
+test('two Discord microphone streams can each wake even when one scores below the acoustic threshold', async () => {
+  const h = openMicHarness();
+  const runtime = h.runtime as unknown as VoiceRuntime;
+  let confidence = 0.99, cues = 0, transcriptions = 0;
+  runtime.supportsWake = () => true;
+  runtime.detectWake = async () => ({ wake: confidence > 0.98, probability: confidence });
+  runtime.transcribe = async (_pcm, _signal, command) => {
+    assert.equal(command, false);
+    transcriptions++;
+    return 'Муза';
+  };
+  h.queue.playVoiceCue = async () => { cues++; };
+  try {
+    h.open('alice'); h.open('bob');
+    await h.send('alice', h.background, 10); await h.send('bob', h.background, 10);
+    await h.phrase('alice');
+    assert.ok(h.voice.session.awaits('alice'));
+    h.voice.session.cancel();
+    confidence = 0.001;
+    await h.phrase('bob');
+    assert.ok(h.voice.session.awaits('bob'));
+    assert.equal(h.voice.session.begin('alice'), null);
+    assert.equal(cues, 2); assert.equal(transcriptions, 2);
+  } finally { await h.queue.stop(); }
+});
+
 test('a receive failure on the first packet can recover the same wake without a second Discord start', async context => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const h = openMicHarness();

@@ -73,10 +73,11 @@ const WAKE_WINDOW_BYTES = 2 * 16_000 * 2; // Two seconds of 16 kHz mono PCM16.
 const STANDALONE_RECHECK_MS = 4_000;
 // This lower candidate threshold only grants an exact-name transcription check.
 const STANDALONE_CANDIDATE_SCORE = 0.25;
+const MAX_ISOLATED_VOICE_MS = 1_200;
 
 // Measure the voiced portion independently of the silence Discord appends.
 function shortVoiceBurst(pcm: Buffer): { start: number; end: number } | null {
-  if (pcm.length < 120 * 32 || pcm.length > 1_200 * 32) return null;
+  if (pcm.length < 120 * 32) return null;
   const frameBytes = 20 * 32;
   const powers: number[] = [];
   let loudest = 0, quietest = Infinity, audibleFrames = 0;
@@ -99,7 +100,8 @@ function shortVoiceBurst(pcm: Buffer): { start: number; end: number } | null {
   const start = powers.findIndex(value => value >= floor) * frameBytes;
   let last = powers.length - 1;
   while (powers[last]! < floor) last--;
-  return { start, end: (last + 1) * frameBytes };
+  const end = (last + 1) * frameBytes;
+  return end - start <= MAX_ISOLATED_VOICE_MS * 32 ? { start, end } : null;
 }
 
 function liftQuietWake(pcm: Buffer, rms: number, peak: number): Buffer {
@@ -129,7 +131,6 @@ export class VoiceSession {
   private cueReady: Promise<void> | null = null;
   private recognizedMusic = false;
   private standaloneChecks = new Map<string, number>();
-  private recentMisses = new Map<string, { at: number; duration: number }>();
 
   constructor(private readonly backend: VoiceBackend, private readonly host: VoiceHost,
     private readonly timings = { waitMs: 10_000, commandMs: 15_000, wakeMs: 4_000 }) {}
@@ -147,7 +148,6 @@ export class VoiceSession {
     for (const tasks of this.tasks.values()) for (const task of tasks) task.abort();
     this.tasks.clear();
     this.capturing.clear();
-    this.recentMisses.clear();
     this.owner = null;
     this.recognizedMusic = false;
     this.host.duck(false);
@@ -166,7 +166,6 @@ export class VoiceSession {
   backendUnavailable(): void { if (!this.recognizedMusic) this.cancel(); }
   cancelUser(userId: string): void {
     this.standaloneChecks.delete(userId);
-    this.recentMisses.delete(userId);
     if (this.owner === userId) this.cancel();
     else {
       for (const task of this.tasks.get(userId) ?? []) task.abort();
@@ -210,18 +209,6 @@ export class VoiceSession {
     }
     this.standaloneChecks.set(userId, now + STANDALONE_RECHECK_MS);
     return true;
-  }
-
-  private repeatedMiss(userId: string, at: number, duration: number): boolean {
-    for (const [speaker, miss] of this.recentMisses) {
-      if (at - miss.at > STANDALONE_RECHECK_MS) this.recentMisses.delete(speaker);
-    }
-    const previous = this.recentMisses.get(userId);
-    if (previous && at <= previous.at) return false;
-    this.recentMisses.set(userId, { at, duration });
-    // A second distinct, similarly long utterance can be a deliberate retry.
-    return !!previous && at - previous.at >= 450
-      && Math.min(previous.duration, duration) >= 0.65 * Math.max(previous.duration, duration);
   }
 
   private makeRoomForWake(userId: string): boolean {
@@ -321,17 +308,18 @@ export class VoiceSession {
             let confidence = candidate.probability;
             if (!candidate.wake && shortWake && performance.now() - started <= STANDALONE_RECHECK_MS
               && (this.standaloneChecks.get(userId) ?? 0) <= performance.now()) {
-              const end = shortWake.end + 80 * 32;
-              // This model right-aligns its input. A long quiet tail can move
-              // the same name below its threshold. Keep the original for STT.
-              if (confidence < STANDALONE_CANDIDATE_SCORE && end + 100 * 32 <= prefix.length) {
-                confidence = (await this.backend.detectWake(prefix.subarray(0, end), controller.signal)).probability;
+              const start = Math.max(0, shortWake.start - 100 * 32);
+              const end = Math.min(speechPcm.length, shortWake.end + 80 * 32);
+              // The detector right-aligns its input. Try again without the long
+              // quiet lead/tail before letting STT verify this isolated burst.
+              if (confidence < STANDALONE_CANDIDATE_SCORE && (start >= 100 * 32 || end + 100 * 32 <= prefix.length
+                || end > prefix.length)) {
+                confidence = Math.max(confidence, (await this.backend.detectWake(speechPcm.subarray(start, end), controller.signal)).probability);
                 if (!valid() || performance.now() - started > STANDALONE_RECHECK_MS) return;
               }
-              const retry = confidence < STANDALONE_CANDIDATE_SCORE
-                && this.repeatedMiss(userId, started, shortWake.end - shortWake.start);
-              standaloneCheck = (confidence >= STANDALONE_CANDIDATE_SCORE || retry)
-                && this.allowStandaloneCheck(userId);
+              // A different voice/mic can score near zero on the first try.
+              // Only an exact isolated name can open the speaker-bound turn.
+              standaloneCheck = this.allowStandaloneCheck(userId);
             }
             report({ stage: 'recognition', kind: 'wake', audioMs: Math.round(prefix.length / 32),
               ms: Math.round(performance.now() - wakeStart), confidence,
