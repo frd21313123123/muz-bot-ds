@@ -10,6 +10,7 @@ import { canControl, memberVoiceChannel } from './utils/voiceAccess.js';
 import { MIN_SPEED, MAX_SPEED } from './utils/audio.js';
 import { extractRadioRequest, findRadioStation, type RadioStation } from './utils/radio.js';
 import { acknowledgeCommand } from './utils/performance.js';
+import { fullWakeName } from './voice/intents.js';
 
 async function startRadio(interaction: ChatInputCommandInteraction, client: MusicClient, station: RadioStation): Promise<unknown> {
   if (!interaction.guildId) return interaction.editReply('❌ Команда работает только на сервере.');
@@ -73,7 +74,9 @@ const voice: Command = {
         ?? interaction.guild?.members.me?.displayName ?? client.user?.username ?? '';
       const runtime = client.voiceRuntime;
       const stt = runtime?.sttProvider === 'groq' ? 'Groq · Whisper Large V3 Turbo' : 'локальная Whisper';
-      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**.\nПрофиль: ${runtime?.profile ?? 'light'}. Распознавание: ${stt}. Обработчик ${runtime?.ready ? 'готов' : runtime?.prepared ? 'запустится при включении прослушивания' : 'не подготовлен — проверьте .env и выполните npm run setup:voice'}.`);
+      const input = queue?.voice?.inputStatus(interaction.user.id);
+      const fullName = fullWakeName(name);
+      return privateReply(interaction, `🎙 ${queue?.voice?.enabled ? 'Прослушивание включено' : 'Прослушивание выключено'}. Обращение: **${escapeMarkdown(name)}**${fullName ? ` или **${fullName}**` : ''}.\nПрофиль: ${runtime?.profile ?? 'light'}. Распознавание: ${stt}. Обработчик ${runtime?.ready ? 'готов' : runtime?.prepared ? 'запустится при включении прослушивания' : 'не подготовлен — проверьте .env и выполните npm run setup:voice'}.${input ? `\n${input}` : ''}`);
     }
     if (!await requireController(interaction, queue)) return;
     await acknowledgeCommand(interaction, interaction.deferReply({ flags: MessageFlags.Ephemeral }));
@@ -90,7 +93,7 @@ const voice: Command = {
     const enabled = action === 'on';
     if (!await queue!.setVoiceEnabled(enabled)) return interaction.editReply('❌ Голосовой обработчик недоступен. Проверьте .env, выполните npm run setup:voice и повторите /voice on.');
     return interaction.editReply({ content: enabled
-      ? `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue!.wakeName)}**, дождитесь сигнала и произнесите команду.`
+      ? `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue!.wakeName)}**, после двойного сигнала произнесите одну команду.`
       : '🎙 Прослушивание выключено.', allowedMentions: { parse: [] } });
   },
 };
@@ -147,7 +150,7 @@ const join: Command = {
       }
       queue.setPlayerChannel(interaction.channelId);
       return interaction.editReply({
-        content: `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue.wakeName)}**, дождитесь сигнала и произнесите команду, например «включи Numb».`,
+        content: `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue.wakeName)}**, после двойного сигнала произнесите одну команду, например «включи Numb».`,
         allowedMentions: { parse: [] },
       });
     } catch (error) {

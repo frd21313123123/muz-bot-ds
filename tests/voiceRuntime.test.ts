@@ -5,6 +5,7 @@ import os from 'node:os';
 import { once } from 'node:events';
 import { mkdtemp, rm, rmdir } from 'node:fs/promises';
 import { VoiceRuntime } from '../src/voice/runtime.js';
+import { VoiceSession } from '../src/voice/session.js';
 import { voiceProfile, voiceDirectory } from '../src/voice/profile.js';
 
 const fake = (extra: string[] = [], options: { autoRestart?: boolean; recoveryDelayMs?: number; requestTimeoutMs?: number; idleTimeoutMs?: number } = {}) => new VoiceRuntime({ command: process.execPath,
@@ -29,6 +30,41 @@ test('light controls and song selection work without starting any model process'
   const aborted = new AbortController(); aborted.abort();
   await assert.rejects(runtime.classify('Следующий', aborted.signal));
   assert.equal(runtime.ready, false); runtime.close();
+});
+
+test('Groq-only sessions can wake, execute and return to idle twice without a worker', { timeout: 2000 }, async (t) => {
+  const phrases = ['Батон', 'Пауза', 'Батон', 'Следующий трек'];
+  const runtime = new VoiceRuntime({ profile: 'light', sttProvider: 'groq', command: 'nonexistent-worker',
+    groq: { apiKey: 'test-only-key', fetch: async () => {
+      const text = phrases.shift();
+      assert.ok(text, 'unexpected transcription request');
+      return Response.json({ text, segments: [{ text, start: 0, end: 0.5, no_speech_prob: 0, avg_logprob: 0, compression_ratio: 1 }] });
+    } } });
+  const actions: string[] = [];
+  let cues = 0, ducked = false;
+  const session = new VoiceSession(runtime, {
+    wakeName: () => 'Батон', present: () => true,
+    cue: async () => { cues++; }, duck: (enabled) => { ducked = enabled; },
+    execute: async (intent) => { actions.push(intent.action); },
+    playMusic: async () => assert.fail('control reached music search'),
+  });
+  t.after(async () => { session.disable(); await runtime.close(); });
+  const pcm = Buffer.alloc(16_000, 1);
+  assert.equal(await runtime.start(), true);
+  assert.equal(runtime.hasCommandDetector, false);
+  assert.equal((await runtime.detectCommand(pcm, t.signal)).matched, false);
+  for (const expected of ['pause', 'skip']) {
+    await session.begin('speaker')!.complete(pcm);
+    assert.equal(session.phase, 'awaiting');
+    assert.equal(ducked, true);
+    await session.begin('speaker')!.complete(pcm);
+    assert.equal(actions.at(-1), expected);
+    assert.equal(session.phase, 'idle');
+    assert.equal(ducked, false);
+  }
+  assert.equal(cues, 2);
+  assert.deepEqual(actions, ['pause', 'skip']);
+  assert.deepEqual(phrases, []);
 });
 
 test('runtime advertises wake capability per name and awaited close releases IPC', async () => {
@@ -137,9 +173,11 @@ test('persistent worker starts once, prioritizes commands and drops cancelled qu
     const discarded = runtime.transcribe(Buffer.from([3, 0]), cancelled.signal, false);
     const rejected = assert.rejects(discarded);
     cancelled.abort();
+    const acoustic = runtime.detectCommand(Buffer.from([5, 0]), signal.signal)
+      .then(result => results.push(result.action));
     const command = runtime.transcribe(Buffer.from([4, 0]), signal.signal, true).then((value) => results.push(value));
-    await Promise.all([first, background, command, rejected]);
-    assert.deepEqual(results, ['1', '4', '2']);
+    await Promise.all([first, background, command, acoustic, rejected]);
+    assert.deepEqual(results, ['1', 'skip', '4', '2']);
   } finally { runtime.close(); }
   assert.equal(runtime.ready, false);
 });

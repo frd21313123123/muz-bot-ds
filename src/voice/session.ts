@@ -1,4 +1,4 @@
-import { contextualCommand, isWakePhrase, modeCommand, normalizeSpeech, playerControlRequest, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
+import { afterWakeName, contextualCommand, modeCommand, normalizeSpeech, playerControlRequest, wakeDistance, unsupportedSpeech, validateIntent, type VoiceAction, type VoiceDecision, type VoiceIntent } from './intents.js';
 import { recordMetric } from '../utils/performance.js';
 import { extractMusicRequest, type MusicBackend, type MusicDiagnostic, type MusicPlayerState } from './music.js';
 import type { TrainingExample } from './training.js';
@@ -17,6 +17,7 @@ export interface VoiceDiagnostic {
   rejectedSegments?: number;
   wakeDistance?: number;
   matched?: boolean;
+  standaloneCheck?: boolean;
   paused?: boolean;
   canonicalized?: boolean;
   requestKind?: 'search' | 'video' | 'radio' | 'control' | 'rejected';
@@ -37,6 +38,7 @@ export interface VoiceBackend extends MusicBackend {
   classify(text: string, signal: AbortSignal): Promise<VoiceDecision>;
   detectWake?(pcm: Buffer, signal: AbortSignal, threshold?: number): Promise<{ wake: boolean; probability: number }>;
   supportsWake?(name: string): boolean;
+  readonly hasCommandDetector?: boolean;
   detectCommand?(pcm: Buffer, signal: AbortSignal, threshold?: number): Promise<{ class: string; action: string; confidence: number; matched: boolean }>;
 }
 export interface SpeechMetrics { vadMs: number; segments: number; rejectedSegments: number }
@@ -50,12 +52,14 @@ export interface VoiceHost {
   archiveAudio?(pcm: Buffer): void;
   cue(signal: AbortSignal): Promise<void>;
   duck(enabled: boolean): void;
+  /** A completed turn frees the receiver to pick up other open microphones. */
+  idle?(): void;
   execute(intent: VoiceIntent, signal: AbortSignal, executed?: () => void): Promise<void | boolean>;
   playMusic(message: string, userId: string, signal: AbortSignal, valid: () => boolean,
     diagnostic?: (event: VoiceDiagnostic) => void): Promise<boolean>;
   playRadio?(station: RadioStation, userId: string, signal: AbortSignal, valid: () => boolean): Promise<boolean>;
   feedback?(key: 'unknown' | 'not_found' | 'radio_unsupported', signal: AbortSignal): Promise<void>;
-  diagnostic?(event: VoiceDiagnostic): void;
+  diagnostic?(event: VoiceDiagnostic, userId?: string): void;
 }
 export interface SpeechCapture {
   signal: AbortSignal;
@@ -65,6 +69,55 @@ export interface SpeechCapture {
   cancel(): void;
 }
 type Phase = 'idle' | 'signalling' | 'awaiting' | 'capturing' | 'processing' | 'disabled';
+const WAKE_WINDOW_BYTES = 2 * 16_000 * 2; // Two seconds of 16 kHz mono PCM16.
+const STANDALONE_RECHECK_MS = 4_000;
+// This lower candidate threshold only grants an exact-name transcription check.
+const STANDALONE_CANDIDATE_SCORE = 0.25;
+
+// Measure the voiced portion independently of the silence Discord appends.
+function shortVoiceBurst(pcm: Buffer): { start: number; end: number } | null {
+  if (pcm.length < 120 * 32 || pcm.length > 1_200 * 32) return null;
+  const frameBytes = 20 * 32;
+  const powers: number[] = [];
+  let loudest = 0, quietest = Infinity, audibleFrames = 0;
+  for (let offset = 0; offset + frameBytes <= pcm.length; offset += frameBytes) {
+    let sum = 0, squares = 0;
+    for (let i = offset; i < offset + frameBytes; i += 2) {
+      const sample = pcm.readInt16LE(i);
+      sum += sample;
+      squares += sample * sample;
+    }
+    const samples = frameBytes / 2;
+    const power = squares / samples - (sum / samples) ** 2;
+    powers.push(power);
+    loudest = Math.max(loudest, power);
+    quietest = Math.min(quietest, power);
+    if (power >= 32 ** 2) audibleFrames++;
+  }
+  if (audibleFrames < 4 || loudest < 4 * quietest) return null;
+  const floor = Math.max(32 ** 2, loudest * 0.04);
+  const start = powers.findIndex(value => value >= floor) * frameBytes;
+  let last = powers.length - 1;
+  while (powers[last]! < floor) last--;
+  return { start, end: (last + 1) * frameBytes };
+}
+
+function liftQuietWake(pcm: Buffer, rms: number, peak: number): Buffer {
+  // Give a quiet microphone up to 18 dB of gain, aiming for -22 dBFS RMS.
+  // Leave peak headroom and keep the original recording untouched.
+  const gain = Math.min(8, 2600 / rms, 29_400 / peak);
+  if (gain <= 1) return pcm;
+  const adjusted = Buffer.allocUnsafe(pcm.length);
+  for (let i = 0; i < pcm.length; i += 2) {
+    adjusted.writeInt16LE(Math.round(pcm.readInt16LE(i) * gain), i);
+  }
+  return adjusted;
+}
+
+const acousticControls = ['pause', 'resume', 'skip', 'stop', 'volume_up', 'volume_down', 'loop_on', 'autoplay_on', 'queue_clear'] as const;
+function isAcousticControl(action: string): action is (typeof acousticControls)[number] {
+  return acousticControls.some(control => control === action);
+}
 
 export class VoiceSession {
   phase: Phase = 'idle';
@@ -73,8 +126,10 @@ export class VoiceSession {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private tasks = new Map<string, Set<AbortController>>();
   private capturing = new Set<string>();
-  private activation: AbortController | null = null;
+  private cueReady: Promise<void> | null = null;
   private recognizedMusic = false;
+  private standaloneChecks = new Map<string, number>();
+  private recentMisses = new Map<string, { at: number; duration: number }>();
 
   constructor(private readonly backend: VoiceBackend, private readonly host: VoiceHost,
     private readonly timings = { waitMs: 10_000, commandMs: 15_000, wakeMs: 4_000 }) {}
@@ -85,25 +140,33 @@ export class VoiceSession {
   }
 
   cancel(): void {
+    const wasActive = this.phase !== 'idle' && this.phase !== 'disabled';
     this.epoch++;
     this.clearTimer();
-    this.activation?.abort();
-    this.activation = null;
+    this.cueReady = null;
     for (const tasks of this.tasks.values()) for (const task of tasks) task.abort();
     this.tasks.clear();
     this.capturing.clear();
+    this.recentMisses.clear();
     this.owner = null;
     this.recognizedMusic = false;
     this.host.duck(false);
     if (this.phase !== 'disabled') this.phase = 'idle';
+    if (wasActive) this.host.idle?.();
   }
 
   disable(): void { this.cancel(); this.phase = 'disabled'; }
   enable(): void { this.cancel(); this.phase = 'idle'; }
+  /** True while this speaker may answer the current wake activation. */
+  awaits(userId: string): boolean {
+    return this.owner === userId && (this.phase === 'signalling' || this.phase === 'awaiting');
+  }
   // A worker failure cannot recognize new audio, but a decoded music request
   // may still search with its fallback. Explicit cancellation always aborts it.
   backendUnavailable(): void { if (!this.recognizedMusic) this.cancel(); }
   cancelUser(userId: string): void {
+    this.standaloneChecks.delete(userId);
+    this.recentMisses.delete(userId);
     if (this.owner === userId) this.cancel();
     else {
       for (const task of this.tasks.get(userId) ?? []) task.abort();
@@ -111,11 +174,82 @@ export class VoiceSession {
     }
   }
 
+  private claim(userId: string, controller: AbortController, phase: 'signalling' | 'processing'): void {
+    this.owner = userId;
+    this.phase = phase;
+    // Only the winning utterance may start a cue or dispatch a command.
+    for (const [id, pending] of this.tasks) {
+      for (const task of pending) if (task !== controller) { task.abort(); pending.delete(task); }
+      if (!pending.size) this.tasks.delete(id);
+    }
+    this.capturing.clear();
+    this.host.duck(true);
+  }
+
+  private async arm(controller: AbortController, valid: () => boolean): Promise<void> {
+    const cue = this.host.cue(controller.signal);
+    this.cueReady = cue;
+    try { await cue; }
+    finally { if (this.cueReady === cue) this.cueReady = null; }
+    if (!valid()) return;
+    if (this.phase === 'signalling') {
+      this.phase = 'awaiting';
+      this.timer = setTimeout(() => { this.host.diagnostic?.({ stage: 'timeout', reason: 'wait' }); this.cancel(); }, this.timings.waitMs);
+    }
+  }
+
+  private archive(pcm: Buffer): void {
+    try { this.host.archiveAudio?.(pcm); } catch { /* Archiving cannot interrupt recognition. */ }
+  }
+
+  private allowStandaloneCheck(userId: string): boolean {
+    const now = performance.now();
+    if ((this.standaloneChecks.get(userId) ?? 0) > now) return false;
+    for (const [speaker, expires] of this.standaloneChecks) {
+      if (expires <= now) this.standaloneChecks.delete(speaker);
+    }
+    this.standaloneChecks.set(userId, now + STANDALONE_RECHECK_MS);
+    return true;
+  }
+
+  private repeatedMiss(userId: string, at: number, duration: number): boolean {
+    for (const [speaker, miss] of this.recentMisses) {
+      if (at - miss.at > STANDALONE_RECHECK_MS) this.recentMisses.delete(speaker);
+    }
+    const previous = this.recentMisses.get(userId);
+    if (previous && at <= previous.at) return false;
+    this.recentMisses.set(userId, { at, duration });
+    // A second distinct, similarly long utterance can be a deliberate retry.
+    return !!previous && at - previous.at >= 450
+      && Math.min(previous.duration, duration) >= 0.65 * Math.max(previous.duration, duration);
+  }
+
+  private makeRoomForWake(userId: string): boolean {
+    let count = 0;
+    let busiest: Set<AbortController> | undefined;
+    for (const pending of this.tasks.values()) {
+      count += pending.size;
+      if (!busiest || pending.size > busiest.size) busiest = pending;
+    }
+    if (count < 4) return true;
+    if (this.tasks.has(userId) || !busiest || busiest.size < 2) return false;
+    // Each speaker can have only one open capture, always the newest entry.
+    // Give a new speaker the oldest duplicate recognition slot.
+    const oldest = busiest.values().next().value!;
+    busiest.delete(oldest);
+    oldest.abort();
+    return true;
+  }
+
   begin(userId: string): SpeechCapture | null {
     if (!this.host.present(userId) || this.capturing.has(userId)) return null;
-    const command = this.phase === 'awaiting' && this.owner === userId;
+    // The activated speaker may start the command while the cue is still
+    // playing; waiting for the cue otherwise drops their first words because
+    // Discord emits "start" only once per uninterrupted utterance.
+    const command = this.awaits(userId);
+    const pendingCue = this.cueReady;
     if (!command && this.phase !== 'idle') return null;
-    if ([...this.tasks.values()].reduce((sum, tasks) => sum + tasks.size, 0) >= 4) return null;
+    if (!command && !this.makeRoomForWake(userId)) return null;
     const controller = new AbortController();
     const tasks = this.tasks.get(userId) ?? new Set<AbortController>();
     tasks.add(controller); this.tasks.set(userId, tasks); this.capturing.add(userId);
@@ -126,6 +260,7 @@ export class VoiceSession {
       if (!tasks.size && this.tasks.get(userId) === tasks) this.tasks.delete(userId);
     };
     const cancel = (): void => {
+      if (controller.signal.aborted) return;
       controller.abort();
       if (!finished) this.capturing.delete(userId);
       forget();
@@ -148,6 +283,7 @@ export class VoiceSession {
         this.capturing.delete(userId);
         const valid = (): boolean => !controller.signal.aborted && epoch === this.epoch && this.host.present(userId);
         let example: TrainingExample | null = null;
+        let closeTurn = command;
         let executionMeasured = false;
         const executed = (): void => {
           if (executionMeasured) return;
@@ -158,184 +294,170 @@ export class VoiceSession {
         const report = (event: VoiceDiagnostic): void => {
           if (event.stage === 'execution' && event.changed) executed();
           if (example && example.diagnostics.length < 32) example.diagnostics.push({ ...event });
-          this.host.diagnostic?.(event);
+          this.host.diagnostic?.(event, userId);
         };
         try {
-          if (command) { this.clearTimer(); this.phase = 'processing'; }
-          if (!pcm.length || !valid()) return;
+          if (command) {
+            this.clearTimer(); this.phase = 'processing';
+            // Record from the first tone, but only act once the cue has played successfully.
+            if (pendingCue) await pendingCue;
+          }
+          if (!pcm.length || pcm.length % 2 || !valid()) return;
           let energy = 0, peak = 0;
           for (let i = 0; i + 1 < pcm.length; i += 2) {
             const sample = pcm.readInt16LE(i); energy += sample * sample; peak = Math.max(peak, Math.abs(sample));
           }
 
-          let localWakeDetected = false;
-          if (!command && this.backend.detectWake && (this.backend.supportsWake?.(this.host.wakeName()) ?? true)) {
+          const wakeName = this.host.wakeName();
+          const rms = Math.sqrt(energy / (pcm.length / 2));
+          const shortWake = command ? null : shortVoiceBurst(pcm);
+          const speechPcm = shortWake ? liftQuietWake(pcm, rms, peak) : pcm;
+          let standaloneCheck = false;
+          if (!command && this.backend.detectWake && (this.backend.supportsWake?.(wakeName) ?? true)) {
             const wakeStart = performance.now();
-            let wakeResult: { wake: boolean; probability: number };
-            try {
-              wakeResult = await this.backend.detectWake(pcm, controller.signal);
-            } catch {
-              if (!controller.signal.aborted) report({ stage: 'error', reason: 'pipeline' });
-              return;
-            }
+            const prefix = speechPcm.subarray(0, WAKE_WINDOW_BYTES);
+            const candidate = await this.backend.detectWake(prefix, controller.signal);
             if (!valid()) return;
-            const wakeElapsedMs = Math.round(performance.now() - wakeStart);
-            const audioMs = Math.round(pcm.length / 32);
-            report({
-              stage: 'recognition', kind: 'wake', audioMs,
-              rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak,
-              ms: wakeElapsedMs, matched: wakeResult.wake, confidence: wakeResult.probability,
-            });
-            if (!wakeResult.wake) return;
-            localWakeDetected = true;
-
-            // Standalone wake word: short utterance (<= 1.3s)
-            if (audioMs <= 1300) {
-              this.owner = userId;
-              this.phase = 'signalling';
-              const activation = new AbortController();
-              this.activation = activation;
-              for (const [id, pending] of this.tasks) {
-                for (const task of pending) if (task !== controller) { task.abort(); pending.delete(task); }
-                if (!pending.size) { this.tasks.delete(id); this.capturing.delete(id); }
+            let confidence = candidate.probability;
+            if (!candidate.wake && shortWake && performance.now() - started <= STANDALONE_RECHECK_MS
+              && (this.standaloneChecks.get(userId) ?? 0) <= performance.now()) {
+              const end = shortWake.end + 80 * 32;
+              // This model right-aligns its input. A long quiet tail can move
+              // the same name below its threshold. Keep the original for STT.
+              if (confidence < STANDALONE_CANDIDATE_SCORE && end + 100 * 32 <= prefix.length) {
+                confidence = (await this.backend.detectWake(prefix.subarray(0, end), controller.signal)).probability;
+                if (!valid() || performance.now() - started > STANDALONE_RECHECK_MS) return;
               }
-              await this.host.cue(activation.signal);
-              if (!valid() || activation.signal.aborted) { if (epoch === this.epoch) this.cancel(); return; }
-              this.host.duck(true);
-              this.phase = 'awaiting';
-              this.timer = setTimeout(() => { this.host.diagnostic?.({ stage: 'timeout', reason: 'wait' }); this.cancel(); }, this.timings.waitMs);
+              const retry = confidence < STANDALONE_CANDIDATE_SCORE
+                && this.repeatedMiss(userId, started, shortWake.end - shortWake.start);
+              standaloneCheck = (confidence >= STANDALONE_CANDIDATE_SCORE || retry)
+                && this.allowStandaloneCheck(userId);
+            }
+            report({ stage: 'recognition', kind: 'wake', audioMs: Math.round(prefix.length / 32),
+              ms: Math.round(performance.now() - wakeStart), confidence,
+              matched: candidate.wake, standaloneCheck });
+            if (!candidate.wake && !standaloneCheck) return;
+          }
+
+          if (command) this.archive(pcm);
+          if (command && this.backend.detectCommand && this.backend.hasCommandDetector !== false) {
+            const cmdStart = performance.now();
+            // A detector failure may fall back to STT. A playback failure must never retry the action.
+            const result = await this.backend.detectCommand(pcm, controller.signal).catch(() => null);
+            if (!valid()) return;
+            if (result?.matched && isAcousticControl(result.action)) {
+              report({ stage: 'recognition', kind: 'command', audioMs: Math.round(pcm.length / 32),
+                ms: Math.round(performance.now() - cmdStart), matched: true, confidence: result.confidence,
+                action: result.action });
+              const changed = await this.host.execute({ action: result.action }, controller.signal, executed);
+              report({ stage: 'execution', action: result.action, changed: changed !== false });
               return;
             }
           }
 
-          let metrics: SpeechMetrics | undefined;
-          // Save only activated requests, using exactly the PCM passed to STT.
-          // A compound wake + request is also activated by the local detector.
-          if (command || localWakeDetected) {
-            try { this.host.archiveAudio?.(pcm); } catch { /* Archiving cannot interrupt recognition. */ }
-          }
-          if ((command || localWakeDetected) && this.backend.detectCommand) {
-            try {
-              const cmdStart = performance.now();
-              const cmdRes = await this.backend.detectCommand(pcm, controller.signal);
-              const controlActions = ['pause', 'resume', 'skip', 'stop', 'volume_up', 'volume_down', 'loop_on', 'autoplay_on', 'queue_clear'];
-              if (valid() && cmdRes.matched && controlActions.includes(cmdRes.action)) {
-                const intent: VoiceIntent = { action: cmdRes.action as any };
-                report({
-                  stage: 'recognition', kind: 'command',
-                  audioMs: Math.round(pcm.length / 32), rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak,
-                  ms: Math.round(performance.now() - cmdStart), matched: true, confidence: cmdRes.confidence,
-                  action: intent.action,
-                });
-                const changed = await this.host.execute(intent, controller.signal, executed);
-                report({ stage: 'execution', action: intent.action, changed: changed !== false });
-                return;
-              }
-            } catch {
-              // Proceed to fallback STT if local command detection threw
-            }
-          }
           const asrStart = performance.now();
-          const transcript = await this.backend.transcribe(pcm, controller.signal, command, command ? undefined : this.host.wakeName(),
-            (value) => { metrics = value; });
+          let metrics: SpeechMetrics | undefined;
+          const transcript = await this.backend.transcribe(speechPcm, controller.signal, command, command ? undefined : wakeName,
+            value => { metrics = value; });
           recordMetric('speech.recognize', performance.now() - asrStart);
-          const paused = this.host.paused?.() ?? false;
-          const text = command ? contextualCommand(transcript, paused, this.host.radio?.() ?? false) : contextualCommand(transcript, paused, this.host.radio?.() ?? false);
-          const direct = modeCommand(text);
-          const radio = extractRadioRequest(text, true);
-          const explicitMusic = !radio ? extractMusicRequest(text) : null;
-          const music = explicitMusic ?? (!radio && command ? extractMusicRequest(text, true) : null);
-          const unsupported = !music && unsupportedSpeech(text);
-          const wakeMatched = localWakeDetected || isWakePhrase(transcript, this.host.wakeName()) || isWakePhrase(text, this.host.wakeName());
+          if (!valid() || (!command && this.phase !== 'idle')) return;
+          if (standaloneCheck && performance.now() - started > STANDALONE_RECHECK_MS) return;
 
+          const remainder = afterWakeName(transcript, this.host.wakeName());
+          // A rescued isolated name may only open the usual speaker-bound window.
+          if (standaloneCheck && remainder !== '') {
+            report({ stage: 'rejected', kind: 'wake', standaloneCheck, matched: false,
+              reason: transcript.trim() ? 'unsupported' : 'empty', ...metrics });
+            return;
+          }
+          const paused = this.host.paused?.() ?? false;
+          const text = contextualCommand(remainder ?? transcript, paused, this.host.radio?.() ?? false);
+          const radio = extractRadioRequest(text, true);
+          const music = radio ? null : extractMusicRequest(text);
+          const control = playerControlRequest(text) && !unsupportedSpeech(text);
+          const route = radio?.kind === 'station' ? 'radio' : music?.kind ?? (control ? 'control' : 'rejected');
           if (command && this.host.training) example = {
             state: { phase: 'request', message: transcript, canonical_message: text,
               selected_track: null, player: this.host.playerState?.() ?? null },
-            route: radio?.kind === 'station' ? 'radio' : music?.kind ?? (unsupported ? 'rejected' : 'control'), model_decision: null,
-            validated_intent: { action: 'unknown' }, query: music?.query ?? null,
-            outcome: 'cancelled', diagnostics: [],
+            route, model_decision: null, validated_intent: { action: 'unknown' },
+            query: music?.query ?? null, outcome: 'cancelled', diagnostics: [],
           };
-          if (!valid()) return;
           report({ stage: 'recognition', kind: command ? 'command' : 'wake',
-            audioMs: Math.round(pcm.length / 32), rms: Math.round(Math.sqrt(energy / (pcm.length / 2))), peak, ...metrics,
-            wakeDistance: command ? undefined : wakeDistance(text, this.host.wakeName()),
+            audioMs: Math.round(pcm.length / 32), rms: Math.round(rms), peak, ...metrics,
+            wakeDistance: command ? undefined : wakeDistance(transcript, wakeName),
             ms: Math.round(performance.now() - asrStart), words: normalizeSpeech(transcript).split(' ').filter(Boolean).length,
-            paused, canonicalized: text !== transcript, matched: !command && wakeMatched,
-            requestKind: command ? (radio?.kind === 'station' ? 'radio' : music?.kind ?? (unsupported ? 'rejected' : 'control')) : undefined });
+            paused, canonicalized: text !== transcript, matched: !command && remainder !== null,
+            requestKind: command ? route : undefined });
 
-          const shouldExecuteCommand = command || (localWakeDetected && (direct || radio || music || playerControlRequest(text) || unsupported));
-          if (shouldExecuteCommand) {
-            // Bare titles first pass through control classification. Explicit
-            // play requests remain independent of model routing/artist labels.
-            this.recognizedMusic = Boolean(music || radio?.kind === 'station');
-            if (radio) {
-              if (radio.kind === 'station' && this.host.playRadio && valid()) {
-                if (example) { example.validated_intent = { action: 'radio_play' }; example.query = radio.station.id; }
-                const changed = await this.host.playRadio(radio.station, userId, controller.signal, valid);
-                if (example) example.outcome = changed ? 'changed' : (valid() ? 'no_op' : 'cancelled');
-                report({ stage: 'execution', action: 'radio_play', changed });
-              } else {
-                if (example) { example.route = 'rejected'; example.outcome = 'rejected'; }
-                if (valid()) await this.host.feedback?.(radio.kind === 'unsupported' ? 'radio_unsupported' : 'unknown', controller.signal);
-              }
-              return;
-            }
-            if (unsupported) {
-              if (example) example.outcome = 'rejected';
-              report({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' });
-              if (valid()) await this.host.feedback?.('unknown', controller.signal);
-              return;
-            }
-            let intent: VoiceIntent = direct ?? { action: 'unknown' };
-            if (!explicitMusic && !direct) {
-              const decisionStart = performance.now();
-              try {
-                const decision = await this.backend.classify(text, controller.signal);
-                if (!valid()) { report({ stage: 'rejected', reason: 'stale' }); return; }
-                // A hallucinated high-confidence control cannot turn an artist
-                // name into a skip. Control words must support the decision.
-                intent = playerControlRequest(text) ? validateIntent(text, decision) : { action: 'unknown' };
-                const safeAction = ['skip', 'pause', 'resume', 'stop', 'volume_set', 'volume_up', 'volume_down', 'unknown'].includes(decision.action) ? decision.action : 'unknown';
-                const confidence = Number.isFinite(decision.confidence) ? decision.confidence : 0;
-                if (example) example.model_decision = { action: safeAction, confidence };
-                report({ stage: 'decision', modelAction: safeAction, confidence,
-                  action: intent.action, ms: Math.round(performance.now() - decisionStart) });
-              } catch {
-                controller.signal.throwIfAborted();
-                if (!music) throw new Error('Control classification failed');
-                report({ stage: 'fallback', reason: 'model' });
-              }
-            }
-            if (intent.action !== 'unknown') {
-              if (example) { example.route = 'control'; example.validated_intent = intent; }
-              const changed = await this.host.execute(intent, controller.signal, executed);
-              if (example) example.outcome = changed === false ? (valid() ? 'no_op' : 'cancelled') : 'changed';
-              report({ stage: 'execution', action: intent.action, changed: changed !== false });
-            } else if (music && valid()) {
-              if (example) { example.route = music.kind; example.validated_intent = { action: 'play' }; }
-              const changed = await this.host.playMusic(text, userId, controller.signal, valid, report);
-              if (example) example.outcome = changed ? 'changed' : (valid() ? 'no_op' : 'cancelled');
-              report({ stage: 'execution', action: 'play', changed });
-            } else if (valid()) {
-              if (example) { example.route = 'rejected'; example.outcome = 'rejected'; }
-              await this.host.feedback?.('unknown', controller.signal);
-            }
-          } else if (this.phase === 'idle' && wakeMatched) {
-            this.owner = userId;
-            this.phase = 'signalling';
-            const activation = new AbortController();
-            this.activation = activation;
-            // Cancel other wake recognitions, but keep this activation alive.
-            for (const [id, pending] of this.tasks) {
-              for (const task of pending) if (task !== controller) { task.abort(); pending.delete(task); }
-              if (!pending.size) { this.tasks.delete(id); this.capturing.delete(id); }
-            }
-            await this.host.cue(activation.signal);
-            if (!valid() || activation.signal.aborted) { if (epoch === this.epoch) this.cancel(); return; }
-            this.host.duck(true);
-            this.phase = 'awaiting';
-            this.timer = setTimeout(() => { this.host.diagnostic?.({ stage: 'timeout', reason: 'wait' }); this.cancel(); }, this.timings.waitMs);
+          if (!command && remainder === null) return;
+          if (remainder === '') {
+            this.standaloneChecks.delete(userId);
+            this.claim(userId, controller, 'signalling');
+            closeTurn = true;
+            await this.arm(controller, valid);
+            closeTurn = !valid();
+            return;
           }
+          // A recognizable incomplete order can be acknowledged once. A fragment of
+          // conversation or an empty transcription simply ends this turn.
+          const incompleteOrder = !text.includes('?') && /^(?:включи|поставь) (?:эту(?: песню)?|этот(?: трек)?|песню|трек)$/u.test(normalizeSpeech(text));
+          if (!radio && !music && !control && !incompleteOrder) {
+            if (example) example.outcome = 'rejected';
+            report({ stage: 'rejected', reason: text.trim() ? 'unsupported' : 'empty' });
+            return;
+          }
+          if (!command) {
+            this.claim(userId, controller, 'processing');
+            closeTurn = true;
+            this.archive(speechPcm);
+          }
+          this.recognizedMusic = Boolean(music || radio?.kind === 'station');
+
+          if (radio) {
+            if (radio.kind === 'station' && this.host.playRadio) {
+              if (example) { example.validated_intent = { action: 'radio_play' }; example.query = radio.station.id; }
+              const changed = await this.host.playRadio(radio.station, userId, controller.signal, valid);
+              if (example) example.outcome = changed ? 'changed' : (valid() ? 'no_op' : 'cancelled');
+              report({ stage: 'execution', action: 'radio_play', changed });
+            } else {
+              if (example) { example.route = 'rejected'; example.outcome = 'rejected'; }
+              if (radio.kind === 'unsupported') await this.host.feedback?.('radio_unsupported', controller.signal);
+            }
+            return;
+          }
+          if (music) {
+            if (example) example.validated_intent = { action: 'play' };
+            const changed = await this.host.playMusic(text, userId, controller.signal, valid, report);
+            if (example) example.outcome = changed ? 'changed' : (valid() ? 'no_op' : 'cancelled');
+            report({ stage: 'execution', action: 'play', changed });
+            return;
+          }
+          if (incompleteOrder) {
+            if (example) example.outcome = 'rejected';
+            await this.host.feedback?.('unknown', controller.signal);
+            return;
+          }
+
+          let intent = modeCommand(text);
+          if (!intent) {
+            const decisionStart = performance.now();
+            const decision = await this.backend.classify(text, controller.signal);
+            if (!valid()) { report({ stage: 'rejected', reason: 'stale' }); return; }
+            intent = validateIntent(text, decision);
+            const safeAction = ['skip', 'pause', 'resume', 'stop', 'volume_set', 'volume_up', 'volume_down', 'unknown'].includes(decision.action) ? decision.action : 'unknown';
+            const confidence = Number.isFinite(decision.confidence) ? decision.confidence : 0;
+            if (example) example.model_decision = { action: safeAction, confidence };
+            report({ stage: 'decision', modelAction: safeAction, confidence,
+              action: intent.action, ms: Math.round(performance.now() - decisionStart) });
+          }
+          if (intent.action === 'unknown') {
+            if (example) { example.route = 'rejected'; example.outcome = 'rejected'; }
+            return;
+          }
+          if (example) example.validated_intent = intent;
+          const changed = await this.host.execute(intent, controller.signal, executed);
+          if (example) example.outcome = changed === false ? (valid() ? 'no_op' : 'cancelled') : 'changed';
+          report({ stage: 'execution', action: intent.action, changed: changed !== false });
         } catch {
           if (example) example.outcome = controller.signal.aborted ? 'cancelled' : 'failed';
           // Audio/text and model error payloads must never reach ordinary logs.
@@ -348,7 +470,7 @@ export class VoiceSession {
             try { this.host.training?.(example); } catch { /* Corpus errors cannot change playback. */ }
           }
           forget();
-          if (command && epoch === this.epoch) this.cancel();
+          if (closeTurn && epoch === this.epoch) this.cancel();
         }
       },
     };

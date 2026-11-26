@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import type { Readable } from 'node:stream';
+import { pipeline, Transform, type Readable } from 'node:stream';
 import { createRequire } from 'node:module';
 import { StreamType } from '@discordjs/voice';
 import type { YtdlpClient } from './ytdlp.js';
@@ -45,6 +45,44 @@ export interface ManagedAudioStream {
   destroy(): void;
 }
 
+// 300 ms of 48 kHz stereo s16le. Once playback starts the transform passes
+// chunks straight through with ordinary stream backpressure.
+const STARTUP_PCM_BYTES = 48_000 * 2 * 2 * 0.3;
+const STARTUP_WAIT_MS = 400;
+
+export function bufferMusicPcm(input: Readable): Readable {
+  let pending: Buffer[] = [];
+  let bytes = 0;
+  let started = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const release = (): void => {
+    clearTimeout(timer);
+    started = true;
+    if (bytes) output.push(Buffer.concat(pending, bytes));
+    pending = []; bytes = 0;
+  };
+  const output = new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      if (!chunk.length) { done(); return; }
+      if (started) { done(null, chunk); return; }
+      if (bytes + chunk.length >= STARTUP_PCM_BYTES) {
+        release();
+        done(null, chunk);
+        return;
+      }
+      if (!timer) timer = setTimeout(release, STARTUP_WAIT_MS);
+      pending.push(chunk); bytes += chunk.length;
+      done();
+    },
+    flush(done) { release(); done(); },
+    destroy(error, done) { clearTimeout(timer); pending = []; bytes = 0; done(error); },
+  });
+  // pipeline forwards source errors and tears down the upstream pipe if the
+  // consumer cancels before the startup buffer has been released.
+  pipeline(input, output, () => {});
+  return output;
+}
+
 export function createRadioStream(url: string): ManagedAudioStream {
   const started = performance.now();
   const parsed = new URL(url);
@@ -54,7 +92,7 @@ export function createRadioStream(url: string): ManagedAudioStream {
     '-tls_verify', '1', '-rw_timeout', '10000000', '-i', url,
     ...musicPcmArguments(),
   ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  const output = child.stdout;
+  const output = bufferMusicPcm(child.stdout);
   trackProcess(child); observeFirstAudio(output, started);
   let closed = false;
   const destroy = (): void => {
@@ -113,12 +151,12 @@ export function createYtdlpStream(ytdlp: YtdlpClient, url: string, options: Musi
 }
 
 export function createProcessStream(downloader: ChildProcess, transcoder: ChildProcess, type = StreamType.OggOpus): ManagedAudioStream {
-  const output = transcoder.stdout;
-  if (!downloader.stdout || !downloader.stderr || !transcoder.stdin || !output || !transcoder.stderr) {
+  if (!downloader.stdout || !downloader.stderr || !transcoder.stdin || !transcoder.stdout || !transcoder.stderr) {
     void terminateProcess(downloader);
     void terminateProcess(transcoder);
     throw new Error('Не удалось создать аудиопоток.');
   }
+  const output = type === StreamType.Raw ? bufferMusicPcm(transcoder.stdout) : transcoder.stdout;
   downloader.stdout.pipe(transcoder.stdin);
   transcoder.stdin.on('error', () => {});
 

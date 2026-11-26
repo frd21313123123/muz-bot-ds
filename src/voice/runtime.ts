@@ -266,6 +266,7 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
 
   private request(payload: Record<string, unknown>, signal: AbortSignal, priority: boolean): Promise<unknown> {
     if (!this.ready || signal.aborted) return Promise.reject(new Error('Голосовой запрос отменён.'));
+    if (!this.child) return Promise.reject(new Error('Локальный голосовой обработчик недоступен.'));
     this.scheduleUnload();
     return new Promise((resolve, reject) => {
       const abort = (): void => {
@@ -346,12 +347,13 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
   async detectCommand(pcm: Buffer, signal: AbortSignal, threshold?: number): Promise<{ class: string; action: string; confidence: number; matched: boolean }> {
     if (!pcm.length || pcm.length > 16_000 * 2 * 15 || pcm.length % 2) throw new Error('Invalid audio length');
     if (!this.ready || signal.aborted) throw new Error('Голосовой запрос отменён.');
+    if (!this.hasCommandDetector) return { class: 'unknown', action: 'unknown', confidence: 0, matched: false };
     this.scheduleUnload();
     const payload: Record<string, unknown> = { op: 'command_detect', pcm: pcm.toString('base64') };
     if (threshold !== undefined && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1) {
       payload.threshold = threshold;
     }
-    const result = await this.request(payload, signal, false);
+    const result = await this.request(payload, signal, true);
     if (!result || typeof result !== 'object') throw new Error('Invalid command detection result');
     const res = result as { class?: unknown; action?: unknown; confidence?: unknown; matched?: unknown };
     if (typeof res.class !== 'string' || typeof res.action !== 'string' || typeof res.confidence !== 'number' || typeof res.matched !== 'boolean') {
