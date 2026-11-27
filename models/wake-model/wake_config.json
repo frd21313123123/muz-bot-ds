@@ -21,9 +21,10 @@
     "whisper_mel_filters.npy": "b697115893111b7eac447de3f430a1c7264cf74e6c1b78c41e577ad39bbe06ef",
     "provenance.json": "60d2778f8237ca874949ac1c84d01ee11171590daa74f36877f0443f966cce21"
   },
-  "model_sha256": "7464443dfa559f32d195b348df939ef072ab648be28fe78bf2cee553822ad37d",
-  "quantization": "weight_only_conv_int8_matmul_int8",
-  "recipe_version": "bot-v6-hardneg-opt",
-  "best_epoch": 4,
-  "model_size_bytes": 8085486
+  "model_sha256": "2bbd8c6acb9d1e1b6e81e21fc0d3c91ea0d77dea4c0c682a6d45623c343ed734",
+  "quantization": "int8_backbone_fp32_residual",
+  "recipe_version": "local-archive-residual-v1",
+  "model_size_bytes": 8135440,
+  "base_model_sha256": "7464443dfa559f32d195b348df939ef072ab648be28fe78bf2cee553822ad37d",
+  "best_epoch": 21
 }
