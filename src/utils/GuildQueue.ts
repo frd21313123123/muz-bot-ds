@@ -26,15 +26,19 @@ const AUTOPLAY_HISTORY_LIMIT = 500;
 const AUDIO_STALL_TIMEOUT_MS = 30_000;
 
 let cueTone: Buffer | null = null;
-/** 220 ms 880 Hz sine tone with a short envelope, raw 48 kHz stereo PCM. */
+/** A rising pair of notes, separated by 40 ms of silence. Raw 48 kHz stereo PCM. */
 function voiceCueTone(): Buffer {
   if (cueTone) return cueTone;
-  const samples = 10_560;
-  const pcm = Buffer.alloc(samples * 4);
-  for (let i = 0; i < samples; i++) {
-    const envelope = Math.min(1, i / 480, (samples - i) / 480);
-    const value = Math.round(Math.sin(2 * Math.PI * 880 * i / 48_000) * 6000 * envelope);
-    pcm.writeInt16LE(value, i * 4); pcm.writeInt16LE(value, i * 4 + 2);
+  const pcm = Buffer.alloc(320 * 48 * 4);
+  for (const [startMs, lengthMs, frequency] of [[0, 120, 660], [160, 160, 990]] as const) {
+    const frames = lengthMs * 48;
+    for (let i = 0; i < frames; i++) {
+      const envelope = Math.min(1, i / 480, (frames - 1 - i) / 480);
+      const value = Math.round(Math.sin(2 * Math.PI * frequency * i / 48_000) * 6000 * envelope);
+      const offset = (startMs * 48 + i) * 4;
+      pcm.writeInt16LE(value, offset);
+      pcm.writeInt16LE(value, offset + 2);
+    }
   }
   return cueTone = pcm;
 }
@@ -68,7 +72,7 @@ export class GuildQueue {
   private advancePending = false;
   private readonly mediaFactory: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream;
   private voiceDucking = false;
-  private cueState: { resumeAfter: boolean; finish(): void } | null = null;
+  private cueState: { interrupt(): void } | null = null;
   private speakingVoiceAudioUntil = 0;
   get isSpeakingVoiceAudio(): boolean { return performance.now() < this.speakingVoiceAudioUntil; }
   private radioRequest: { controller: AbortController; userId?: string } | null = null;
@@ -121,7 +125,8 @@ export class GuildQueue {
       if (error.resource === this.activeResource) this.requestAdvance();
     });
     this.player.on(AudioPlayerStatus.Playing, () => {
-      if (this.pauseRequested) this.player.pause(false);
+      // A stream can become readable while the connection is playing the cue.
+      if (this.pauseRequested || this.cueState) this.player.pause(false);
       else {
         if (this.playbackStartedAt) {
           recordMetric('audio.start', performance.now() - this.playbackStartedAt);
@@ -135,13 +140,21 @@ export class GuildQueue {
       }
     });
     this.player.on(AudioPlayerStatus.Buffering, () => this.clearPreparationTimers());
-    const suspendPreparation = (): void => { this.clearPrepared(); this.clearPreparationTimers(); this.cancelRecommendations(); };
+    const suspendPreparation = (): void => {
+      this.clearPreparationTimers();
+      if (!this.cueState || this.pauseRequested) {
+        this.clearPrepared();
+        this.cancelRecommendations();
+      }
+    };
     this.player.on(AudioPlayerStatus.Paused, suspendPreparation);
     this.player.on(AudioPlayerStatus.AutoPaused, suspendPreparation);
   }
 
   get tracks(): Track[] { return this.pending.items; }
-  get isPaused(): boolean { return this.pauseRequested || this.player.state.status === AudioPlayerStatus.Paused; }
+  get isPaused(): boolean {
+    return this.pauseRequested || (!this.cueState && this.player.state.status === AudioPlayerStatus.Paused);
+  }
   get isRadio(): boolean { return this.currentTrack?.source === 'radio'; }
   get wakeName(): string {
     return this.client.voiceSettings?.get(this.guildId)
@@ -171,14 +184,15 @@ export class GuildQueue {
 
   async playVoiceCue(signal: AbortSignal): Promise<void> {
     // playVoiceAudio copies its input, so the constant tone is shared.
-    await this.playVoiceAudio(voiceCueTone(), signal, 2000);
+    await this.playVoiceAudio(voiceCueTone(), signal, 2000, 'reject');
   }
 
-  async playVoiceAudio(pcm: Buffer, signal: AbortSignal, timeoutMs = 15000): Promise<void> {
+  async playVoiceAudio(pcm: Buffer, signal: AbortSignal, timeoutMs = 15000,
+    interruption: 'finish' | 'reject' = 'finish'): Promise<void> {
     const connection = this.connection;
     if (this.closed || !connection || connection.state.status !== VoiceConnectionStatus.Ready || signal.aborted) throw new Error('Cue cancelled');
     if (!pcm.length || pcm.length % 4 || pcm.length > 48000 * 4 * 12) throw new Error('Invalid voice audio');
-    this.cueState?.finish();
+    this.cueState?.interrupt();
     const player = createAudioPlayer();
     // Feed 20 ms frames instead of encoding the entire reply in one synchronous
     // Opus transform. Copy once: inline volume may mutate the source bytes.
@@ -189,9 +203,8 @@ export class GuildQueue {
     const resource = createAudioResource(Readable.from(frames(), { objectMode: false, highWaterMark: 3840 }),
       { inputType: StreamType.Raw, inlineVolume: true });
     resource.volume?.setVolume(this.volume);
-    configureMusicEncoder(resource);
-    const wasPlaying = this.player.state.status === AudioPlayerStatus.Playing;
-    if (wasPlaying) this.player.pause();
+    configureMusicEncoder(resource, this.voiceChannel?.bitrate);
+    this.pauseRequested = this.isPaused;
     this.speakingVoiceAudioUntil = performance.now() + timeoutMs;
     await new Promise<void>((resolve, reject) => {
       let finished = false;
@@ -202,20 +215,20 @@ export class GuildQueue {
         this.speakingVoiceAudioUntil = performance.now() + 400;
         clearTimeout(timer);
         signal.removeEventListener('abort', abort);
-        const resumeAfter = this.cueState?.resumeAfter ?? false;
         this.cueState = null;
         player.stop(true);
         player.removeAllListeners();
         if (!this.closed && this.connection === connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
           try {
             connection.subscribe(this.player);
-            if (resumeAfter) this.resume();
+            if (!this.pauseRequested) this.player.unpause();
           } catch { error ??= new Error('Cue restoration failed'); }
         }
         if (error || signal.aborted) reject(error ?? new Error('Cue cancelled')); else resolve();
       };
       const timer = setTimeout(() => finish(new Error('Cue timeout')), timeoutMs);
-      this.cueState = { resumeAfter: wasPlaying, finish };
+      this.cueState = { interrupt: () => finish(interruption === 'reject' ? new Error('Voice audio interrupted') : undefined) };
+      this.player.pause(false);
       signal.addEventListener('abort', abort, { once: true });
       player.once(AudioPlayerStatus.Idle, () => finish());
       player.once('error', () => finish(new Error('Cue failed')));
@@ -424,7 +437,6 @@ export class GuildQueue {
 
   private playTrack(track: Track, startSeconds = 0, paused = false, speed = this.speed,
     preparedMedia?: ManagedAudioStream): void {
-    this.cueState?.finish();
     this.clearPrepared();
     this.clearPreparationTimers();
     this.cancelRecommendations();
@@ -434,7 +446,7 @@ export class GuildQueue {
     let resource;
     try {
       resource = createAudioResource(media.stream, { inputType: media.type, inlineVolume: true });
-      configureMusicEncoder(resource);
+      configureMusicEncoder(resource, this.voiceChannel?.bitrate);
     } catch (error) {
       media.destroy();
       throw error;
@@ -453,7 +465,7 @@ export class GuildQueue {
     }
     this.trackOffset = startSeconds;
     this.trackSpeed = speed;
-    this.pauseRequested = paused;
+    this.pauseRequested = paused || (this.cueState !== null && this.pauseRequested);
     this.clearIdleTimer();
     this.player.play(resource);
     oldStream?.destroy();
@@ -546,6 +558,7 @@ export class GuildQueue {
       if (this.closed || controller.signal.aborted || options.valid?.() === false) return false;
       // Only commit after audio exists. Installation retires the old resource
       // atomically; failed station requests leave playback and the queue intact.
+      this.cueState?.interrupt();
       this.playTrack(prepared.track, 0, false, 1, prepared.media);
       prepared = null;
       this.playbackEpoch++;
@@ -784,7 +797,7 @@ export class GuildQueue {
 
   skip(): boolean {
     this.cancelRadioRequest();
-    this.cueState?.finish();
+    this.cueState?.interrupt();
     if (!this.currentTrack) return false;
     if (this.isRadio) { this.leaveRadio(); this.requestAdvance(); return true; }
     this.loopCurrent = false;
@@ -795,15 +808,15 @@ export class GuildQueue {
 
   pause(): boolean {
     if (this.isRadio && !this.pauseRequested) {
-      this.cueState?.finish();
+      this.cueState?.interrupt();
       this.pauseRequested = true;
       this.cancelRadioRecovery();
       this.activeResource = null; this.destroyStream(); this.player.stop(true);
       void this.playerMessage.update(); return true;
     }
-    if (this.cueState) { const wasPlaying = this.cueState.resumeAfter; this.cueState.resumeAfter = false; return wasPlaying; }
-    if ((this.player.state.status !== AudioPlayerStatus.Playing && this.player.state.status !== AudioPlayerStatus.Buffering)
-      || this.pauseRequested) return false;
+    const status = this.player.state.status;
+    if (this.isPaused || status === AudioPlayerStatus.Idle
+      || (status === AudioPlayerStatus.AutoPaused && !this.cueState)) return false;
     this.pauseRequested = true;
     this.clearPrepared(); this.clearPreparationTimers(); this.cancelRecommendations();
     if (this.player.state.status === AudioPlayerStatus.Playing) this.player.pause();
@@ -813,7 +826,7 @@ export class GuildQueue {
 
   resume(): boolean {
     if (this.currentTrack?.source === 'radio' && this.pauseRequested) {
-      this.cueState?.finish();
+      this.cueState?.interrupt();
       const track = this.currentTrack;
       this.pauseRequested = false;
       const controller = new AbortController(); this.radioRecovery = controller;
@@ -824,11 +837,9 @@ export class GuildQueue {
       }).finally(() => { if (this.radioRecovery === controller) this.radioRecovery = null; });
       void this.playerMessage.update(); return true;
     }
-    if (this.cueState) { const wasPaused = !this.cueState.resumeAfter; this.cueState.resumeAfter = true; return wasPaused; }
-    if (this.player.state.status !== AudioPlayerStatus.Paused
-      && !(this.player.state.status === AudioPlayerStatus.Buffering && this.pauseRequested)) return false;
+    if (!this.isPaused || this.player.state.status === AudioPlayerStatus.Idle) return false;
     this.pauseRequested = false;
-    if (this.player.state.status === AudioPlayerStatus.Paused) this.player.unpause();
+    if (!this.cueState) this.player.unpause();
     void this.playerMessage.update();
     return true;
   }
@@ -847,7 +858,7 @@ export class GuildQueue {
     if (this.isRadio) throw new Error('Скорость прямого эфира всегда 1×.');
     if (this.closed) throw new Error('Очередь уже остановлена.');
     if (speed === this.speed) return;
-    this.cueState?.finish();
+    this.cueState?.interrupt();
     this.clearPrepared(); this.clearPreparationTimers(); this.cancelRecommendations();
     if (this.currentTrack && this.activeResource) {
       const paused = this.pauseRequested || this.player.state.status === AudioPlayerStatus.Paused;
@@ -915,7 +926,7 @@ export class GuildQueue {
       this.voiceWanted = false; this.client.voiceRuntime?.release?.(this);
       this.voice?.destroy();
       this.voice = null;
-      this.cueState?.finish();
+      this.cueState?.interrupt();
       this.clearIdleTimer();
       this.destroyStream();
       this.pending.clear();

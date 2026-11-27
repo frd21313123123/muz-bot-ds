@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { StreamType, NoSubscriberBehavior } from '@discordjs/voice';
-import { AudioPlayerStatus, VoiceConnectionStatus, type AudioPlayer, type VoiceConnection } from '@discordjs/voice';
+import { AudioPlayerStatus, VoiceConnectionStatus, entersState, type AudioPlayer, type VoiceConnection } from '@discordjs/voice';
+import type { VoiceBasedChannel } from 'discord.js';
 import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { MusicClient, Track } from '../src/types.js';
 import type { ManagedAudioStream } from '../src/utils/stream.js';
@@ -480,7 +481,29 @@ test('ducking preserves user volume and applies to subsequent tracks after immed
   } finally { await queue.stop(); }
 });
 
-test('voice cue keeps the current resource and queue; cancellation restores subscription', async () => {
+test('the wake cue plays two rising notes with a silent gap as one audio clip', async () => {
+  const queue = new GuildQueue('guild-wake-notes', { queues: new Map() } as unknown as MusicClient);
+  const clips: Buffer[] = [];
+  queue.playVoiceAudio = async pcm => { clips.push(pcm); };
+  try {
+    await queue.playVoiceCue(new AbortController().signal);
+    assert.equal(clips.length, 1);
+    const pcm = clips[0]!;
+    const cycles = (startMs: number, endMs: number): number => {
+      let count = 0;
+      for (let frame = startMs * 48; frame < endMs * 48; frame++) {
+        const offset = frame * 4;
+        if (pcm.readInt16LE(offset - 4) <= 0 && pcm.readInt16LE(offset) > 0) count++;
+      }
+      return count;
+    };
+    const first = cycles(20, 100), second = cycles(180, 260);
+    assert.ok(first > 0 && second > first);
+    assert.ok(pcm.subarray(120 * 48 * 4, 160 * 48 * 4).every(sample => sample === 0));
+  } finally { await queue.stop(); }
+});
+
+test('voice cue preserves the track on cancellation and reports interruption on a manual skip', async () => {
   const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
   let destroyed = 0;
   const queue = new GuildQueue('guild-cue', client, () => {
@@ -507,7 +530,74 @@ test('voice cue keeps the current resource and queue; cancellation restores subs
     if (original.status !== AudioPlayerStatus.Idle && queue.player.state.status !== AudioPlayerStatus.Idle) {
       assert.equal(original.resource, queue.player.state.resource);
     }
+    const interrupted = assert.rejects(queue.playVoiceCue(new AbortController().signal), /interrupted/);
+    assert.equal(queue.skip(), true);
+    await interrupted;
+    assert.equal(outputs.at(-1), queue.player);
   } finally { await queue.stop(); }
+});
+
+// Simulate the network side, while using the real AudioPlayer and Opus encoder.
+function attachPlayback(queue: GuildQueue, onPacket?: (source: 'music' | 'cue', packet: Buffer) => void) {
+  let subscription: { unsubscribe(): void } | undefined;
+  let output: AudioPlayer;
+  const packets = { music: 0, cue: 0 };
+  const connection = {
+    state: { status: VoiceConnectionStatus.Ready },
+    subscribe: (player: AudioPlayer) => {
+      subscription?.unsubscribe();
+      output = player;
+      subscription = Reflect.apply(Reflect.get(player, 'subscribe'), player, [connection]) as { unsubscribe(): void };
+      return subscription;
+    },
+    onSubscriptionRemoved: () => {}, setSpeaking: () => {},
+    prepareAudioPacket: (packet: Buffer) => {
+      const source = output === queue.player ? 'music' : 'cue';
+      packets[source]++;
+      onPacket?.(source, packet);
+    }, dispatchAudio: () => true,
+    destroy: () => { subscription?.unsubscribe(); connection.state.status = VoiceConnectionStatus.Destroyed; },
+  } as unknown as VoiceConnection;
+  queue.connection = connection;
+  connection.subscribe(queue.player);
+  return packets;
+}
+
+test('music and wake cues honour the channel bitrate and stay at 128 kbps when the limit is higher or missing', async () => {
+  // Independent, repeatable stereo noise keeps the VBR encoder busy at both bitrates.
+  const pcm = Buffer.alloc(3840 * 50);
+  let seed = 23;
+  for (let offset = 0; offset < pcm.length; offset += 2) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    pcm.writeInt16LE(Math.round(((seed >>> 16) - 32768) * 0.4), offset);
+  }
+  const silencePadding = Buffer.from([0xf8, 0xff, 0xfe]);
+  const reference = { music: 0, cue: 0 };
+  for (const cap of [128_000, 64_000, 256_000, undefined]) {
+    const raw = new PassThrough();
+    const queue = new GuildQueue('guild-opus-bitrate', { queues: new Map() } as unknown as MusicClient,
+      () => ({ stream: raw, type: StreamType.Raw, destroy: () => raw.destroy() }));
+    queue.voiceChannel = { id: 'voice', bitrate: cap } as VoiceBasedChannel;
+    const sizes: Record<'music' | 'cue', number[]> = { music: [], cue: [] };
+    attachPlayback(queue, (source, packet) => {
+      if (!packet.equals(silencePadding)) sizes[source].push(packet.length);
+    });
+    try {
+      await queue.addTrack(track('aaaaaaaaaaa'));
+      raw.write(pcm);
+      await waitFor(() => sizes.music.length >= 20);
+      await queue.playVoiceCue(new AbortController().signal);
+      for (const source of ['music', 'cue'] as const) {
+        const frames = sizes[source].slice(0, 20);
+        assert.ok(frames.length >= 8, `expected audible ${source} packets`);
+        const bitsPerSecond = frames.reduce((sum, bytes) => sum + bytes, 0) * 8 / (frames.length * 0.02);
+        if (cap === 128_000) reference[source] = bitsPerSecond;
+        const expected = cap === 64_000 ? reference[source] / 2 : reference[source];
+        assert.ok(reference[source] > 95_000 && reference[source] < 160_000);
+        assert.ok(Math.abs(bitsPerSecond - expected) < expected * 0.22, `${source}: ${bitsPerSecond} bps at limit ${cap}`);
+      }
+    } finally { await queue.stop(); }
+  }
 });
 
 test('audible cue preserves playing and paused resources, which can subsequently resume', async () => {
@@ -516,21 +606,7 @@ test('audible cue preserves playing and paused resources, which can subsequently
     const raw = new PassThrough();
     const queue = new GuildQueue(`guild-cue-${mode}`, client, () => ({ stream: raw,
       type: StreamType.Raw, destroy: () => raw.destroy() }));
-    // Simulate the network side, while using the real AudioPlayer and Opus encoder.
-    let subscription: { unsubscribe(): void } | undefined;
-    let packets = 0;
-    const connection = {
-      state: { status: VoiceConnectionStatus.Ready },
-      subscribe: (player: AudioPlayer) => {
-        subscription?.unsubscribe();
-        subscription = Reflect.apply(Reflect.get(player, 'subscribe'), player, [connection]) as { unsubscribe(): void };
-        return subscription;
-      },
-      onSubscriptionRemoved: () => {}, setSpeaking: () => {},
-      prepareAudioPacket: () => { packets++; }, dispatchAudio: () => true,
-      destroy: () => { subscription?.unsubscribe(); connection.state.status = VoiceConnectionStatus.Destroyed; },
-    } as unknown as VoiceConnection;
-    queue.connection = connection; connection.subscribe(queue.player);
+    const packets = attachPlayback(queue);
     try {
       await queue.addTrack(track('aaaaaaaaaaa'));
       raw.write(Buffer.alloc(48_000 * 4 * 3));
@@ -538,25 +614,94 @@ test('audible cue preserves playing and paused resources, which can subsequently
       if (mode === 'already-paused') assert.equal(queue.pause(), true);
       const before = queue.player.state;
       assert.ok(before.status !== AudioPlayerStatus.Idle);
-      const startPackets = packets;
       const cue = queue.playVoiceCue(new AbortController().signal);
+      assert.equal(queue.isPaused, mode === 'already-paused', 'the cue must not appear as a user-requested pause');
       if (mode === 'pause-during-cue') assert.equal(queue.pause(), true);
+      assert.equal(queue.isPaused, mode !== 'playing');
       await cue;
-      assert.ok(packets > startPackets, 'cue produced actual Opus packets');
+      assert.ok(packets.cue > 0, 'cue produced actual Opus packets');
       assert.equal(queue.player.state.status, mode !== 'playing' ? AudioPlayerStatus.Paused : AudioPlayerStatus.Playing);
       assert.equal(queue.player.state.resource, before.resource);
       assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
       if (mode !== 'playing') {
-        const resumePackets = packets;
+        const resumePackets = packets.music;
         assert.equal(queue.resume(), true);
-        await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing && packets > resumePackets);
+        await waitFor(() => queue.player.state.status === AudioPlayerStatus.Playing && packets.music > resumePackets);
         assert.equal(queue.player.state.resource, before.resource);
       }
     } finally { await queue.stop(); }
   }
 });
 
-test('next track is prefetched when remaining duration is under 20s, and advance uses prepared media', async () => {
+test('buffering music waits for the cue and honours pause or resume requested during loading', async () => {
+  for (const command of ['keep-playing', 'pause', 'resume']) {
+    const raw = new PassThrough();
+    const queue = new GuildQueue(`guild-loading-cue-${command}`, { queues: new Map() } as unknown as MusicClient,
+      () => ({ stream: raw, type: StreamType.Raw, destroy: () => raw.destroy() }));
+    // Feed the stream from the cue's first packet. Wall-clock sleeps can miss
+    // the entire cue when the test process is descheduled.
+    const packets = attachPlayback(queue, source => {
+      if (source === 'cue' && packets.cue === 1) raw.write(Buffer.alloc(3840 * 50));
+    });
+    try {
+      await queue.addTrack(track('aaaaaaaaaaa'));
+      assert.equal(queue.player.state.status, AudioPlayerStatus.Buffering);
+      const held = entersState(queue.player, AudioPlayerStatus.Paused, 3000);
+      const cue = queue.playVoiceCue(new AbortController().signal);
+      if (command !== 'keep-playing') assert.equal(queue.pause(), true);
+      if (command === 'resume') assert.equal(queue.resume(), true);
+      await held;
+      assert.equal(queue.isPaused, command === 'pause');
+      assert.equal(packets.music, 0);
+      await cue;
+      assert.ok(packets.cue > 0);
+      if (command === 'pause') {
+        assert.equal(queue.player.state.status, AudioPlayerStatus.Paused);
+        assert.equal(queue.resume(), true);
+      }
+      await waitFor(() => packets.music > 0);
+      assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    } finally { await queue.stop(); }
+  }
+});
+
+test('an automatic track replacement after EOF can finish loading while a wake cue plays', async () => {
+  const streams: PassThrough[] = [];
+  let requested = false;
+  let resolveRelated!: (tracks: Track[]) => void;
+  const related = new Promise<Track[]>(resolve => { resolveRelated = resolve; });
+  const client = { queues: new Map(), ytdlp: { related: () => { requested = true; return related; } } } as unknown as MusicClient;
+  const queue = new GuildQueue('guild-eof-cue', client, () => {
+    const stream = new PassThrough();
+    streams.push(stream);
+    if (streams.length === 2) stream.write(Buffer.alloc(3840 * 50));
+    return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+  });
+  const packets = attachPlayback(queue, source => {
+    if (source === 'cue' && packets.cue === 1) {
+      resolveRelated([{ ...track('bbbbbbbbbbb'), duration: '5:00', isAutoplay: true }]);
+    }
+  });
+  try {
+    queue.setAutoplay(true);
+    await queue.addTrack({ ...track('aaaaaaaaaaa'), duration: '5:00' });
+    streams[0]!.end(Buffer.alloc(3840 * 3));
+    await waitFor(() => requested);
+    assert.equal(queue.player.state.status, AudioPlayerStatus.Idle);
+    const musicPackets = packets.music;
+    const held = entersState(queue.player, AudioPlayerStatus.Paused, 3000);
+    const cue = queue.playVoiceCue(new AbortController().signal).then(() => true, () => false);
+    await held;
+    assert.equal(packets.music, musicPackets, 'the next track waits until the voice output is released');
+    assert.equal(await cue, true, 'an automatic transition must allow both notes to finish');
+    assert.ok(packets.cue > 0);
+    await waitFor(() => packets.music > musicPackets);
+    assert.equal(queue.currentTrack?.videoId, 'bbbbbbbbbbb');
+    assert.equal(queue.tracks.length, 0);
+  } finally { resolveRelated([]); await queue.stop(); }
+});
+
+test('a wake cue preserves the next track prefetched in the last 20 seconds', async () => {
   const streams: PassThrough[] = [];
   const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
   const queue = new GuildQueue('guild-prefetch', client, () => {
@@ -564,7 +709,7 @@ test('next track is prefetched when remaining duration is under 20s, and advance
     streams.push(stream);
     return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
   });
-  Reflect.set(Reflect.get(queue.player, 'behaviors'), 'noSubscriber', NoSubscriberBehavior.Play);
+  attachPlayback(queue);
   client.queues.set(queue.guildId, queue);
   try {
     const track1: Track = { ...track('aaaaaaaaaaa'), duration: '0:15' };
@@ -579,6 +724,8 @@ test('next track is prefetched when remaining duration is under 20s, and advance
     await waitFor(() => Reflect.get(queue, 'prepared') !== null);
     assert.equal(streams.length, 2, 'Track 2 should have been prefetched while Track 1 is playing');
     assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    await queue.playVoiceCue(new AbortController().signal);
+    assert.equal(streams[1]!.destroyed, false);
     queue.player.stop(true);
     await waitFor(() => queue.currentTrack?.videoId === 'bbbbbbbbbbb');
     assert.equal(streams.length, 2, 'Advance should have used the prefetched stream');

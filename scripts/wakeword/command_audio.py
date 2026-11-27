@@ -1,6 +1,7 @@
 """CommandDetector for acoustic intent classification using quantized ONNX Whisper-tiny."""
 from pathlib import Path
 import json
+import os
 import wave
 import numpy as np
 
@@ -19,8 +20,9 @@ class CommandDetector:
         if self.config.get('sample_rate') != SAMPLE_RATE or self.config.get('window_samples') != N_SAMPLES:
             raise ValueError('Incompatible command detector audio format')
         options = ort.SessionOptions()
-        options.intra_op_num_threads = 2
+        options.intra_op_num_threads = max(1, min(8, int(os.environ.get('VOICE_CPU_THREADS', '1'))))
         options.inter_op_num_threads = 1
+        options.add_session_config_entry('session.intra_op.allow_spinning', '0')
         self.session = ort.InferenceSession(str(directory / 'command_model.onnx'), options, providers=['CPUExecutionProvider'])
         self.frontend = WhisperMelFrontend(directory)
         self.classes = self.config['classes']

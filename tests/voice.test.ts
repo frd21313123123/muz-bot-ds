@@ -11,12 +11,13 @@ import { VoiceSession, type VoiceBackend, type VoiceDiagnostic, type VoiceHost }
 import type { TrainingExample } from '../src/voice/training.js';
 
 const audio = Buffer.from([0, 0]);
+
 test('only activated STT input is archived, including compound requests and failed recognition', async () => {
   const archived: Buffer[] = [];
   let wake = false;
-  let failStt = false;
+  let transcript = 'Муза';
   const h = harness({ detectWake: async () => ({ wake, probability: wake ? 1 : 0 }),
-    transcribe: async () => { if (failStt) throw new Error('STT offline'); return 'Бот, следующий трек'; } },
+    transcribe: async () => { if (!transcript) throw new Error('STT offline'); return transcript; } },
     { archiveAudio: pcm => { archived.push(pcm); } });
   const short = Buffer.alloc(800 * 32);
   const command = Buffer.alloc(2000 * 32);
@@ -24,15 +25,22 @@ test('only activated STT input is archived, including compound requests and fail
     await h.session.begin('alice')!.complete(short);
     assert.equal(archived.length, 0);
     wake = true;
+    transcript = 'В разговоре упомянули Музу';
+    await h.session.begin('alice')!.complete(command);
+    assert.deepEqual(archived, []);
+    transcript = 'Муза';
     await h.session.begin('alice')!.complete(short);
     assert.equal(archived.length, 0);
     assert.equal(h.session.begin('bob'), null);
+    transcript = 'Следующий трек';
     await h.session.begin('alice')!.complete(command);
     assert.deepEqual(archived, [command]);
+    transcript = 'Муза, следующий трек';
     await h.session.begin('alice')!.complete(command);
     assert.deepEqual(archived, [command, command]);
+    transcript = 'Муза';
     await h.session.begin('alice')!.complete(short);
-    failStt = true;
+    transcript = '';
     await h.session.begin('alice')!.complete(command);
     assert.equal(archived.length, 3);
     h.setPresent(false);
@@ -231,6 +239,27 @@ test('wake name is exact after Unicode normalization; mentions in conversation d
   assert.throws(() => validateWakeName('🔊'));
 });
 
+test('the full form still requires the configured wake word before any control', async () => {
+  const h = harness({ classify: async text => ({ action: ruleIntent(text).action, confidence: 1 }) });
+  try {
+    h.setName('бот');
+    for (const text of ['сделай тише', 'музыкальный', 'музыкальный вот', 'музыкальный кот, сделай тише',
+      'музыкальный ботаник, сделай тише', 'мы обсуждали музыкального бота', 'он сказал музыкальный бот']) {
+      h.setText(text); await h.session.begin('alice')!.complete(audio);
+    }
+    assert.equal(h.cues, 0); assert.deepEqual(h.actions, []);
+    h.setText('Музыкальный бот!');
+    await h.session.begin('alice')!.complete(audio);
+    assert.ok(h.session.awaits('alice')); assert.equal(h.cues, 1);
+    assert.equal(h.session.begin('bob'), null);
+    h.setText('Сделай тише'); await h.session.begin('alice')!.complete(audio);
+    h.setText('Музыкальный бот, поставь на паузу'); await h.session.begin('bob')!.complete(audio);
+    assert.deepEqual(h.actions, [{ action: 'volume_down' }, { action: 'pause' }]); assert.equal(h.cues, 1);
+    h.setName('Муза'); h.setText('Музыкальный бот'); await h.session.begin('bob')!.complete(audio);
+    assert.equal(h.session.phase, 'idle'); assert.equal(h.cues, 1);
+  } finally { h.session.disable(); }
+});
+
 test('every explicit mode command executes once without model routing or a YouTube search', async () => {
   for (const [phrase, action] of modeCases) {
     assert.deepEqual(modeCommand(phrase), { action }, phrase);
@@ -304,14 +333,15 @@ test('short next/pause aliases classify as controls before search, while explici
   } finally { h.session.disable(); }
 });
 
-test('bare artists receive a control preflight without letting a model hallucination skip playback', async () => {
+test('bare artists close the listening window without searching or classifying', async () => {
   const calls: string[] = [];
   const h = harness({ classify: async () => { calls.push('classify'); return { action: 'skip', confidence: 0.999 }; } },
     { playMusic: async () => { calls.push('search'); return true; } });
   try {
     await h.session.begin('alice')!.complete(audio);
     h.setText('Монеточка'); await h.session.begin('alice')!.complete(audio);
-    assert.deepEqual(calls, ['classify', 'search']); assert.equal(h.actions.length, 0);
+    assert.deepEqual(calls, []); assert.equal(h.actions.length, 0);
+    assert.equal(h.session.phase, 'idle'); assert.equal(h.ducked, false);
   } finally { h.session.disable(); }
 });
 
@@ -401,7 +431,7 @@ test('music requests, compound commands, negations and low confidence cannot con
   assert.deepEqual(validateIntent('Стоп', { action: 'stop', confidence: 0.99 }), { action: 'stop' });
 });
 
-test('activation ducks only after cue, binds the speaker, executes once and restores gain', async () => {
+test('activation ducks music, binds the speaker, executes once and restores gain', async () => {
   const h = harness();
   try {
     const wake = h.session.begin('alice')!;
@@ -413,6 +443,80 @@ test('activation ducks only after cue, binds the speaker, executes once and rest
     const command = h.session.begin('alice')!;
     assert.equal(command.silenceMs, 800);
     await command.complete(audio); await command.complete(audio);
+    assert.deepEqual(h.actions, [{ action: 'skip' }]);
+    assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle');
+  } finally { h.session.disable(); }
+});
+
+test('the activated speaker can start the command while the wake cue is still playing', async () => {
+  let releaseCue!: () => void;
+  let cueStarted!: () => void;
+  const started = new Promise<void>((resolve) => { cueStarted = resolve; });
+  const h = harness({ detectWake: async () => ({ wake: true, probability: 0.99 }) }, {
+    cue: () => new Promise<void>((resolve) => { releaseCue = resolve; cueStarted(); }),
+  });
+  try {
+    const wake = h.session.begin('alice')!;
+    const activated = wake.complete(Buffer.alloc(800 * 32));
+    await started;
+    assert.equal(h.session.phase, 'signalling');
+    assert.equal(h.ducked, true, 'music is already ducked while the cue is playing');
+    assert.equal(h.session.begin('bob'), null, 'other speakers cannot take over the cue');
+    const command = h.session.begin('alice')!;
+    assert.equal(h.session.phase, 'capturing');
+    releaseCue();
+    await activated;
+    assert.equal(h.session.phase, 'capturing', 'cue completion must not reopen the wait window');
+    assert.equal(h.ducked, true, 'music stays ducked while the command is captured');
+    h.setText('Следующий');
+    await command.complete(audio);
+    assert.deepEqual(h.actions, [{ action: 'skip' }]);
+    assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle');
+  } finally { h.session.disable(); }
+});
+
+test('a failed cue cancels an early command even when its audio has already ended', async () => {
+  let failCue!: (error: Error) => void;
+  let notifyStarted!: () => void;
+  const started = new Promise<void>(resolve => { notifyStarted = resolve; });
+  const h = harness({}, { cue: () => new Promise<void>((_resolve, reject) => {
+    failCue = reject; notifyStarted();
+  }) });
+  try {
+    const activation = h.session.begin('alice')!.complete(audio);
+    await started;
+    h.setText('Следующий');
+    const capture = h.session.begin('alice')!;
+    const processing = capture.complete(audio);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(h.actions, []);
+    failCue(new Error('Cue playback failed'));
+    await Promise.all([activation, processing]);
+    assert.deepEqual(h.actions, []);
+    assert.equal(capture.signal.aborted, true);
+    assert.equal(h.session.phase, 'idle'); assert.equal(h.ducked, false);
+  } finally { h.session.disable(); }
+});
+
+test('repeating the wake name re-arms the command window instead of searching for it', async () => {
+  let cues = 0;
+  let searches = 0;
+  const h = harness({}, {
+    cue: async () => { cues++; },
+    playMusic: async () => { searches++; return false; },
+  });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    assert.equal(cues, 1); assert.equal(h.session.phase, 'awaiting');
+    h.setText('Муза');
+    await h.session.begin('alice')!.complete(audio);
+    assert.equal(cues, 2, 'the cue tells the speaker the window is still open');
+    assert.equal(h.session.phase, 'awaiting');
+    assert.equal(h.ducked, true);
+    assert.equal(searches, 0, 'the bot name must never become a music query');
+    assert.deepEqual(h.actions, []);
+    h.setText('Следующий');
+    await h.session.begin('alice')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
     assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle');
   } finally { h.session.disable(); }
@@ -531,6 +635,23 @@ test('concurrent wake results cannot steal activation; renamed wake key takes ef
   assert.equal(h.cues, 2); h.session.disable();
 });
 
+test('a verified compound request claims the turn while another wake recognition finishes', async () => {
+  const transcripts: ((text: string) => void)[] = [];
+  const h = harness({ transcribe: () => new Promise(resolve => transcripts.push(resolve)) });
+  try {
+    const alice = h.session.begin('alice')!;
+    const bob = h.session.begin('bob')!;
+    const a = alice.complete(audio), b = bob.complete(audio);
+    transcripts[1]!('Муза, следующий трек');
+    transcripts[0]!('Муза, следующий трек');
+    await Promise.all([a, b]);
+    assert.equal(alice.signal.aborted, true);
+    assert.deepEqual(h.actions, [{ action: 'skip' }]);
+    assert.equal(h.cues, 0); assert.equal(h.ducked, false);
+    assert.equal(h.session.phase, 'idle');
+  } finally { h.session.disable(); }
+});
+
 test('a new wake utterance is captured while the previous one is being recognized', async () => {
   const pending: ((text: string) => void)[] = [];
   const h = harness({ transcribe: async (_pcm, signal) => new Promise<string>((resolve, reject) => {
@@ -549,6 +670,30 @@ test('a new wake utterance is captured while the previous one is being recognize
     pending[0]!('Муза'); await firstResult;
     assert.equal(h.cues, 1, 'late recognition must not activate twice');
     assert.equal(h.session.phase, 'awaiting');
+  } finally { h.session.disable(); }
+});
+
+test('a second speaker can wake the bot when the first has filled the pending recognition slots', async () => {
+  const pending: ((text: string) => void)[] = [];
+  const h = harness({ transcribe: () => new Promise(resolve => pending.push(resolve)) });
+  try {
+    const requests = [];
+    for (let i = 0; i < 3; i++) {
+      const capture = h.session.begin('alice')!;
+      requests.push({ capture, result: capture.complete(audio) });
+    }
+    const ongoing = h.session.begin('alice')!;
+    const friend = h.session.begin('bob');
+    assert.ok(friend);
+    assert.ok(requests[0]!.capture.signal.aborted, 'evict an old recognition from the same microphone');
+    assert.equal(ongoing.signal.aborted, false, 'never evict a live utterance to allocate a slot');
+    const activation = friend.complete(audio);
+    pending[3]!('Муза'); await activation;
+    for (let i = 0; i < 3; i++) pending[i]!('Муза');
+    await Promise.all(requests.map(request => request.result));
+    assert.equal(h.cues, 1);
+    assert.ok(h.session.awaits('bob'));
+    assert.equal(h.session.begin('alice'), null);
   } finally { h.session.disable(); }
 });
 
@@ -586,48 +731,195 @@ test('custom names persist per guild and reset independently, with serialized wr
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('neural wake detector activates cue and awaiting mode on wake word without calling cloud STT', async () => {
-  let cloudTranscribeCalls = 0;
+test('a short local wake hit opens the window only after one verified transcription', async () => {
+  const transcriptions: boolean[] = [];
   const h = harness({
     detectWake: async () => ({ wake: true, probability: 0.99 }),
     classify: async () => ({ action: 'pause', confidence: 0.99 }),
     transcribe: async (_pcm, _sig, command) => {
-      cloudTranscribeCalls++;
-      if (!command) assert.fail('Cloud transcribe must not be called during standalone wake detection');
-      return 'Поставь на паузу';
+      transcriptions.push(command);
+      return command ? 'Поставь на паузу' : 'Муза';
     },
   });
   try {
-    // 800ms audio (< 1300ms)
     const shortAudio = Buffer.alloc(800 * 32);
     await h.session.begin('alice')!.complete(shortAudio);
-    assert.equal(cloudTranscribeCalls, 0, 'zero cloud STT calls for wake phrase');
+    assert.deepEqual(transcriptions, [false]);
     assert.equal(h.cues, 1, 'cue tone played');
     assert.equal(h.ducked, true, 'audio ducked');
     assert.equal(h.session.phase, 'awaiting');
 
-    // Alice now speaks her command
     const commandCapture = h.session.begin('alice')!;
     await commandCapture.complete(shortAudio);
-    assert.equal(cloudTranscribeCalls, 1, 'cloud STT called for spoken command');
+    assert.deepEqual(transcriptions, [false, true]);
     assert.deepEqual(h.actions, [{ action: 'pause' }]);
   } finally { h.session.disable(); }
 });
 
 test('neural wake detector rejects non-wake audio locally without invoking cloud STT', async () => {
+  let transcriptions = 0;
   const h = harness({
     detectWake: async () => ({ wake: false, probability: 0.0001 }),
-    transcribe: async () => {
-      assert.fail('Cloud transcribe must not be called when wake detector rejects audio');
-    },
+    transcribe: async () => { transcriptions++; return 'Муза'; },
   });
   try {
     const speechAudio = Buffer.alloc(1000 * 32);
     await h.session.begin('alice')!.complete(speechAudio);
+    assert.equal(transcriptions, 0);
     assert.equal(h.cues, 0);
     assert.equal(h.ducked, false);
     assert.equal(h.session.phase, 'idle');
     assert.deepEqual(h.actions, []);
+  } finally { h.session.disable(); }
+});
+
+test('a quiet isolated name missed locally can wake its speaker, while short non-names cannot dispatch', async () => {
+  const burst = Buffer.alloc(500 * 32);
+  for (let sample = 1600; sample < 4800; sample++) {
+    burst.writeInt16LE(Math.round(150 * Math.sin(2 * Math.PI * 170 * sample / 16_000)), sample * 2);
+  }
+  const original = Buffer.from(burst);
+  const inputs: Buffer[] = [];
+  let text = 'Бот, стоп';
+  const h = harness({
+    detectWake: async () => ({ wake: false, probability: 0.76 }),
+    transcribe: async pcm => { inputs.push(pcm); return text; },
+  });
+  h.setName('бот');
+  try {
+    await h.session.begin('alice')!.complete(burst);
+    assert.equal(h.cues, 0); assert.deepEqual(h.actions, []);
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0]!.readInt16LE(3250), 8 * original.readInt16LE(3250));
+    assert.deepEqual(burst, original);
+    text = 'бот';
+    await h.session.begin('alice')!.complete(burst);
+    assert.equal(inputs.length, 1, 'an unsuccessful recheck is rate-limited for that microphone');
+    await h.session.begin('bob')!.complete(burst);
+    assert.equal(inputs.length, 2, 'a different speaker may still use their first recheck');
+    assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
+    assert.equal(h.session.begin('alice'), null);
+  } finally { h.session.disable(); }
+});
+
+function isolatedBurst(): Buffer {
+  const pcm = Buffer.alloc(700 * 32);
+  for (let i = 1600; i < 4800; i++) pcm.writeInt16LE(Math.round(280 * Math.sin(i * 0.09)), i * 2);
+  return pcm;
+}
+
+test('the quiet tail can be shortened for the local detector while STT receives the complete utterance', async () => {
+  const lengths: number[] = [];
+  const stt: number[] = [];
+  const h = harness({ detectWake: async pcm => {
+    lengths.push(pcm.length);
+    return { wake: pcm.length === 380 * 32, probability: pcm.length === 380 * 32 ? .99 : .01 };
+  }, transcribe: async pcm => { stt.push(pcm.length); return 'бот'; } });
+  try {
+    h.setName('бот');
+    await h.session.begin('bob')!.complete(isolatedBurst());
+    assert.deepEqual(lengths, [700 * 32, 380 * 32]);
+    assert.deepEqual(stt, [700 * 32]);
+    assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
+  } finally { h.session.disable(); }
+});
+
+test('voice off during a shortened wake check discards the late result', async () => {
+  let trimmed!: () => void, finish!: (value: { wake: boolean; probability: number }) => void;
+  const checking = new Promise<void>(resolve => { trimmed = resolve; });
+  const h = harness({ detectWake: async pcm => {
+    if (pcm.length === 700 * 32) return { wake: false, probability: .001 };
+    trimmed();
+    return new Promise(resolve => { finish = resolve; });
+  }, transcribe: async () => assert.fail('cancelled audio must not reach speech recognition') });
+  const pending = h.session.begin('bob')!.complete(isolatedBurst());
+  await checking;
+  h.session.disable();
+  finish({ wake: true, probability: 1 }); await pending;
+  assert.equal(h.session.phase, 'disabled'); assert.equal(h.cues, 0); assert.equal(h.ducked, false);
+});
+
+test('stale short-name verification cannot start a late cue', async context => {
+  let now = 20;
+  context.mock.method(performance, 'now', () => now);
+  const h = harness({ detectWake: async () => ({ wake: false, probability: .5 }),
+    transcribe: async () => { now += 5000; return 'бот'; } });
+  try {
+    h.setName('бот');
+    await h.session.begin('bob')!.complete(isolatedBurst());
+    assert.equal(h.cues, 0); assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle');
+  } finally { h.session.disable(); }
+});
+
+test('an extremely low local score still verifies the first standalone name per microphone', async context => {
+  let now = 100, calls = 0, text = 'бот, стоп';
+  context.mock.method(performance, 'now', () => now);
+  const h = harness({ detectWake: async () => ({ wake: false, probability: .001 }),
+    transcribe: async () => { calls++; return text; } });
+  const burst = isolatedBurst();
+  try {
+    h.setName('бот');
+    await h.session.begin('alice')!.complete(burst);
+    assert.equal(calls, 1); assert.deepEqual(h.actions, []); assert.equal(h.cues, 0);
+    await h.session.begin('alice')!.complete(burst);
+    assert.equal(calls, 1, 'a failing microphone is rate limited');
+    text = 'бот';
+    await h.session.begin('bob')!.complete(burst);
+    assert.equal(calls, 2); assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
+    h.session.cancel();
+    now += 4100;
+    await h.session.begin('alice')!.complete(burst);
+    assert.equal(calls, 3); assert.equal(h.cues, 2); assert.ok(h.session.awaits('alice'));
+  } finally { h.session.disable(); }
+});
+
+test('steady noise, long speech and a near-homophone cannot wake through the short recheck', async () => {
+  let transcriptions = 0;
+  const h = harness({ detectWake: async () => ({ wake: false, probability: .001 }),
+    transcribe: async () => { transcriptions++; return 'вот'; } });
+  h.setName('бот');
+  try {
+    const tone = Buffer.alloc(1500 * 32);
+    for (let i = 0; i < tone.length; i += 2) tone.writeInt16LE(i % 4 ? 200 : -200, i);
+    await h.session.begin('alice')!.complete(tone.subarray(0, 500 * 32));
+    tone.fill(0, 0, 120 * 32);
+    await h.session.begin('alice')!.complete(tone);
+    assert.equal(transcriptions, 0);
+    await h.session.begin('alice')!.complete(tone.subarray(0, 500 * 32));
+    assert.equal(transcriptions, 1);
+    assert.equal(h.cues, 0); assert.equal(h.ducked, false);
+  } finally { h.session.disable(); }
+});
+
+test('a short name surrounded by more than 1.2 seconds of silence still reaches STT', async () => {
+  const h = harness({ detectWake: async () => ({ wake: false, probability: .001 }),
+    transcribe: async () => 'бот' });
+  try {
+    h.setName('бот');
+    await h.session.begin('bob')!.complete(Buffer.concat([Buffer.alloc(800 * 32), isolatedBurst()]));
+    assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
+  } finally { h.session.disable(); }
+});
+
+test('false local hits of either duration are discarded before cues, acoustic commands and feedback', async () => {
+  const calls: string[] = [];
+  const h = harness({
+    detectWake: async () => ({ wake: true, probability: 0.9999 }),
+    detectCommand: async () => { calls.push('acoustic'); return { class: 'stop', action: 'stop', confidence: 1, matched: true }; },
+  }, {
+    playMusic: async () => { calls.push('search'); return true; },
+    feedback: async key => { calls.push(key); },
+  });
+  try {
+    h.setName('Батон');
+    for (const [duration, transcript] of [[800, 'потом'], [2600, 'передай батон пожалуйста'],
+      [2200, 'следующий трек'], [3000, 'Батончик, включи музыку'], [600, '']] as const) {
+      h.setText(transcript);
+      await h.session.begin('alice')!.complete(Buffer.alloc(duration * 32));
+      assert.equal(h.session.phase, 'idle', transcript);
+      assert.equal(h.ducked, false, transcript);
+    }
+    assert.deepEqual(calls, []); assert.deepEqual(h.actions, []); assert.equal(h.cues, 0);
   } finally { h.session.disable(); }
 });
 
@@ -643,61 +935,104 @@ test('unavailable or incompatible wake detector falls back to STT and preserves 
   } finally { h.session.disable(); }
 });
 
-test('neural wake detector on compound command activates cloud STT and executes immediately', async () => {
-  let cloudTranscribed = false;
+test('only the first two seconds reach the wake detector, and the full compound request reaches STT once', async () => {
+  const full = Buffer.alloc(3400 * 32, 1);
+  full.fill(2, 2000 * 32);
+  const wakeInputs: Buffer[] = [];
+  const sttInputs: Buffer[] = [];
   const h = harness({
-    detectWake: async () => ({ wake: true, probability: 0.99 }),
-    transcribe: async () => {
-      cloudTranscribed = true;
-      return 'Бот, следующий трек';
-    },
+    detectWake: async pcm => { wakeInputs.push(pcm); return { wake: true, probability: 0.99 }; },
+    transcribe: async pcm => { sttInputs.push(pcm); return 'Бот, следующий трек'; },
   });
   try {
-    // 2000ms audio (> 1300ms, long utterance containing wake + command)
-    const longAudio = Buffer.alloc(2000 * 32);
-    await h.session.begin('alice')!.complete(longAudio);
-    assert.equal(cloudTranscribed, true, 'cloud STT called for compound command');
+    h.setName('Бот');
+    await h.session.begin('alice')!.complete(full);
+    assert.deepEqual(wakeInputs, [full.subarray(0, 2000 * 32)]);
+    assert.deepEqual(sttInputs, [full]);
+    assert.deepEqual(h.actions, [{ action: 'skip' }]);
+    assert.equal(h.cues, 0); assert.equal(h.session.phase, 'idle');
+    const short = full.subarray(0, 900 * 32);
+    await h.session.begin('bob')!.complete(short);
+    assert.deepEqual(wakeInputs[1], short);
+    assert.deepEqual(sttInputs, [full, short]);
+    assert.deepEqual(h.actions, [{ action: 'skip' }, { action: 'skip' }]);
+    assert.equal(h.cues, 0, 'a short addressed command is complete without prompting for another');
+  } finally { h.session.disable(); }
+});
+
+test('silence, bare titles and conversation end the turn quietly and a new call still works', async () => {
+  const feedbackCalls: string[] = [];
+  const searches: string[] = [];
+  const h = harness({},
+    {
+      playMusic: async message => { searches.push(message); return true; },
+      feedback: async (key) => { feedbackCalls.push(key); },
+    });
+  try {
+    for (const phrase of ['', '2 + 2', 'сколько будет два плюс два', 'что делаешь', 'как дела',
+      'я поговорю с ним завтра', 'сегодня отличный день', 'Монеточка', 'Radio Ga Ga']) {
+      h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
+      h.setText(phrase); await h.session.begin('alice')!.complete(audio);
+      assert.equal(h.actions.length, 0);
+      assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle', phrase);
+    }
+    assert.deepEqual(feedbackCalls, []); assert.deepEqual(searches, []);
+    h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
+    h.setText('Следующий трек'); await h.session.begin('alice')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
   } finally { h.session.disable(); }
 });
 
-test('math expressions and conversational queries never enqueue music in a voice session', async () => {
-  const feedbackCalls: string[] = [];
-  const h = harness({ classify: async () => ({ action: 'unknown', confidence: 1 }) },
-    {
-      playMusic: async () => { assert.fail('Math and conversational queries must never search for music'); },
-      feedback: async (key) => { feedbackCalls.push(key); },
-    });
+test('an exact multiword address works without a local model and leaves the song title intact', async () => {
+  const searches: string[] = [];
+  const h = harness({ supportsWake: () => false }, {
+    playMusic: async message => { searches.push(message); return true; },
+  });
   try {
-    for (const phrase of ['2 + 2', 'два плюс два', 'посчитай 2 + 2', 'сколько будет 2 + 2', 'включи 2 + 2', 'что делаешь', 'как дела', 'погода', 'включи свет', 'поставь таймер']) {
-      h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-      h.setText(phrase); await h.session.begin('alice')!.complete(audio);
-      assert.equal(h.actions.length, 0);
-      assert.equal(h.ducked, false);
-    }
-    assert.ok(feedbackCalls.every((call) => call === 'unknown'));
+    h.setName('Бот Ёнот');
+    h.setText('Bot Enot, включи песню Radio Ga Ga (Live)!');
+    await h.session.begin('alice')!.complete(audio);
+    assert.deepEqual(searches, ['включи песню Radio Ga Ga (Live)!']);
+    assert.equal(h.session.phase, 'idle'); assert.equal(h.cues, 0);
   } finally { h.session.disable(); }
 });
 
-test('compound utterance with math expression does not enqueue music', async () => {
+test('an incomplete player request gives one reply and releases the speaker', async () => {
+  const replies: string[] = [];
+  const h = harness({}, { feedback: async key => { replies.push(key); } });
+  try {
+    await h.session.begin('alice')!.complete(audio);
+    h.setText('Включи эту');
+    const command = h.session.begin('alice')!;
+    await command.complete(audio); await command.complete(audio);
+    assert.deepEqual(replies, ['unknown']); assert.deepEqual(h.actions, []);
+    assert.equal(h.session.phase, 'idle'); assert.equal(h.ducked, false);
+    h.setText('как дела'); await h.session.begin('bob')!.complete(audio);
+    assert.deepEqual(replies, ['unknown']); assert.equal(h.cues, 1);
+  } finally { h.session.disable(); }
+});
+
+test('addressing the bot with a conversational fragment closes the turn without feedback', async () => {
   const feedbackCalls: string[] = [];
   const h = harness({
     detectWake: async () => ({ wake: true, probability: 0.99 }),
     classify: async () => ({ action: 'unknown', confidence: 1 }),
     transcribe: async () => 'Бот, 2 + 2',
   }, {
-    playMusic: async () => { assert.fail('Compound math must not search for music'); },
+    playMusic: async () => { feedbackCalls.push('search'); return true; },
     feedback: async (key) => { feedbackCalls.push(key); },
   });
   try {
+    h.setName('Бот');
     const longAudio = Buffer.alloc(2000 * 32);
     await h.session.begin('alice')!.complete(longAudio);
     assert.equal(h.actions.length, 0);
-    assert.deepEqual(feedbackCalls, ['unknown']);
+    assert.deepEqual(feedbackCalls, []);
+    assert.equal(h.session.phase, 'idle'); assert.equal(h.cues, 0);
   } finally { h.session.disable(); }
 });
 
-test('neural command detector executes control actions immediately without calling STT', async () => {
+test('the command detector executes a follow-up control without a second transcription', async () => {
   let cloudTranscribed = false;
   let commandDetected = false;
   const shortWake = Buffer.alloc(800 * 32);
@@ -707,9 +1042,9 @@ test('neural command detector executes control actions immediately without calli
       commandDetected = true;
       return { class: 'pause', action: 'pause', confidence: 0.98, matched: true };
     },
-    transcribe: async () => {
-      cloudTranscribed = true;
-      return 'пауза';
+    transcribe: async (_pcm, _signal, command) => {
+      if (command) cloudTranscribed = true;
+      return command ? 'пауза' : 'Муза';
     },
   });
   try {
@@ -717,7 +1052,7 @@ test('neural command detector executes control actions immediately without calli
     assert.equal(h.session.phase, 'awaiting');
     await h.session.begin('alice')!.complete(audio);
     assert.equal(commandDetected, true, 'command detector was invoked');
-    assert.equal(cloudTranscribed, false, 'cloud STT was bypassed!');
+    assert.equal(cloudTranscribed, false, 'the command did not use STT');
     assert.deepEqual(h.actions, [{ action: 'pause' }]);
   } finally { h.session.disable(); }
 });
@@ -733,9 +1068,9 @@ test('neural command detector falls back to cloud STT for arbitrary music search
       commandDetected = true;
       return { class: 'play_search', action: 'play_search', confidence: 0.95, matched: true };
     },
-    transcribe: async () => {
-      cloudTranscribed = true;
-      return 'включи Linkin Park Numb';
+    transcribe: async (_pcm, _signal, command) => {
+      if (command) cloudTranscribed = true;
+      return command ? 'включи Linkin Park Numb' : 'Муза';
     },
   }, {
     playMusic: async () => {

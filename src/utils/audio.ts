@@ -66,9 +66,11 @@ export function musicPcmArguments({ speed = 1, startSeconds = 0 }: MusicPlayback
 
 interface EncoderMemory { inPCM: Uint16Array; inPCMPointer: number; inPCMLength: number }
 
-export function configureMusicEncoder(resource: AudioResource): void {
+export function configureMusicEncoder(resource: AudioResource, channelBitrate = MUSIC_BITRATE): void {
   const encoder = resource.encoder;
   if (!encoder) return;
+  const bitrate = Number.isFinite(channelBitrate) && channelBitrate > 0
+    ? Math.max(8_000, Math.min(MUSIC_BITRATE, Math.floor(channelBitrate))) : MUSIC_BITRATE;
   const codec: unknown = encoder.encoder;
   if (codec instanceof OpusScript) {
     const memory = codec as unknown as EncoderMemory;
@@ -76,6 +78,9 @@ export function configureMusicEncoder(resource: AudioResource): void {
     // Its helper consumes each PCM byte as a short; a 20 ms stereo frame fits
     // in this allocation when the view starts at the correct byte address.
     memory.inPCM = new Uint16Array(memory.inPCM.buffer, memory.inPCMPointer, memory.inPCMLength / 2);
+    // prism-media clamps to 16 kbps, but Discord also supports 8 kbps channels.
+    codec.setBitrate(bitrate);
+    return;
   }
-  encoder.setBitrate(MUSIC_BITRATE);
+  encoder.setBitrate(bitrate);
 }

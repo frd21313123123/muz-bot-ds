@@ -24,6 +24,24 @@ export function isWakePhrase(text: string, name: string): boolean {
   return key.length >= 2 && wakeSpelling(text) === key;
 }
 
+export function fullWakeName(name: string): string | null {
+  return isWakePhrase(name, 'бот') ? 'музыкальный бот' : null;
+}
+
+/** Null for ordinary speech, an empty string for the name alone, otherwise the original command. */
+export function afterWakeName(transcript: string, name: string): string | null {
+  const text = transcript.normalize('NFKC');
+  const words = Array.from(text.matchAll(/[\p{L}\p{N}]+/gu));
+  for (const expected of [name, fullWakeName(name)]) {
+    if (!expected) continue;
+    const last = words[normalizeSpeech(expected).split(' ').length - 1];
+    if (!last) continue;
+    const end = last.index + last[0].length;
+    if (isWakePhrase(text.slice(0, end), expected)) return text.slice(end).replace(/^[^\p{L}\p{N}]+/u, '').trim();
+  }
+  return null;
+}
+
 // Whisper can spell a Russian name in Latin letters. Accept equivalent
 // spelling without broadening the match to similar-sounding Russian words.
 const LATIN: Record<string, string> = {
