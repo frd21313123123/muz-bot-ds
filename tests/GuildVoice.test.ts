@@ -26,6 +26,7 @@ const waitFor = async (condition: () => boolean): Promise<void> => {
 function musicHarness(radioFactory?: (url: string) => ManagedAudioStream) {
   let text = 'Муза';
   const members = new Map([['alice', { displayName: 'Alice' }]]);
+  const users = new Map([['alice', { bot: false, username: 'Alice' }], ['bob', { bot: false, username: 'Bob' }]]);
   const states = new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }]]);
   const metadata = {
     related: async (_videoId: string): Promise<Track[]> => [],
@@ -34,7 +35,7 @@ function musicHarness(radioFactory?: (url: string) => ManagedAudioStream) {
   };
   const client = { queues: new Map(), user: { id: 'bot', username: 'Муза' },
     guilds: { cache: new Map([['music', { members: { cache: members, me: { displayName: 'Муза' } }, voiceStates: { cache: states } }]]) },
-    users: { cache: new Map([['alice', { bot: false, username: 'Alice' }]]) }, ytdlp: metadata,
+    users: { cache: users }, ytdlp: metadata,
   } as unknown as MusicClient;
   const runtime = Object.assign(new EventEmitter(), { ready: true,
     transcribe: async () => text,
@@ -55,7 +56,7 @@ function musicHarness(radioFactory?: (url: string) => ManagedAudioStream) {
   client.queues.set('music', queue);
   const voice = new GuildVoice(queue, runtime as unknown as VoiceRuntime); queue.voice = voice;
   voice.attach(connection);
-  return { queue, voice, runtime, metadata, states, async command(message = 'включи Numb live') {
+  return { queue, voice, runtime, metadata, states, users, async command(message = 'включи Numb live') {
     text = 'Муза'; await voice.session.begin('alice')!.complete(Buffer.from([0, 0]));
     text = message; const capture = voice.session.begin('alice')!;
     return { capture, processing: capture.complete(Buffer.from([0, 0])) };
@@ -444,7 +445,7 @@ test('leaving, voice off, stop and reset during spoken confirmation cancel audio
   }
 });
 
-test('receiver decodes real Opus, excludes other channels/bots, and releases subscriptions on off', async () => {
+test('receiver decodes real Opus, excludes self, bots, unknown users and other channels, and releases on off', async () => {
   const streams = new Map<string, PassThrough>();
   const speaking = new EventEmitter();
   const deaf: boolean[] = [];
@@ -459,7 +460,7 @@ test('receiver decodes real Opus, excludes other channels/bots, and releases sub
   const client = { queues: new Map(), user: { id: 'bot', username: 'Муза' },
     guilds: { cache: new Map([['guild-receiver', { members: { me: { displayName: 'Муза' } },
       voiceStates: { cache: new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }],
-        ['bob', { channelId: 'other' }], ['otherbot', { channelId: 'voice' }]]) } }]]) },
+        ['bob', { channelId: 'other' }], ['otherbot', { channelId: 'voice' }], ['unknown', { channelId: 'voice' }]]) } }]]) },
     users: { cache: new Map([['alice', { bot: false }], ['otherbot', { bot: true }]]) },
     ytdlp: { related: async () => [] },
   } as unknown as MusicClient;
@@ -481,9 +482,11 @@ test('receiver decodes real Opus, excludes other channels/bots, and releases sub
   const encoder = new OpusScript(16_000, 1, OpusScript.Application.VOIP);
   try {
     voice.attach(connection);
-    speaking.emit('start', 'bob'); speaking.emit('start', 'otherbot');
+    for (const id of ['bot', 'bob', 'otherbot', 'unknown']) speaking.emit('start', id);
     assert.equal(streams.size, 0);
-    const packet = encoder.encode(Buffer.alloc(640), 320);
+    const pcm = Buffer.alloc(640);
+    for (let i = 0; i < 320; i++) pcm.writeInt16LE(Math.round(3000 * Math.sin(i * 2 * Math.PI * 350 / 16_000)), i * 2);
+    const packet = encoder.encode(pcm, 320);
     speaking.emit('start', 'alice'); streams.get('alice')!.end(packet);
     await waitFor(() => voice.session.phase === 'awaiting');
     speaking.emit('start', 'alice'); streams.get('alice')!.end(packet);
@@ -542,6 +545,7 @@ function openMicHarness() {
   };
   const startSpeaking = (id: string): void => {
     h.states.set(id, { channelId: 'voice' });
+    if (!h.users.has(id)) h.users.set(id, { bot: false, username: id });
     receiver.speaking.users.set(id, Date.now());
     receiver.speaking.emit('start', id);
   };
@@ -899,7 +903,7 @@ test('only the configured wake name cues its speaker, who can answer while the c
     speaking.emit('start', 'bob');
     assert.equal(streams.has('bob'), false, 'other speakers stay ignored while the signal is audible');
     speaking.emit('start', 'alice');
-    assert.equal(voice.session.phase, 'capturing');
+    assert.equal(voice.session.phase, 'signalling', 'the command waits for actual microphone audio');
     streams.get('alice')!.end(packet);
     await waitFor(() => voice.session.phase === 'processing');
     speaking.emit('start', 'bob');

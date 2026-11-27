@@ -1,5 +1,6 @@
 import { AudioPlayerStatus, EndBehaviorType, VoiceConnectionStatus, type VoiceConnection } from '@discordjs/voice';
 import { VoiceDecoder } from './decoder.js';
+import { PlaybackEchoFilter, PlaybackEchoReference, type EchoResult } from './echo.js';
 import type { GuildQueue } from '../utils/GuildQueue.js';
 import { VoiceSession, type SpeechCapture, type VoiceDiagnostic } from './session.js';
 import type { VoiceRuntime } from './runtime.js';
@@ -9,6 +10,10 @@ import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 
 const PCM_BYTES_PER_MS = 32; // mono, 16 kHz, signed 16-bit
 const PREROLL_BYTES = 100 * PCM_BYTES_PER_MS;
+// A codec can leave a short, ambiguous transient after matched playback.
+// Require sustained voice in that case, retaining its first words in preroll.
+const MIN_RELATED_VOICE_BYTES = 100 * PCM_BYTES_PER_MS;
+const COMMAND_PREROLL_BYTES = 200 * PCM_BYTES_PER_MS;
 const MAX_RECEIVERS = 8; // bounded decoders, including idle open microphones
 const RECEIVE_RETRY_MS = [40, 120, 360] as const;
 type ReceiveFailure = 'subscribe' | 'stream_error' | 'unexpected_close' | 'decode' | 'no_audio';
@@ -19,11 +24,21 @@ function frameRms(pcm: Buffer): number {
   return Math.sqrt(energy / (pcm.length / 2));
 }
 
+function voicedBytes(pcm: Buffer): number {
+  let bytes = 0;
+  for (let offset = 0; offset < pcm.length; offset += 20 * PCM_BYTES_PER_MS) {
+    const frame = pcm.subarray(offset, offset + 20 * PCM_BYTES_PER_MS);
+    if (frameRms(frame) > 12) bytes += frame.length;
+  }
+  return bytes;
+}
+
 export class GuildVoice {
   readonly session: VoiceSession;
   enabled = true;
   private listeningRequested = true;
   private connection: VoiceConnection | null = null;
+  private readonly playback = new PlaybackEchoReference();
   private captures = new Map<string, { release(): void; dormant(): boolean }>();
   private lastInput = new Map<string, { at: number; message: string }>();
   private speakerRefresh?: ReturnType<typeof setTimeout>;
@@ -45,6 +60,7 @@ export class GuildVoice {
   };
   private readonly unavailable = (): void => {
     this.enabled = false;
+    this.playback.clear();
     this.detachSpeaking();
     this.session.backendUnavailable();
     for (const capture of [...this.captures.values()]) capture.release();
@@ -59,6 +75,13 @@ export class GuildVoice {
     this.session = this.newSession();
     runtime.on('unavailable', this.unavailable);
     runtime.on('available', this.available);
+  }
+
+  /** Post-volume audio read by the player, never the buffered source stream. */
+  observePlayback(pcm: Buffer): void {
+    if (this.enabled && this.runtime.ready && this.connection?.state.status === VoiceConnectionStatus.Ready) {
+      this.playback.append(pcm);
+    }
   }
 
   private noteInput(userId: string, message: string): void {
@@ -235,6 +258,7 @@ export class GuildVoice {
 
   suspend(): void {
     this.lastInput.clear();
+    this.playback.clear();
     this.detachSpeaking();
     this.connection = null;
     this.session.cancel();
@@ -275,9 +299,12 @@ export class GuildVoice {
     const channelId = this.queue.voiceChannel?.id;
     if (this.queue.closed || !channelId || !clientUserId || !userId || userId === clientUserId) return false;
     const guild = this.queue.client.guilds.cache.get(this.queue.guildId);
+    const user = this.queue.client.users.cache.get(userId);
+    const memberUser = guild?.members?.cache?.get(userId)?.user;
     return guild?.voiceStates.cache.get(clientUserId)?.channelId === channelId
       && guild.voiceStates.cache.get(userId)?.channelId === channelId
-      && !this.queue.client.users.cache.get(userId)?.bot && !guild.members?.cache?.get(userId)?.user?.bot;
+      && user?.bot !== true && memberUser?.bot !== true
+      && (user?.bot === false || memberUser?.bot === false);
   }
 
   private scheduleSpeakerRefresh(delay = 0): void {
@@ -342,26 +369,31 @@ export class GuildVoice {
     }
     if (!this.enabled || !this.runtime.ready || !this.connection
       || this.connection.state.status !== VoiceConnectionStatus.Ready || this.captures.has(userId)) return;
-    const capture = this.session.begin(userId);
-    if (!capture) {
+    if (!this.present(userId)) return;
+    // A cue reflected by the caller's microphone must not claim (and then
+    // cancel) their one command. Wait for audio that survives echo removal.
+    const waitingForCommand = this.session.awaits(userId);
+    const capture = waitingForCommand ? null : this.session.begin(userId);
+    if (!capture && !waitingForCommand) {
       if (this.present(userId) && this.session.phase !== 'idle') this.noteInput(userId, 'шло предыдущее обращение.');
       return;
     }
     this.noteInput(userId, 'Discord сообщил о начале речи.');
     if (this.captures.size >= MAX_RECEIVERS) {
       const idle = [...this.captures.entries()].find(([id, entry]) => entry.dormant() && !this.session.awaits(id));
-      if (!idle) { capture.cancel(); return; }
+      if (!idle) { capture?.cancel(); return; }
       idle[1].release();
     }
-    try { this.capture(userId, capture); }
+    try { this.capture(userId, capture, waitingForCommand); }
     catch {
       this.receiverFailure(userId, 'subscribe', this.session.phase === 'idle', false);
-      capture.cancel();
+      capture?.cancel();
     }
   }
 
-  private capture(userId: string, first: SpeechCapture | null): void {
+  private capture(userId: string, first: SpeechCapture | null, freshCommand = false): void {
     const decoder = new VoiceDecoder();
+    const echo = new PlaybackEchoFilter(this.playback);
     const end = { behavior: EndBehaviorType.AfterSilence as const, duration: first?.silenceMs ?? 400 };
     let stream;
     try {
@@ -374,9 +406,10 @@ export class GuildVoice {
     let active: SpeechCapture | null = null;
     let chunks: Buffer[] = [];
     let bytes = 0;
-    let quiet = 0, peak = 0, foundOnset = false;
+    let quiet = 0, peak = 0, foundOnset = false, hasVoice = false;
+    let voiceBytes = 0, candidateVoiceBytes = 0;
     let noise: number | undefined, lastRms = 0;
-    let calibrateBytes = first ? 0 : PREROLL_BYTES;
+    let calibrateBytes = first || freshCommand ? 0 : PREROLL_BYTES;
     let lead: Buffer[] = [], leadBytes = 0;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     let released = false;
@@ -385,13 +418,14 @@ export class GuildVoice {
       clearTimeout(deadline);
       active?.signal.removeEventListener('abort', detach);
       active = null;
-      chunks = []; bytes = 0; peak = 0; quiet = 0; foundOnset = false;
+      chunks = []; bytes = 0; peak = 0; quiet = 0; foundOnset = false; hasVoice = false;
+      voiceBytes = 0; candidateVoiceBytes = 0;
       lead = []; leadBytes = 0;
     };
     const finish = (complete: boolean): void => {
       const current = active;
       if (!current) return;
-      const pcm = complete && bytes ? Buffer.concat(chunks, bytes) : null;
+      const pcm = complete && bytes && hasVoice ? Buffer.concat(chunks, bytes) : null;
       detach();
       noise = lastRms;
       if (pcm) void current.complete(pcm); else current.cancel();
@@ -404,6 +438,7 @@ export class GuildVoice {
       stream.removeListener('data', data);
       stream.destroy();
       decoder.delete();
+      echo.reset();
       lead = [];
       this.captures.delete(userId);
     };
@@ -424,48 +459,77 @@ export class GuildVoice {
       next.signal.addEventListener('abort', detach, { once: true });
       setDeadline(next);
     };
+    const accept = ({ pcm, echoOnly, echoRelated = false }: EchoResult): void => {
+      if (!pcm.length) return;
+      if (echoOnly) {
+        this.noteInput(userId, 'подавлено эхо собственного воспроизведения.');
+        if (active && !hasVoice) finish(false);
+        candidateVoiceBytes = 0;
+        if (!active) { lead = []; leadBytes = 0; }
+      } else if (active && bytes === 0) this.noteInput(userId, 'бот получил звук.');
+      const rms = lastRms = frameRms(pcm);
+      const voiced = echoOnly ? 0 : voicedBytes(pcm);
+      if (calibrateBytes > 0) {
+        calibrateBytes -= pcm.length;
+        noise = rms;
+        return;
+      }
+      if (!active && !this.session.awaits(userId) && (this.session.phase !== 'idle' || this.queue.isSpeakingVoiceAudio)) {
+        noise = rms; lead = []; leadBytes = 0;
+        return;
+      }
+      const floor = noise ?? rms;
+      const rise = rms > Math.max(12, floor * 2.5);
+      // Track quieter frames quickly and a rising background slowly. Both
+      // onset and endpoint are relative to this microphone's own levels.
+      const frameMs = pcm.length / PCM_BYTES_PER_MS;
+      noise = floor + (rms - floor) * (1 - Math.exp(-frameMs / (rms < floor ? 80 : 800)));
+      const awaitingCommand = !active && this.session.awaits(userId);
+      if (awaitingCommand) {
+        if (!voiced) candidateVoiceBytes = 0;
+        else if (candidateVoiceBytes || rise || freshCommand) candidateVoiceBytes += voiced;
+      }
+      const commandReady = awaitingCommand && candidateVoiceBytes > 0
+        && (!echoRelated || candidateVoiceBytes >= MIN_RELATED_VOICE_BYTES);
+      if (!active && !echoOnly && (awaitingCommand ? commandReady : rise)) {
+        const next = this.session.begin(userId);
+        if (next) {
+          start(next);
+          if (awaitingCommand) {
+            chunks = [...lead]; bytes = leadBytes;
+            voiceBytes = Math.max(0, candidateVoiceBytes - voiced);
+            peak = lead.reduce((value, frame) => Math.max(value, frameRms(frame)), 0);
+            foundOnset = true;
+          }
+          freshCommand = false; candidateVoiceBytes = 0;
+        }
+      }
+      if (active) {
+        if (rise && !foundOnset) {
+          foundOnset = true;
+          if (bytes <= PREROLL_BYTES || peak < Math.max(24, floor * 2)) {
+            if (bytes > leadBytes) setDeadline(active);
+            chunks = [...lead]; bytes = leadBytes;
+          }
+        }
+        chunks.push(pcm); bytes += pcm.length;
+        voiceBytes += voiced;
+        hasVoice ||= voiced > 0 && (!echoRelated || voiceBytes >= MIN_RELATED_VOICE_BYTES);
+        peak = Math.max(peak, rms);
+        quiet = peak > 12 && rms < Math.max(6, peak * 0.3) ? quiet + pcm.length : 0;
+        if (bytes > active.maxMs * PCM_BYTES_PER_MS) finish(false);
+        else if (quiet >= active.silenceMs * PCM_BYTES_PER_MS) finish(true);
+      }
+      lead.push(pcm); leadBytes += pcm.length;
+      const preroll = candidateVoiceBytes ? COMMAND_PREROLL_BYTES : PREROLL_BYTES;
+      while (leadBytes > preroll) leadBytes -= lead.shift()!.length;
+    };
     const data = (packet: Buffer): void => {
       try {
-        const pcm = decoder.decode(packet);
-        if (!pcm) return;
-        if (active && bytes === 0) this.noteInput(userId, 'бот получил звук.');
+        const decoded = decoder.decode(packet);
+        if (!decoded) return;
         if (!first && noise === undefined) clearTimeout(deadline);
-        const rms = lastRms = frameRms(pcm);
-        if (calibrateBytes > 0) {
-          calibrateBytes -= pcm.length;
-          noise = rms;
-          return;
-        }
-        if (!active && !this.session.awaits(userId) && (this.session.phase !== 'idle' || this.queue.isSpeakingVoiceAudio)) {
-          noise = rms; lead = []; leadBytes = 0;
-          return;
-        }
-        const floor = noise ?? rms;
-        const rise = rms > Math.max(12, floor * 2.5);
-        // Track quieter frames quickly and a rising background slowly. Both
-        // onset and endpoint are relative to this microphone's own levels.
-        const frameMs = pcm.length / PCM_BYTES_PER_MS;
-        noise = floor + (rms - floor) * (1 - Math.exp(-frameMs / (rms < floor ? 80 : 800)));
-        if (!active && rise) {
-          const next = this.session.begin(userId);
-          if (next) start(next);
-        }
-        if (active) {
-          if (rise && !foundOnset) {
-            foundOnset = true;
-            if (bytes <= PREROLL_BYTES || peak < Math.max(24, floor * 2)) {
-              if (bytes > leadBytes) setDeadline(active);
-              chunks = [...lead]; bytes = leadBytes;
-            }
-          }
-          chunks.push(pcm); bytes += pcm.length;
-          peak = Math.max(peak, rms);
-          quiet = peak > 12 && rms < Math.max(6, peak * 0.3) ? quiet + pcm.length : 0;
-          if (bytes > active.maxMs * PCM_BYTES_PER_MS) finish(false);
-          else if (quiet >= active.silenceMs * PCM_BYTES_PER_MS) finish(true);
-        }
-        lead.push(pcm); leadBytes += pcm.length;
-        while (leadBytes > PREROLL_BYTES) leadBytes -= lead.shift()!.length;
+        accept(echo.process(decoded));
       } catch { failed('decode'); }
     };
     if (first) start(first);
@@ -477,6 +541,7 @@ export class GuildVoice {
     stream.on('error', () => failed('stream_error'));
     stream.once('end', () => {
       if (released) return;
+      try { accept(echo.flush()); } catch { failed('decode'); return; }
       finish(true);
       release();
     });

@@ -8,6 +8,9 @@ import { GuildQueue } from '../src/utils/GuildQueue.js';
 import type { MusicClient, Track } from '../src/types.js';
 import type { ManagedAudioStream } from '../src/utils/stream.js';
 import type { MusicPlaybackOptions } from '../src/utils/audio.js';
+import { VoiceDecoder } from '../src/voice/decoder.js';
+import type { GuildVoice } from '../src/voice/GuildVoice.js';
+import { radioStations } from '../src/utils/radio.js';
 
 const track = (id: string): Track => ({
   videoId: id, url: `https://www.youtube.com/watch?v=${id}`, title: id,
@@ -562,6 +565,124 @@ function attachPlayback(queue: GuildQueue, onPacket?: (source: 'music' | 'cue', 
   connection.subscribe(queue.player);
   return packets;
 }
+
+function playbackTone(frames = 50): Buffer {
+  const pcm = Buffer.alloc(3840 * frames);
+  for (let sample = 0; sample < pcm.length / 4; sample++) {
+    const value = Math.round(6000 * Math.sin(sample * 2 * Math.PI * 440 / 48_000));
+    pcm.writeInt16LE(value, sample * 4);
+    pcm.writeInt16LE(value, sample * 4 + 2);
+  }
+  return pcm;
+}
+
+test('echo references follow consumed music, cues, voice clips and radio, and release every decoder', async context => {
+  const decoders = new Set<VoiceDecoder>(), deleted = new Set<VoiceDecoder>();
+  const decodedPackets: Buffer[] = [], references: Buffer[] = [];
+  const decode = VoiceDecoder.prototype.decode, dispose = VoiceDecoder.prototype.delete;
+  context.mock.method(VoiceDecoder.prototype, 'decode', function(this: VoiceDecoder, packet: Buffer) {
+    decoders.add(this); decodedPackets.push(Buffer.from(packet));
+    return decode.call(this, packet);
+  });
+  context.mock.method(VoiceDecoder.prototype, 'delete', function(this: VoiceDecoder) {
+    deleted.add(this); dispose.call(this);
+  });
+  const raw = new PassThrough();
+  const queue = new GuildQueue('guild-playback-reference', { queues: new Map() } as unknown as MusicClient,
+    () => ({ stream: raw, type: StreamType.Raw, destroy: () => raw.destroy() }), {
+      factory: () => {
+        const stream = new PassThrough(); stream.write(playbackTone());
+        return { stream, type: StreamType.Raw, destroy: () => stream.destroy() };
+      },
+    });
+  queue.volume = 0.25;
+  const voice = { enabled: true, observePlayback: (pcm: Buffer) => { references.push(pcm); },
+    destroy: () => { voice.enabled = false; } };
+  queue.voice = voice as unknown as GuildVoice;
+  const silencePadding = Buffer.from([0xf8, 0xff, 0xfe]);
+  let matched = 0;
+  const packets = attachPlayback(queue, (_source, packet) => {
+    if (packet.equals(silencePadding)) return;
+    assert.equal(references.length, ++matched, 'buffered source audio must not be observed before its packet is played');
+    assert.deepEqual(decodedPackets.at(-1), packet, 'reference is decoded from the post-volume outgoing Opus packet');
+    assert.equal(references.at(-1)?.length, 640, 'the playback reference uses 16 kHz mono PCM');
+  });
+  try {
+    await queue.addTrack(track('aaaaaaaaaaa'));
+    assert.equal(queue.player.state.status, AudioPlayerStatus.Buffering);
+    assert.equal(references.length, 0);
+    raw.write(playbackTone(150));
+    await waitFor(() => references.length >= 5);
+    const steady = references[4]!;
+    let energy = 0;
+    for (let i = 0; i < steady.length; i += 2) energy += steady.readInt16LE(i) ** 2;
+    const rms = Math.sqrt(energy / (steady.length / 2));
+    assert.ok(rms > 500 && rms < 1800, 'the reference includes the selected 25% playback volume');
+    assert.equal(decoders.size, 1);
+
+    assert.equal(queue.pause(), true);
+    const pausedReferences = references.length;
+    const original = queue.player.state;
+    const pausedDuration = original.resource.playbackDuration;
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.equal(references.length, pausedReferences, 'paused music and its queued PCM produce no reference');
+    assert.equal(original.resource.playbackDuration, pausedDuration);
+
+    await queue.playVoiceCue(new AbortController().signal);
+    assert.ok(references.length > pausedReferences);
+    assert.equal(decoders.size, 2, 'the cue has its own Opus decoder state');
+    assert.equal(original.resource.playbackDuration, pausedDuration, 'music is not observed while the cue owns the connection');
+    await queue.playVoiceAudio(playbackTone(8), new AbortController().signal);
+    assert.equal(decoders.size, 3, 'arbitrary TTS/effect clips are observed too');
+    assert.equal(queue.isPaused, true);
+
+    const beforeResume = references.length;
+    assert.equal(queue.resume(), true);
+    await waitFor(() => references.length > beforeResume);
+    assert.equal(decoders.size, 3, 'resuming the same track preserves its decoder');
+    const beforeRadio = references.length;
+    await queue.playRadio(radioStations[0]!, 'Tester');
+    await waitFor(() => references.length >= beforeRadio + 3);
+    assert.equal(queue.isRadio, true);
+    assert.equal(decoders.size, 4, 'radio uses the same playback observer');
+    assert.ok(packets.music > 0 && packets.cue > 0);
+  } finally {
+    await queue.stop();
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  assert.deepEqual(deleted, decoders, 'finished, replaced and stopped resources release their private decoder');
+});
+
+test('playback observation can start mid-track and failures never interrupt audible playback', async () => {
+  const raw = new PassThrough();
+  const queue = new GuildQueue('guild-reference-toggle', { queues: new Map() } as unknown as MusicClient,
+    () => ({ stream: raw, type: StreamType.Raw, destroy: () => raw.destroy() }));
+  let observed = 0, fail = false;
+  const voice = { enabled: false, observePlayback: () => { observed++; if (fail) throw new Error('fixture observer failure'); },
+    destroy: () => { voice.enabled = false; } };
+  queue.voice = voice as unknown as GuildVoice;
+  const packets = attachPlayback(queue);
+  try {
+    await queue.addTrack(track('aaaaaaaaaaa')); raw.write(playbackTone(150));
+    await waitFor(() => packets.music >= 3);
+    assert.equal(observed, 0, 'voice off does not decode playback');
+    voice.enabled = true;
+    await waitFor(() => observed >= 3);
+    voice.enabled = false;
+    const beforeDisable = observed, disabledPackets = packets.music;
+    await waitFor(() => packets.music >= disabledPackets + 3);
+    assert.equal(observed, beforeDisable);
+    voice.enabled = true; fail = true;
+    const beforeFailure = packets.music;
+    await waitFor(() => packets.music >= beforeFailure + 3);
+    assert.ok(observed > beforeDisable, 're-enabling voice attaches to the live playback position');
+    assert.equal(queue.currentTrack?.videoId, 'aaaaaaaaaaa');
+    assert.equal(queue.player.state.status, AudioPlayerStatus.Playing);
+    fail = false;
+    const beforeRecovery = observed;
+    await waitFor(() => observed >= beforeRecovery + 3);
+  } finally { await queue.stop(); }
+});
 
 test('music and wake cues honour the channel bitrate and stay at 128 kbps when the limit is higher or missing', async () => {
   // Independent, repeatable stereo noise keeps the VBR encoder busy at both bitrates.
