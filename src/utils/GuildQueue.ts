@@ -12,6 +12,7 @@ import { TrackQueue } from './TrackQueue.js';
 import { PlayerMessage } from './PlayerMessage.js';
 import { Readable } from 'node:stream';
 import { GuildVoice } from '../voice/GuildVoice.js';
+import { VoiceDecoder } from '../voice/decoder.js';
 import { configureMusicEncoder, validateSpeed, type MusicPlaybackOptions } from './audio.js';
 import { formatDuration, parseDuration, videoDuration } from './duration.js';
 import { isLiveVideo } from './ytdlp.js';
@@ -196,6 +197,46 @@ export class GuildQueue {
     }
   }
 
+  private observePlayback(resource: ReturnType<typeof createAudioResource>): void {
+    // Read the encoded, volume-adjusted packet when the player consumes it.
+    // Observing the input stream would run ahead of playback and include
+    // prefetched audio, paused tracks, and music temporarily replaced by a cue.
+    const read = resource.read;
+    let decoder: VoiceDecoder | null = null;
+    const release = (): void => { decoder?.delete(); decoder = null; };
+    const cleanup = (): void => {
+      release();
+      resource.read = read;
+      resource.playStream.off('end', cleanup);
+      resource.playStream.off('close', cleanup);
+      resource.playStream.off('error', cleanup);
+    };
+    resource.playStream.once('end', cleanup);
+    resource.playStream.once('close', cleanup);
+    resource.playStream.once('error', cleanup);
+    resource.read = (): Buffer | null => {
+      const packet = read.call(resource);
+      const voice = this.voice;
+      const connection = this.connection;
+      if (this.closed || !voice?.enabled || connection?.state.status !== VoiceConnectionStatus.Ready
+        || !resource.audioPlayer?.playable.includes(connection)) {
+        release();
+        return packet;
+      }
+      if (packet) {
+        try {
+          decoder ??= new VoiceDecoder();
+          const pcm = decoder.decode(packet);
+          if (pcm) voice.observePlayback(pcm);
+        } catch {
+          // Echo protection must never stop music or break the player timer.
+          release();
+        }
+      }
+      return packet;
+    };
+  }
+
   async playVoiceCue(signal: AbortSignal): Promise<void> {
     // playVoiceAudio copies its input, so the constant tone is shared.
     await this.playVoiceAudio(voiceCueTone(), signal, 2000, 'reject');
@@ -218,6 +259,7 @@ export class GuildQueue {
       { inputType: StreamType.Raw, inlineVolume: true });
     resource.volume?.setVolume(this.volume);
     configureMusicEncoder(resource, this.voiceChannel?.bitrate);
+    this.observePlayback(resource);
     this.pauseRequested = this.isPaused;
     this.speakingVoiceAudioUntil = performance.now() + timeoutMs;
     await new Promise<void>((resolve, reject) => {
@@ -462,6 +504,7 @@ export class GuildQueue {
       const input = media.type === StreamType.Raw ? pcmForEncoding(media.stream) : media.stream;
       resource = createAudioResource(input, { inputType: media.type, inlineVolume: true });
       configureMusicEncoder(resource, this.voiceChannel?.bitrate);
+      this.observePlayback(resource);
     } catch (error) {
       media.destroy();
       throw error;
