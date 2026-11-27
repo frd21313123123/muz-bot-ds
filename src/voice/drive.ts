@@ -1,18 +1,25 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { speechWav } from './groq.js';
 
 export const VOICE_DRIVE_FOLDER = '1uPQIM_CO3MTFmvSFV-Y93stxlNuLs3JP';
+const execFileAsync = promisify(execFile);
+
 interface DriveOptions {
   enabled?: boolean;
   folderId?: string;
-  clientId?: string;
-  clientSecret?: string;
-  refreshToken?: string;
+  remote?: string;
+  rclonePath?: string;
   directory?: string;
-  fetch?: typeof fetch;
+  runRclone?: (executable: string, args: string[]) => Promise<void>;
   retryMs?: number;
+}
+
+async function runRclone(executable: string, args: string[]): Promise<void> {
+  await execFileAsync(executable, args, { timeout: 20_000, windowsHide: true });
 }
 
 // Persist first; network failures and bot restarts must not discard recordings.
@@ -21,26 +28,25 @@ export class VoiceDriveArchive {
   readonly configured: boolean;
   private readonly folderId: string;
   private readonly directory: string;
-  private readonly clientId: string;
-  private readonly clientSecret: string;
-  private readonly refreshToken: string;
+  private readonly remote: string;
+  private readonly rclonePath: string;
   private writes = Promise.resolve();
   private pendingWrites = 0;
   private upload: Promise<void> | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
-  private token = '';
-  private expiresAt = 0;
 
   constructor(private readonly options: DriveOptions = {}) {
     this.enabled = options.enabled ?? process.env.VOICE_AUDIO_DRIVE === '1';
     this.folderId = options.folderId ?? process.env.GOOGLE_DRIVE_FOLDER_ID?.trim() ?? VOICE_DRIVE_FOLDER;
     this.directory = options.directory ?? path.resolve('.runtime/voice-drive', this.folderId);
-    this.clientId = options.clientId ?? process.env.GOOGLE_DRIVE_CLIENT_ID?.trim() ?? '';
-    this.clientSecret = options.clientSecret ?? process.env.GOOGLE_DRIVE_CLIENT_SECRET?.trim() ?? '';
-    this.refreshToken = options.refreshToken ?? process.env.GOOGLE_DRIVE_REFRESH_TOKEN?.trim() ?? '';
-    this.configured = Boolean(this.clientId && this.clientSecret && this.refreshToken);
+    this.remote = options.remote ?? process.env.VOICE_AUDIO_RCLONE_REMOTE?.trim() ?? '';
+    this.rclonePath = options.rclonePath ?? (process.env.RCLONE_PATH?.trim() || 'rclone');
+    this.configured = this.remote !== '';
     if (!/^[\w-]+$/.test(this.folderId)) throw new Error('Invalid GOOGLE_DRIVE_FOLDER_ID');
+    if (this.configured && !/^[\w][\w-]*$/.test(this.remote)) {
+      throw new Error('Invalid VOICE_AUDIO_RCLONE_REMOTE: expected a remote name without a colon');
+    }
   }
 
   start(): void { if (this.enabled && !this.stopped) this.pump(); }
@@ -74,8 +80,9 @@ export class VoiceDriveArchive {
 
   private pump(): void {
     if (this.stopped || this.upload || this.retry || !this.configured) return;
-    this.upload = this.drain().catch(() => {
-      console.error('[Drive] Загрузка не удалась; WAV сохранён локально, повтор через минуту.');
+    this.upload = this.drain().catch((error: NodeJS.ErrnoException) => {
+      const reason = error.code === 'ENOENT' ? ' Исполняемый файл rclone не найден.' : '';
+      console.error(`[Drive] Загрузка через rclone не удалась; WAV сохранён локально, повтор через минуту.${reason}`);
       if (!this.stopped) {
         this.retry = setTimeout(() => { this.retry = null; this.pump(); }, this.options.retryMs ?? 60_000);
         this.retry.unref();
@@ -90,24 +97,6 @@ export class VoiceDriveArchive {
     });
   }
 
-  private async accessToken(): Promise<string> {
-    if (this.token && Date.now() < this.expiresAt) return this.token;
-    const response = await (this.options.fetch ?? fetch)('https://oauth2.googleapis.com/token', {
-      method: 'POST', body: new URLSearchParams({ grant_type: 'refresh_token',
-        client_id: this.clientId, client_secret: this.clientSecret, refresh_token: this.refreshToken }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) { await response.body?.cancel(); throw new Error('Drive authorization failed'); }
-    const value = await response.json() as { access_token?: unknown; expires_in?: unknown };
-    if (typeof value.access_token !== 'string' || !value.access_token
-      || typeof value.expires_in !== 'number' || !Number.isFinite(value.expires_in) || value.expires_in <= 0) {
-      throw new Error('Invalid Drive token');
-    }
-    this.token = value.access_token;
-    this.expiresAt = Date.now() + Math.max(0, value.expires_in - 60) * 1000;
-    return this.token;
-  }
-
   private async drain(): Promise<void> {
     const names = await readdir(this.directory).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return [];
@@ -117,27 +106,10 @@ export class VoiceDriveArchive {
       if (this.stopped) return;
       if (!/^command-[\w-]+\.wav$/.test(name)) continue;
       const file = path.join(this.directory, name);
-      const wav = await readFile(file);
-      const token = await this.accessToken();
-      const boundary = `voice_${randomUUID()}`;
-      const metadata = JSON.stringify({ name, mimeType: 'audio/wav', parents: [this.folderId] });
-      const body = Buffer.concat([
-        Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`),
-        Buffer.from(`--${boundary}\r\nContent-Type: audio/wav\r\n\r\n`), wav,
-        Buffer.from(`\r\n--${boundary}--\r\n`),
+      await (this.options.runRclone ?? runRclone)(this.rclonePath, [
+        'copyto', path.resolve(file), `${this.remote}:${name}`,
+        '--drive-root-folder-id', this.folderId, '--checksum', '--retries', '1', '--dry-run=false',
       ]);
-      const response = await (this.options.fetch ?? fetch)(
-        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id', {
-          method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
-          body: new Uint8Array(body), signal: AbortSignal.timeout(20_000),
-        });
-      if (!response.ok) {
-        if (response.status === 401) { this.token = ''; this.expiresAt = 0; }
-        await response.body?.cancel();
-        throw new Error('Drive upload failed');
-      }
-      const result = await response.json() as { id?: unknown };
-      if (typeof result.id !== 'string' || !result.id) throw new Error('Invalid Drive upload response');
       await unlink(file);
     }
   }

@@ -20,10 +20,10 @@ async function until(check: () => Promise<boolean>): Promise<void> {
   assert.fail('Timed out waiting for archive');
 }
 
-test('archive is opt-in and stores a snapshot as a valid WAV without Google credentials', async () => {
+test('archive is opt-in and stores a snapshot as a valid WAV without an rclone remote', async () => {
   const root = await temporaryDirectory();
   const off = new VoiceDriveArchive({ directory: path.join(root, 'off'), enabled: false });
-  const archive = new VoiceDriveArchive({ directory: root, enabled: true, clientId: '', clientSecret: '', refreshToken: '' });
+  const archive = new VoiceDriveArchive({ directory: root, enabled: true, remote: '' });
   try {
     off.append(pcm); await off.flush();
     await assert.rejects(readdir(path.join(root, 'off')));
@@ -35,47 +35,47 @@ test('archive is opt-in and stores a snapshot as a valid WAV without Google cred
   } finally { await archive.close(); await off.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('archive uploads WAV into the requested folder, caches tokens and removes only successful uploads', async () => {
+test('archive copies WAV to the configured remote and folder before removing the local file', async () => {
   const root = await temporaryDirectory();
-  let tokens = 0, uploads = 0;
+  let uploads = 0;
   let release: (() => void) | undefined;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const mock = (async (url: string | URL | Request, init?: RequestInit) => {
-    if (String(url).includes('oauth2')) {
-      tokens++;
-      assert.equal((init!.body as URLSearchParams).get('refresh_token'), 'refresh');
-      return Response.json({ access_token: 'access', expires_in: 3600 });
-    }
-    uploads++;
-    assert.match(String(url), /uploadType=multipart/);
-    assert.equal((init!.headers as Record<string, string>).Authorization, 'Bearer access');
-    const body = Buffer.from(init!.body as Uint8Array);
-    assert.ok(body.includes(Buffer.from(JSON.stringify([VOICE_DRIVE_FOLDER]))));
-    assert.ok(body.includes(speechWav(pcm)));
-    if (uploads === 1) await gate;
-    return Response.json({ id: `file-${uploads}` });
-  }) as typeof fetch;
-  const archive = new VoiceDriveArchive({ directory: root, enabled: true, clientId: 'client',
-    clientSecret: 'secret', refreshToken: 'refresh', fetch: mock });
+  const archive = new VoiceDriveArchive({
+    directory: root, enabled: true, remote: 'voice-drive', rclonePath: 'test-rclone',
+    runRclone: async (executable, args) => {
+      const file = args[1]!;
+      assert.equal(executable, 'test-rclone');
+      assert.deepEqual(args, [
+        'copyto', file, `voice-drive:${path.basename(file)}`,
+        '--drive-root-folder-id', VOICE_DRIVE_FOLDER, '--checksum', '--retries', '1', '--dry-run=false',
+      ]);
+      assert.equal(path.dirname(file), root);
+      assert.deepEqual(await readFile(file), speechWav(pcm));
+      uploads++;
+      if (uploads === 1) await gate;
+    },
+  });
   try {
     archive.append(pcm); archive.append(pcm); await archive.flush();
     await until(async () => uploads === 1);
     assert.equal((await readdir(root)).length, 2);
     release!();
     await until(async () => (await readdir(root)).length === 0);
-    assert.equal(uploads, 2); assert.equal(tokens, 1);
+    assert.equal(uploads, 2);
   } finally { release!(); await archive.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test('failed uploads survive shutdown and are recovered on the next start', async () => {
   const root = await temporaryDirectory();
   let uploads = 0;
-  const mock = (async (url: string | URL | Request) => {
-    if (String(url).includes('oauth2')) return Response.json({ access_token: 'access', expires_in: 3600 });
-    uploads++;
-    return uploads === 1 ? new Response('', { status: 503 }) : Response.json({ id: 'recovered' });
-  }) as typeof fetch;
-  const options = { directory: root, enabled: true, clientId: 'client', clientSecret: 'secret', refreshToken: 'refresh', fetch: mock };
+  const destinations: string[] = [];
+  const options = {
+    directory: root, enabled: true, remote: 'voice-drive',
+    runRclone: async (_executable: string, args: string[]) => {
+      destinations.push(args[2]!);
+      if (++uploads === 1) throw new Error('rclone failed');
+    },
+  };
   const first = new VoiceDriveArchive(options);
   let second: VoiceDriveArchive | undefined;
   try {
@@ -86,5 +86,6 @@ test('failed uploads survive shutdown and are recovered on the next start', asyn
     second = new VoiceDriveArchive(options); second.start();
     await until(async () => (await readdir(root)).length === 0);
     assert.equal(uploads, 2);
+    assert.equal(destinations[0], destinations[1]);
   } finally { await first.close(); await second?.close(); await rm(root, { recursive: true, force: true }); }
 });

@@ -41,8 +41,8 @@ async function main(): Promise<void> {
   client.voiceDriveArchive = new VoiceDriveArchive();
   client.voiceDriveArchive.start();
   if (client.voiceDriveArchive.enabled) console.log(client.voiceDriveArchive.configured
-    ? '[Drive] Сохранение голосовых команд в WAV и загрузка в Google Drive включены.'
-    : '[Drive] WAV сохраняются локально; для загрузки настройте GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET и GOOGLE_DRIVE_REFRESH_TOKEN.');
+    ? '[Drive] Голосовые команды сохраняются в WAV и отправляются в Google Drive через rclone.'
+    : '[Drive] WAV сохраняются локально. Для загрузки укажите VOICE_AUDIO_RCLONE_REMOTE.');
   if (client.voiceTrainingLog.enabled) console.log('[NLI] Учебный журнал команд включён: .runtime/nli (текст, без аудио).');
   const tts = new LocalTts();
   client.voiceTts = tts;

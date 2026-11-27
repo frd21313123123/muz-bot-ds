@@ -241,23 +241,19 @@ npm run export:nli -- .runtime/reviewed.jsonl .runtime/nli-reviewed.jsonl
 
 `VOICE_AUDIO_DRIVE=1` сохраняет входной звук, переданный в STT после активации wake word, в WAV (PCM16, моно, 16 кГц). Отдельное обращение и разговоры до активации не сохраняются. Если имя и команда произнесены вместе, вся реплика попадает в архив после подтверждения имени в расшифровке. Команда, произнесённая после сигнала, попадает в архив до распознавания, включая случаи ошибки STT. Архивирование не записывает озвученные ответы TTS.
 
-В `.env` задайте:
+Установите [rclone](https://rclone.org/install/) на машине с ботом. Выполните `rclone config` от имени пользователя, который запускает бота. Создайте remote `voice-drive` типа `drive`, выберите scope `drive` для доступа к существующей папке и войдите в Google-аккаунт с правом записи в неё. При настройке OAuth-клиента следуйте [инструкции rclone для Google Drive](https://rclone.org/drive/).
+
+Добавьте в `.env`:
 
 ```dotenv
 VOICE_AUDIO_DRIVE=1
 GOOGLE_DRIVE_FOLDER_ID=1uPQIM_CO3MTFmvSFV-Y93stxlNuLs3JP
-GOOGLE_DRIVE_CLIENT_ID=
-GOOGLE_DRIVE_CLIENT_SECRET=
-GOOGLE_DRIVE_REFRESH_TOKEN=
+VOICE_AUDIO_RCLONE_REMOTE=voice-drive
 ```
 
-Для личного Google Drive используйте OAuth аккаунта с правом добавлять файлы в указанную папку. Подключение Google Drive в Codex не передаёт авторизацию запущенному Discord-боту.
+При необходимости задайте `RCLONE_PATH` с путём к исполняемому файлу и `RCLONE_CONFIG` с путём к `rclone.conf`. Для запуска через systemd используйте конфигурацию в доступной сервису папке, например `/srv/muz-bot-ds/.runtime/rclone.conf`, с правами чтения и записи для пользователя бота. rclone хранит и обновляет OAuth-токен в этом файле. Храните его вне Git. После настройки перезапустите бота.
 
-1. В [Google Cloud Console](https://console.cloud.google.com/apis/library/drive.googleapis.com) включите Google Drive API, настройте OAuth consent screen и создайте OAuth client типа Web application. Добавьте разрешённый redirect URI `https://developers.google.com/oauthplayground`.
-2. В [OAuth Playground](https://developers.google.com/oauthplayground/) откройте настройки, включите **Use your own OAuth credentials**, укажите Client ID и Client Secret своего клиента. Выберите offline access. Запросите scope `https://www.googleapis.com/auth/drive`, авторизуйте аккаунт с доступом к папке и выполните **Exchange authorization code for tokens**. Полный scope нужен для существующей папки, которая не выбиралась через Google Picker; код бота загружает только в настроенную папку.
-3. Сохраните Client ID, Client Secret и Refresh token локально в `.env`, затем перезапустите бота. Секреты не отправляйте в чат и не добавляйте в Git. OAuth-приложения со статусом Testing могут выдавать refresh token на семь дней; настройте статус приложения согласно [документации Google OAuth](https://developers.google.com/identity/protocols/oauth2/web-server#offline).
-
-Файлы получают имя `command-<UTC-время>-<UUID>.wav`. Загрузка идёт в фоне. До успешного ответа Drive WAV остаётся в `.runtime/voice-drive/<folder-id>`; при ошибке отправка повторяется через минуту, а после перезапуска возобновляется. При отсутствии OAuth-настроек сохраняется локальная копия для последующей загрузки. Временные файлы и записи исключены из Git. При длительной недоступности Drive очередь занимает место на диске; автоматического удаления неотправленных записей нет. При неоднозначном сетевом сбое после принятия файла Google повторная отправка может создать дубликат. `VOICE_AUDIO_DRIVE=0` отключает новые записи и загрузку оставшейся очереди.
+Файлы получают имя `command-<UTC-время>-<UUID>.wav`. Бот отправляет WAV в фоне через `rclone copyto` и удаляет локальную копию после успешного завершения команды. До этого WAV остаётся в `.runtime/voice-drive/<folder-id>`. При ошибке отправка повторяется через минуту и возобновляется после перезапуска. При пустом `VOICE_AUDIO_RCLONE_REMOTE` записи остаются в локальной очереди. `VOICE_AUDIO_DRIVE=0` отключает запись и отправку очереди.
 
 ### Переменные окружения
 
