@@ -1,5 +1,4 @@
-// Shared view models for the web control panel, the Alice webhook and the
-// local speaker bridge. They intentionally contain no tokens or secrets.
+// View models for the web control panel. They contain no tokens or secrets.
 
 export interface WebTarget {
   guildId: string;
@@ -51,17 +50,6 @@ export interface BotView {
   uptimeMs: number;
 }
 
-export interface SpeakerView {
-  id: string;
-  name: string;
-  kind: 'alice' | 'bridge';
-  guildId: string;
-  channelId: string;
-  createdAt: number;
-  lastSeenAt: number | null;
-  online: boolean;
-}
-
 export interface LogEntryView {
   at: number;
   kind: string;
@@ -72,16 +60,8 @@ export interface LogEntryView {
 export interface StateView {
   bot: BotView;
   guilds: GuildView[];
-  speakers: SpeakerView[];
   lastTarget: WebTarget | null;
   radioStations: { id: string; name: string }[];
-  skill: { name: string; publicUrl: string | null; configured: boolean };
   sampledAt: number;
   log: LogEntryView[];
-}
-
-export interface CommandResult {
-  text: string;
-  keepSession: boolean;
-  ok: boolean;
 }

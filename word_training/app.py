@@ -1,5 +1,5 @@
 """
-Console Application for Wake-Word Spotter "БОТ" (Alice Mode).
+Console Application for Wake-Word Spotter "БОТ".
 Provides an interactive menu for running live microphone detection,
 adjusting sensitivity, selecting devices, or running test recordings.
 """
@@ -41,7 +41,7 @@ import quick_test
 def show_menu():
     os.system('cls' if os.name == 'nt' else 'clear')
     print(CYAN + "=" * 74)
-    print("   🤖 НЕЙРОСЕТЕВОЙ ГОЛОСОВОЙ КОНТРОЛЛЕР (РЕЖИМ АЛИСЫ + КОМАНДЫ)")
+    print("   🤖 НЕЙРОСЕТЕВОЙ ГОЛОСОВОЙ КОНТРОЛЛЕР (ВЕЙК-ВОРД + КОМАНДЫ)")
     print("=" * 74 + RESET)
     print(f"  {WHITE}Вейк-ворд:{RESET}   «БОТ» (Recall ≥91%, защита от «боб»/«болт», INT8 7.7 МБ)")
     print(f"  {WHITE}Команды:{RESET}     11 классов (пауза, стоп, скип, громче, тише, повтор...)")

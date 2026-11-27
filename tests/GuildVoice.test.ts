@@ -25,9 +25,9 @@ const waitFor = async (condition: () => boolean): Promise<void> => {
 
 function musicHarness(radioFactory?: (url: string) => ManagedAudioStream) {
   let text = 'Муза';
-  const members = new Map([['alice', { displayName: 'Alice' }]]);
-  const users = new Map([['alice', { bot: false, username: 'Alice' }], ['bob', { bot: false, username: 'Bob' }]]);
-  const states = new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }]]);
+  const members = new Map([['listenerA', { displayName: 'Listener A' }]]);
+  const users = new Map([['listenerA', { bot: false, username: 'Listener A' }], ['bob', { bot: false, username: 'Bob' }]]);
+  const states = new Map([['bot', { channelId: 'voice' }], ['listenerA', { channelId: 'voice' }]]);
   const metadata = {
     related: async (_videoId: string): Promise<Track[]> => [],
     searchCandidates: async () => [{ id: 'aaaaaaaaaaa', title: 'Numb' }, { id: 'bbbbbbbbbbb', title: 'Numb live' }],
@@ -57,8 +57,8 @@ function musicHarness(radioFactory?: (url: string) => ManagedAudioStream) {
   const voice = new GuildVoice(queue, runtime as unknown as VoiceRuntime); queue.voice = voice;
   voice.attach(connection);
   return { queue, voice, runtime, metadata, states, users, async command(message = 'включи Numb live') {
-    text = 'Муза'; await voice.session.begin('alice')!.complete(Buffer.from([0, 0]));
-    text = message; const capture = voice.session.begin('alice')!;
+    text = 'Муза'; await voice.session.begin('listenerA')!.complete(Buffer.from([0, 0]));
+    text = message; const capture = voice.session.begin('listenerA')!;
     return { capture, processing: capture.complete(Buffer.from([0, 0])) };
   } };
 }
@@ -69,8 +69,8 @@ test('voice status reports recent recognition only for the requesting channel me
   context.mock.method(performance, 'now', () => now);
   h.states.set('bob', { channelId: 'voice' });
   try {
-    await h.voice.session.begin('alice')!.complete(Buffer.alloc(640));
-    assert.match(h.voice.inputStatus('alice'), /имя распознано/);
+    await h.voice.session.begin('listenerA')!.complete(Buffer.alloc(640));
+    assert.match(h.voice.inputStatus('listenerA'), /имя распознано/);
     assert.match(h.voice.inputStatus('bob'), /нет сведений/);
     assert.equal(h.voice.inputStatus('absent'), '');
     h.voice.session.cancel();
@@ -80,9 +80,9 @@ test('voice status reports recent recognition only for the requesting channel me
     h.voice.cancelUser('bob');
     assert.match(h.voice.inputStatus('bob'), /нет сведений/);
     now += 60_000;
-    assert.match(h.voice.inputStatus('alice'), /нет сведений/);
+    assert.match(h.voice.inputStatus('listenerA'), /нет сведений/);
     h.voice.setEnabled(false);
-    assert.equal(h.voice.inputStatus('alice'), '');
+    assert.equal(h.voice.inputStatus('listenerA'), '');
   } finally { await h.queue.stop(); }
 });
 
@@ -113,7 +113,7 @@ test('voice music starts an empty queue, attributes the speaker, and preserves b
       await processing; await capture.complete(Buffer.from([0, 0]));
       assert.equal(h.queue.currentTrack?.videoId, busy ? 'ccccccccccc' : 'aaaaaaaaaaa');
       const requested = busy ? h.queue.tracks[0] : h.queue.currentTrack;
-      assert.equal(requested?.requestedBy, 'Alice');
+      assert.equal(requested?.requestedBy, 'Listener A');
       assert.equal(h.queue.tracks.length, busy ? 1 : 0);
       assert.equal(h.voice.session.phase, 'idle');
     } finally { await h.queue.stop(); }
@@ -134,7 +134,7 @@ test('a plain Moscow request starts or queues once despite a model that would re
       await processing; await capture.complete(Buffer.from([0, 0]));
       const requested = busy ? h.queue.tracks[0] : h.queue.currentTrack;
       assert.equal(requested?.title, 'DJ SMASH — MOSCOW NEVER SLEEPS');
-      assert.equal(requested?.requestedBy, 'Alice');
+      assert.equal(requested?.requestedBy, 'Listener A');
       assert.equal(h.queue.tracks.length, busy ? 1 : 0);
       assert.equal(policies, 0);
       assert.equal(h.voice.session.phase, 'idle');
@@ -157,7 +157,7 @@ test('a song-from request reaches search from conversational and ASR forms and r
       await processing; await capture.complete(Buffer.from([0, 0]));
       assert.equal(searches, 1, message);
       assert.equal(h.queue.currentTrack?.title, 'Песня из Лунтика');
-      assert.equal(h.queue.currentTrack?.requestedBy, 'Alice');
+      assert.equal(h.queue.currentTrack?.requestedBy, 'Listener A');
       assert.equal(h.voice.session.phase, 'idle');
       assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
     } finally { await h.queue.stop(); }
@@ -192,7 +192,7 @@ test('leaving, voice off, stop and reset during recognition or search prevent en
     }
     try {
       const { capture, processing } = await h.command(); await started;
-      if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
+      if (cancel === 'leave') { h.states.get('listenerA')!.channelId = 'other'; h.voice.cancelUser('listenerA'); }
       else if (cancel === 'off') h.voice.setEnabled(false);
       else if (cancel === 'stop') await h.queue.stop(); else h.voice.reset();
       assert.equal(capture.signal.aborted, true);
@@ -279,7 +279,7 @@ test('spoken voice off disables listening and never enqueues a track', async () 
     await (await h.command('Выключи голосовое управление')).processing;
     assert.equal(h.voice.enabled, false); assert.equal(h.voice.session.phase, 'disabled');
     assert.equal(h.queue.currentTrack, null); assert.equal(h.queue.tracks.length, 0);
-    assert.equal(h.voice.session.begin('alice'), null);
+    assert.equal(h.voice.session.begin('listenerA'), null);
     h.voice.setEnabled(true);
     assert.equal(h.voice.enabled, true); assert.equal(h.voice.session.phase, 'idle');
     await (await h.command('Включи бесконечный режим')).processing;
@@ -292,8 +292,8 @@ test('worker recovery restores requested listening without changing playback or 
     const h = musicHarness(); const deaf: boolean[] = [];
     h.queue.connection!.rejoin = (config) => { deaf.push(Boolean(config?.selfDeaf)); return true; };
     try {
-      await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Alice'));
-      await h.queue.addTrack(toTrack({ id: 'ddddddddddd', title: 'Pending' }, 'Alice'));
+      await h.queue.addTrack(toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Listener A'));
+      await h.queue.addTrack(toTrack({ id: 'ddddddddddd', title: 'Pending' }, 'Listener A'));
       const current = h.queue.currentTrack;
       h.voice.setEnabled(requested);
       h.runtime.ready = false; h.runtime.emit('unavailable');
@@ -432,7 +432,7 @@ test('leaving, voice off, stop and reset during spoken confirmation cancel audio
     try {
       const { capture, processing } = await h.command('включи Numb');
       await started;
-      if (cancel === 'leave') { h.states.get('alice')!.channelId = 'other'; h.voice.cancelUser('alice'); }
+      if (cancel === 'leave') { h.states.get('listenerA')!.channelId = 'other'; h.voice.cancelUser('listenerA'); }
       else if (cancel === 'off') h.voice.setEnabled(false);
       else if (cancel === 'stop') await h.queue.stop(); else h.voice.reset();
       await processing; await capture.complete(Buffer.alloc(2));
@@ -459,9 +459,9 @@ test('receiver decodes real Opus, excludes self, bots, unknown users and other c
   } as unknown as VoiceConnection;
   const client = { queues: new Map(), user: { id: 'bot', username: 'Муза' },
     guilds: { cache: new Map([['guild-receiver', { members: { me: { displayName: 'Муза' } },
-      voiceStates: { cache: new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }],
+      voiceStates: { cache: new Map([['bot', { channelId: 'voice' }], ['listenerA', { channelId: 'voice' }],
         ['bob', { channelId: 'other' }], ['otherbot', { channelId: 'voice' }], ['unknown', { channelId: 'voice' }]]) } }]]) },
-    users: { cache: new Map([['alice', { bot: false }], ['otherbot', { bot: true }]]) },
+    users: { cache: new Map([['listenerA', { bot: false }], ['otherbot', { bot: true }]]) },
     ytdlp: { related: async () => [] },
   } as unknown as MusicClient;
   let transcriptions = 0;
@@ -487,13 +487,13 @@ test('receiver decodes real Opus, excludes self, bots, unknown users and other c
     const pcm = Buffer.alloc(640);
     for (let i = 0; i < 320; i++) pcm.writeInt16LE(Math.round(3000 * Math.sin(i * 2 * Math.PI * 350 / 16_000)), i * 2);
     const packet = encoder.encode(pcm, 320);
-    speaking.emit('start', 'alice'); streams.get('alice')!.end(packet);
+    speaking.emit('start', 'listenerA'); streams.get('listenerA')!.end(packet);
     await waitFor(() => voice.session.phase === 'awaiting');
-    speaking.emit('start', 'alice'); streams.get('alice')!.end(packet);
+    speaking.emit('start', 'listenerA'); streams.get('listenerA')!.end(packet);
     await waitFor(() => voice.session.phase === 'idle');
     assert.equal(queue.volume, 0.6); assert.equal(transcriptions, 2);
-    speaking.emit('start', 'alice');
-    const capture = streams.get('alice')!;
+    speaking.emit('start', 'listenerA');
+    const capture = streams.get('listenerA')!;
     voice.setEnabled(false);
     assert.equal(capture.destroyed, true); assert.equal(deaf.at(-1), true);
     assert.equal(speaking.listenerCount('start'), 0);
@@ -580,12 +580,12 @@ test('two open microphones each need the wake name before a command can change p
   h.queue.playVoiceCue = async () => { cues++; };
   h.queue.client.voiceTts = { audio(key) { replies.push(key); return null; } };
   try {
-    const track = toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Alice');
+    const track = toTrack({ id: 'ccccccccccc', title: 'Current' }, 'Listener A');
     await h.queue.addTrack(track);
-    h.open('alice'); h.open('bob');
-    await h.send('alice', h.background, 265); await h.send('bob', h.background, 265);
+    h.open('listenerA'); h.open('bob');
+    await h.send('listenerA', h.background, 265); await h.send('bob', h.background, 265);
     assert.deepEqual(calls, []);
-    await speak('alice', 'Сделай тише');
+    await speak('listenerA', 'Сделай тише');
     await speak('bob', 'Поставь на паузу');
     assert.equal(cues, 0, 'even a positive acoustic hit must be confirmed by the name in the transcript');
     assert.deepEqual(replies, []);
@@ -593,12 +593,12 @@ test('two open microphones each need the wake name before a command can change p
     assert.equal(volume.mock.callCount(), 0); assert.equal(pause.mock.callCount(), 0);
     assert.equal(h.queue.volume, 0.5);
     assert.equal(h.queue.isPaused, false);
-    await speak('alice', 'Муза');
+    await speak('listenerA', 'Муза');
     assert.equal(cues, 1);
-    assert.equal(h.voice.session.awaits('alice'), true);
+    assert.equal(h.voice.session.awaits('listenerA'), true);
     await speak('bob', 'Поставь на паузу');
     assert.deepEqual(calls, [false, false, false], 'another speaker cannot answer in the active window');
-    await speak('alice', 'Сделай тише');
+    await speak('listenerA', 'Сделай тише');
     assert.equal(h.queue.volume, 0.4);
     assert.equal(h.queue.isPaused, false);
     assert.equal(h.voice.session.phase, 'idle');
@@ -625,15 +625,15 @@ test('two Discord microphone streams can each wake even when one scores below th
   };
   h.queue.playVoiceCue = async () => { cues++; };
   try {
-    h.open('alice'); h.open('bob');
-    await h.send('alice', h.background, 10); await h.send('bob', h.background, 10);
-    await h.phrase('alice');
-    assert.ok(h.voice.session.awaits('alice'));
+    h.open('listenerA'); h.open('bob');
+    await h.send('listenerA', h.background, 10); await h.send('bob', h.background, 10);
+    await h.phrase('listenerA');
+    assert.ok(h.voice.session.awaits('listenerA'));
     h.voice.session.cancel();
     confidence = 0.001;
     await h.phrase('bob');
     assert.ok(h.voice.session.awaits('bob'));
-    assert.equal(h.voice.session.begin('alice'), null);
+    assert.equal(h.voice.session.begin('listenerA'), null);
     assert.equal(cues, 2); assert.equal(transcriptions, 2);
   } finally { await h.queue.stop(); }
 });
@@ -749,12 +749,12 @@ test('a pending receive retry is cancelled when speech ends, the user leaves, or
 test('a speaker who opened their mic during someone else’s turn can wake on fresh speech without restarting the mic', async () => {
   const h = openMicHarness();
   try {
-    h.open('alice');
-    await h.send('alice', h.background, 12); await h.phrase('alice');
+    h.open('listenerA');
+    await h.send('listenerA', h.background, 12); await h.phrase('listenerA');
     assert.equal(h.voice.session.phase, 'awaiting');
     h.startSpeaking('bob');
     assert.equal(h.streams.has('bob'), false);
-    await h.phrase('alice');
+    await h.phrase('listenerA');
     await waitFor(() => h.streams.has('bob'));
     const initialTurns = h.recognized.length;
     await h.send('bob', h.foreground, 32); await h.send('bob', h.background, 50);
@@ -771,19 +771,19 @@ test('attaching while a mic is open waits for fresh speech and ignores users out
   const connection = h.queue.connection!;
   try {
     h.voice.suspend();
-    h.startSpeaking('alice'); h.startSpeaking('bob');
+    h.startSpeaking('listenerA'); h.startSpeaking('bob');
     h.states.set('bob', { channelId: 'other' });
     h.voice.attach(connection);
-    await waitFor(() => h.streams.has('alice'));
+    await waitFor(() => h.streams.has('listenerA'));
     assert.equal(h.streams.has('bob'), false);
-    const previous = h.streams.get('alice')!;
+    const previous = h.streams.get('listenerA')!;
     h.voice.attach(connection);
-    await waitFor(() => h.streams.get('alice') !== previous);
+    await waitFor(() => h.streams.get('listenerA') !== previous);
     assert.equal(previous.destroyed, true, 'reattaching must replace the recently closed subscription');
-    await h.send('alice', h.background, 20); await h.phrase('alice');
-    assert.equal(h.voice.session.awaits('alice'), true);
+    await h.send('listenerA', h.background, 20); await h.phrase('listenerA');
+    assert.equal(h.voice.session.awaits('listenerA'), true);
     h.voice.setEnabled(false);
-    assert.equal(h.streams.get('alice')!.destroyed, true);
+    assert.equal(h.streams.get('listenerA')!.destroyed, true);
   } finally { await h.queue.stop(); }
 });
 
@@ -811,13 +811,13 @@ test('rechecking open microphones honours the TTS tail, departure, suspension an
 test('soft background through open mics does not consume a wake or require a second speaking start', async () => {
   const h = openMicHarness();
   try {
-    h.open('alice'); h.open('bob');
-    await h.send('alice', h.background, 265); await h.send('bob', h.background, 80);
+    h.open('listenerA'); h.open('bob');
+    await h.send('listenerA', h.background, 265); await h.send('bob', h.background, 80);
     assert.equal(h.recognized.length, 0, 'steady background alone never reaches STT at the wake deadline');
-    await h.phrase('alice');
+    await h.phrase('listenerA');
     assert.equal(h.voice.session.phase, 'awaiting');
     assert.ok(h.recognized[0]!.ms < 1200, 'the old background is trimmed before checking the wake');
-    await h.phrase('alice');
+    await h.phrase('listenerA');
     assert.equal(h.voice.session.phase, 'idle'); assert.equal(h.queue.volume, 0.7);
     await h.phrase('bob');
     assert.equal(h.voice.session.phase, 'awaiting');
@@ -825,20 +825,20 @@ test('soft background through open mics does not consume a wake or require a sec
     h.voice.cancelUser('bob');
     assert.equal(h.streams.get('bob')!.destroyed, true);
     assert.equal(h.voice.session.phase, 'idle');
-    h.voice.setEnabled(false); assert.equal(h.streams.get('alice')!.destroyed, true);
+    h.voice.setEnabled(false); assert.equal(h.streams.get('listenerA')!.destroyed, true);
   } finally { await h.queue.stop(); }
 });
 
 test('an overlong open-mic command cannot dispatch truncated audio or disable the next wake', async () => {
   const h = openMicHarness();
   try {
-    h.open('alice');
-    await h.send('alice', h.background, 12); await h.phrase('alice');
+    h.open('listenerA');
+    await h.send('listenerA', h.background, 12); await h.phrase('listenerA');
     assert.equal(h.voice.session.phase, 'awaiting');
-    await h.send('alice', h.foreground, 820);
+    await h.send('listenerA', h.foreground, 820);
     assert.equal(h.voice.session.phase, 'idle');
     assert.deepEqual(h.recognized.map(turn => turn.command), [false]);
-    await h.send('alice', h.background, 65); await h.phrase('alice');
+    await h.send('listenerA', h.background, 65); await h.phrase('listenerA');
     assert.equal(h.voice.session.phase, 'awaiting');
     assert.deepEqual(h.recognized.map(turn => turn.command), [false, false]);
   } finally { await h.queue.stop(); }
@@ -861,9 +861,9 @@ test('only the configured wake name cues its speaker, who can answer while the c
   const client = { queues: new Map(), user: { id: 'bot', username: 'Муза' },
     voiceSettings: { get: () => 'Бот' },
     guilds: { cache: new Map([['guild-cue-capture', { members: { me: { displayName: 'Муза' } },
-      voiceStates: { cache: new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }],
+      voiceStates: { cache: new Map([['bot', { channelId: 'voice' }], ['listenerA', { channelId: 'voice' }],
         ['bob', { channelId: 'voice' }]]) } }]]) },
-    users: { cache: new Map([['alice', { bot: false }], ['bob', { bot: false }]]) },
+    users: { cache: new Map([['listenerA', { bot: false }], ['bob', { bot: false }]]) },
     ytdlp: { related: async () => [] },
   } as unknown as MusicClient;
   let wakeTranscript = 'Муза';
@@ -891,20 +891,20 @@ test('only the configured wake name cues its speaker, who can answer while the c
   const encoder = new OpusScript(16_000, 1, OpusScript.Application.VOIP);
   try {
     voice.attach(connection);
-    await voice.session.begin('alice')!.complete(Buffer.alloc(640, 1));
+    await voice.session.begin('listenerA')!.complete(Buffer.alloc(640, 1));
     assert.equal(cueCount, 0, 'a detector hit on the Discord nickname must be rejected');
     assert.equal(voice.session.phase, 'idle');
     wakeTranscript = 'Бот';
     const packet = encoder.encode(Buffer.alloc(640, 1), 320);
-    speaking.emit('start', 'alice');
-    streams.get('alice')!.end(packet);
+    speaking.emit('start', 'listenerA');
+    streams.get('listenerA')!.end(packet);
     await cueStart;
     assert.equal(voice.session.phase, 'signalling');
     speaking.emit('start', 'bob');
     assert.equal(streams.has('bob'), false, 'other speakers stay ignored while the signal is audible');
-    speaking.emit('start', 'alice');
+    speaking.emit('start', 'listenerA');
     assert.equal(voice.session.phase, 'signalling', 'the command waits for actual microphone audio');
-    streams.get('alice')!.end(packet);
+    streams.get('listenerA')!.end(packet);
     await waitFor(() => voice.session.phase === 'processing');
     speaking.emit('start', 'bob');
     assert.equal(streams.has('bob'), false, 'no other speaker can answer during the second note');
@@ -931,7 +931,7 @@ test('voice radio requests bypass Laya and YouTube, switch stations and clear th
         toTrack({ id: 'ddddddddddd', title: 'Pending' }, 'Bob')]);
       const { processing } = await h.command(message); await processing;
       assert.equal(h.queue.currentTrack?.source, 'radio');
-      assert.equal(h.queue.currentTrack?.requestedBy, 'Alice');
+      assert.equal(h.queue.currentTrack?.requestedBy, 'Listener A');
       assert.equal(h.queue.tracks.length, 0); assert.equal(h.voice.session.phase, 'idle');
       assert.equal(Reflect.get(h.queue, 'voiceDucking'), false);
     } finally { await h.queue.stop(); }
@@ -965,7 +965,7 @@ test('leaving, voice off and reset while a radio stream is opening cannot clear 
       await h.queue.addTrack(current);
       const { processing } = await h.command('Включи Европа Плюс');
       await waitFor(() => stream.listenerCount('readable') > 0);
-      if (mode === 'leave') { h.states.set('alice', { channelId: 'other' }); h.voice.cancelUser('alice'); }
+      if (mode === 'leave') { h.states.set('listenerA', { channelId: 'other' }); h.voice.cancelUser('listenerA'); }
       if (mode === 'off') h.voice.setEnabled(false);
       if (mode === 'reset') h.voice.reset();
       await processing;

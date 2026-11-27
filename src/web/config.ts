@@ -14,9 +14,6 @@ export interface WebConfig {
   sessionTtlMs: number;
   uiDir: string;
   stateFile: string;
-  aliceSkillId: string | null;
-  aliceSkillName: string;
-  aliceWebhookSecret: string | null;
   trustProxy: boolean;
 }
 
@@ -66,9 +63,7 @@ function secretBuffer(value: string): Buffer {
 }
 
 /**
- * The website is enabled unless WEB_ENABLED=0. It binds to localhost by
- * default; a public reverse proxy can forward the Alice webhook without
- * exposing the admin panel.
+ * The website is enabled unless WEB_ENABLED=0 and binds to localhost by default.
  */
 export async function loadWebConfig(): Promise<WebConfig | null> {
   if (!flag('WEB_ENABLED', true)) return null;
@@ -90,12 +85,6 @@ export async function loadWebConfig(): Promise<WebConfig | null> {
     ? { value: secretFromEnv, created: false }
     : await readOrCreate(secretFile, () => randomBytes(32).toString('hex'));
 
-  const skillId = text('ALICE_SKILL_ID');
-  const webhookSecret = text('ALICE_WEBHOOK_SECRET');
-  if (webhookSecret && webhookSecret.length < 16) {
-    console.warn('[Web] ALICE_WEBHOOK_SECRET короче 16 символов; используйте длинную случайную строку.');
-  }
-
   return {
     host: text('WEB_HOST') ?? '127.0.0.1',
     port: positiveInteger('WEB_PORT', DEFAULT_PORT, 1, 65535),
@@ -108,9 +97,6 @@ export async function loadWebConfig(): Promise<WebConfig | null> {
     sessionTtlMs: SESSION_TTL_MS,
     uiDir: path.resolve(text('WEB_UI_DIR') ?? 'web'),
     stateFile: path.resolve(text('WEB_STATE_FILE') ?? path.join(runtimeDir, 'state.json')),
-    aliceSkillId: skillId,
-    aliceSkillName: text('ALICE_SKILL_NAME') ?? 'Муза',
-    aliceWebhookSecret: webhookSecret,
     trustProxy: flag('WEB_TRUST_PROXY', false),
   };
 }

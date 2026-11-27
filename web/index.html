@@ -30,7 +30,6 @@
         <span class="avatar-wrap"><img id="bot-avatar" alt="" hidden><span id="bot-avatar-fallback" class="avatar-fallback">♪</span></span>
         <span id="bot-name">Бот</span>
         <span id="bot-state" class="pill">запускается</span>
-        <span id="skill-label" class="muted small"></span>
       </div>
       <button id="logout" class="ghost" type="button">Выйти</button>
     </header>
@@ -97,16 +96,6 @@
         </div>
       </section>
 
-      <aside class="card speakers">
-        <div class="card-head">
-          <h2>Колонки</h2>
-          <button id="btn-add-speaker" class="primary small" type="button">+ Подключить</button>
-        </div>
-        <p class="muted small">Колонка — это Яндекс Станция или телефон с Алисой. Код привязывает её к выбранному голосовому каналу.</p>
-        <div id="speakers-empty" class="empty">Пока ни одна колонка не подключена.</div>
-        <ul id="speaker-list" class="speaker-list"></ul>
-      </aside>
-
       <section class="card queue">
         <div class="card-head">
           <h2>Очередь</h2>
@@ -124,38 +113,6 @@
         <ul id="log-list" class="log-list"></ul>
       </section>
     </main>
-  </div>
-
-  <div id="modal" class="modal" hidden>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <button id="modal-close" class="icon" type="button" aria-label="Закрыть">×</button>
-      <h2 id="modal-title">Подключить колонку</h2>
-
-      <div id="modal-form">
-        <label class="field">Название
-          <input id="speaker-name" type="text" maxlength="64" value="Колонка" autocomplete="off">
-        </label>
-        <label class="field">Сервер
-          <select id="modal-guild"></select>
-        </label>
-        <label class="field">Голосовой канал
-          <select id="modal-channel"></select>
-        </label>
-        <button id="btn-create-code" class="primary wide" type="button">Создать код</button>
-        <p class="muted small">Код действует 10 минут и привязывает одну колонку к выбранному каналу.</p>
-      </div>
-
-      <div id="modal-code" hidden>
-        <p class="muted">Скажите Алисе:</p>
-        <p class="code-phrase">«Запусти навык <span id="skill-name">Муза</span>»</p>
-        <p class="code-phrase">«Подключи колонку <strong id="pair-code">000000</strong>»</p>
-        <p class="muted small">Для локального моста: <code id="pair-endpoint"></code> с кодом и названием. Если пульт открыт на <code>localhost</code>, станции нужен IP этой машины в локальной сети.</p>
-        <div class="modal-actions">
-          <button id="btn-copy-code" class="ghost" type="button">Скопировать код</button>
-          <button id="btn-new-code" class="ghost" type="button">Новый код</button>
-        </div>
-      </div>
-    </div>
   </div>
 
   <div id="toast" class="toast" role="status" hidden></div>

@@ -8,21 +8,19 @@ const state = {
   guildId: null,
   channelId: null,
   refreshing: false,
-  modalOpen: false,
   baseElapsed: 0,
   baseAt: 0,
   basePaused: true,
   baseLive: false,
   durationSeconds: null,
   toastTimer: null,
-  lastCode: null,
 };
 
 const el = {
   loginView: $('login-view'), appView: $('app-view'), loginForm: $('login-form'),
   password: $('password'), loginError: $('login-error'),
   botAvatar: $('bot-avatar'), botAvatarFallback: $('bot-avatar-fallback'), botName: $('bot-name'),
-  botState: $('bot-state'), skillLabel: $('skill-label'), logout: $('logout'),
+  botState: $('bot-state'), logout: $('logout'),
   guild: $('guild-select'), channel: $('channel-select'), targetHint: $('target-hint'),
   playerStatus: $('player-status'), cover: $('cover'), coverPlaceholder: $('cover-placeholder'),
   trackTitle: $('track-title'), trackMeta: $('track-meta'), progressFill: $('progress-fill'),
@@ -32,13 +30,8 @@ const el = {
   volume: $('volume'), volumeValue: $('volume-value'),
   playForm: $('play-form'), query: $('query'), source: $('source'),
   radio: $('radio'), radioButton: $('btn-radio'),
-  speakersEmpty: $('speakers-empty'), speakerList: $('speaker-list'), addSpeaker: $('btn-add-speaker'),
   queueCount: $('queue-count'), queueList: $('queue-list'), queueEmpty: $('queue-empty'),
   logList: $('log-list'),
-  modal: $('modal'), modalClose: $('modal-close'), modalForm: $('modal-form'), modalCode: $('modal-code'),
-  speakerName: $('speaker-name'), modalGuild: $('modal-guild'), modalChannel: $('modal-channel'),
-  createCode: $('btn-create-code'), pairCode: $('pair-code'), pairEndpoint: $('pair-endpoint'),
-  skillName: $('skill-name'), copyCode: $('btn-copy-code'), newCode: $('btn-new-code'),
   toast: $('toast'),
 };
 
@@ -71,15 +64,6 @@ function timeOf(timestamp) {
   try {
     return new Date(timestamp).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch { return '—'; }
-}
-
-function relative(timestamp) {
-  if (!timestamp) return 'ещё не выходила на связь';
-  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return 'только что';
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} мин назад`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} ч назад`;
-  return timeOf(timestamp);
 }
 
 function toast(message, error = false) {
@@ -128,7 +112,6 @@ function showLogin() {
   el.appView.hidden = true;
   el.loginView.hidden = false;
   el.loginError.textContent = '';
-  closeModal();
   setTimeout(() => el.password.focus(), 0);
 }
 
@@ -207,9 +190,6 @@ function render() {
     el.botAvatar.hidden = true;
     el.botAvatarFallback.hidden = false;
   }
-  el.skillLabel.textContent = data.skill.configured
-    ? `навык «${data.skill.name}»`
-    : 'навык Алисы не настроен';
 
   fillSelect(el.guild, (data.guilds ?? []).map((item) => ({
     value: item.id, label: item.name, disabled: false,
@@ -231,13 +211,7 @@ function render() {
   renderNow(queue);
   renderControls(queue);
   renderQueue(queue);
-  renderSpeakers();
   renderLog();
-
-  if (state.modalOpen) {
-    fillModalGuilds();
-    fillModalChannels();
-  }
 }
 
 function renderNow(queue) {
@@ -350,57 +324,6 @@ function renderQueue(queue) {
   el.queueList.replaceChildren(fragment);
 }
 
-function renderSpeakers() {
-  const speakers = state.data?.speakers ?? [];
-  el.speakersEmpty.hidden = speakers.length > 0;
-  const guilds = new Map((state.data?.guilds ?? []).map((guild) => [guild.id, guild]));
-  const fragment = document.createDocumentFragment();
-  for (const speaker of speakers) {
-    const guild = guilds.get(speaker.guildId);
-    const channel = guild?.channels.find((item) => item.id === speaker.channelId);
-    const item = document.createElement('li');
-    item.className = 'speaker-item';
-
-    const main = document.createElement('div');
-    main.className = 'speaker-main';
-    const nameLine = document.createElement('div');
-    nameLine.className = 'speaker-name';
-    const dot = document.createElement('span');
-    dot.className = `dot ${speaker.online ? 'online' : ''}`;
-    const name = document.createElement('span');
-    name.textContent = speaker.name;
-    const badge = document.createElement('span');
-    badge.className = 'badge';
-    badge.textContent = speaker.kind === 'alice' ? 'Алиса' : 'Мост';
-    nameLine.append(dot, name, badge);
-    const sub = document.createElement('div');
-    sub.className = 'speaker-sub';
-    const where = guild ? `${guild.name} · ${channel?.name ?? 'канал удалён'}` : 'сервер не найден';
-    sub.textContent = `${where} · ${speaker.online ? 'в сети' : relative(speaker.lastSeenAt)}`;
-    main.append(nameLine, sub);
-
-    const actions = document.createElement('div');
-    actions.className = 'speaker-actions';
-    const rename = document.createElement('button');
-    rename.type = 'button';
-    rename.className = 'icon';
-    rename.title = 'Переименовать';
-    rename.textContent = '✎';
-    rename.addEventListener('click', () => void renameSpeaker(speaker));
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'icon';
-    remove.title = 'Отключить';
-    remove.textContent = '🗑';
-    remove.addEventListener('click', () => void removeSpeaker(speaker));
-    actions.append(rename, remove);
-
-    item.append(main, actions);
-    fragment.append(item);
-  }
-  el.speakerList.replaceChildren(fragment);
-}
-
 function renderLog() {
   const entries = state.data?.log ?? [];
   const fragment = document.createDocumentFragment();
@@ -477,95 +400,6 @@ async function submitRadio() {
   if (result) toast(`Радио: ${result.station}`);
 }
 
-async function renameSpeaker(speaker) {
-  const name = window.prompt('Новое название колонки', speaker.name);
-  if (name === null) return;
-  try {
-    await api(`/api/speakers/${speaker.id}`, { method: 'PATCH', body: { name } });
-    toast('Название сохранено.');
-    await refresh();
-  } catch (error) { toast(error.message, true); }
-}
-
-async function removeSpeaker(speaker) {
-  if (!window.confirm(`Отключить колонку «${speaker.name}»?`)) return;
-  try {
-    await api(`/api/speakers/${speaker.id}`, { method: 'DELETE' });
-    toast('Колонка отключена.');
-    await refresh();
-  } catch (error) { toast(error.message, true); }
-}
-
-function openModal() {
-  state.modalOpen = true;
-  el.modal.hidden = false;
-  el.modalForm.hidden = false;
-  el.modalCode.hidden = true;
-  el.speakerName.value = 'Колонка';
-  el.pairCode.textContent = '000000';
-  el.skillName.textContent = state.data?.skill.name ?? 'Муза';
-  try {
-    el.pairEndpoint.textContent = `${location.origin}/api/alice/pair`;
-  } catch { el.pairEndpoint.textContent = '/api/alice/pair'; }
-  fillModalGuilds();
-  el.modalGuild.value = state.guildId ?? el.modalGuild.value;
-  fillModalChannels();
-  el.modalChannel.value = state.channelId ?? el.modalChannel.value;
-  setTimeout(() => el.speakerName.select(), 0);
-}
-
-function closeModal() {
-  state.modalOpen = false;
-  el.modal.hidden = true;
-  state.lastCode = null;
-}
-
-function fillModalGuilds() {
-  const guilds = state.data?.guilds ?? [];
-  fillSelect(el.modalGuild, guilds.map((guild) => ({ value: guild.id, label: guild.name, disabled: false })),
-    el.modalGuild.value || state.guildId || '');
-}
-
-function fillModalChannels() {
-  const guild = state.data?.guilds.find((item) => item.id === el.modalGuild.value);
-  fillSelect(el.modalChannel, (guild?.channels ?? []).map((channel) => ({
-    value: channel.id, label: channel.canJoin ? channel.name : `${channel.name} (нет прав)`, disabled: !channel.canJoin,
-  })), el.modalChannel.value || (guild?.id === state.guildId ? state.channelId : '') || '');
-}
-
-async function createPairingCode() {
-  const guildId = el.modalGuild.value;
-  const channelId = el.modalChannel.value;
-  if (!guildId || !channelId) { toast('Выберите сервер и канал.', true); return; }
-  el.createCode.disabled = true;
-  try {
-    const result = await api('/api/speakers/code', {
-      method: 'POST',
-      body: { guildId, channelId, name: el.speakerName.value.trim() || 'Колонка' },
-    });
-    state.lastCode = result.code;
-    el.pairCode.textContent = result.code;
-    el.skillName.textContent = result.skillName ?? state.data?.skill.name ?? 'Муза';
-    el.modalForm.hidden = true;
-    el.modalCode.hidden = false;
-  } catch (error) {
-    toast(error.message, true);
-  } finally {
-    el.createCode.disabled = false;
-  }
-}
-
-async function copyCode() {
-  const code = state.lastCode;
-  if (!code) return;
-  try {
-    await navigator.clipboard.writeText(code);
-    toast('Код скопирован.');
-  } catch {
-    toast(`Код: ${code}`);
-  }
-}
-
 async function logout() {
   try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
   state.data = null;
@@ -624,18 +458,6 @@ function bind() {
     el.volumeValue.textContent = `${el.volume.value}%`;
   });
   el.volume.addEventListener('change', () => void playerAction('volume', { volume: Number(el.volume.value) }, { silent: true }));
-  el.addSpeaker.addEventListener('click', openModal);
-  el.modalClose.addEventListener('click', closeModal);
-  el.modal.addEventListener('click', (event) => { if (event.target === el.modal) closeModal(); });
-  el.modalGuild.addEventListener('change', fillModalChannels);
-  el.createCode.addEventListener('click', () => void createPairingCode());
-  el.copyCode.addEventListener('click', () => void copyCode());
-  el.newCode.addEventListener('click', () => {
-    el.modalForm.hidden = false;
-    el.modalCode.hidden = true;
-    void createPairingCode();
-  });
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeModal(); });
   el.cover.addEventListener('error', () => {
     el.cover.hidden = true;
     el.coverPlaceholder.hidden = false;

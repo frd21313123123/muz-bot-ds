@@ -18,7 +18,7 @@ test('YouTube Music and radio mix resolve to canonical video', async () => {
   assert.deepEqual(classifyQuery('https://music.youtube.com/watch?v=abcdefghijk&list=RDAMVMfoo'), {
     kind: 'video', value: 'https://www.youtube.com/watch?v=abcdefghijk',
   });
-  const result = await resolveQuery('https://music.youtube.com/watch?v=abcdefghijk&list=RDAMVMfoo', 'Alice', metadata);
+  const result = await resolveQuery('https://music.youtube.com/watch?v=abcdefghijk&list=RDAMVMfoo', 'Listener A', metadata);
   assert.equal(result?.type, 'single');
   if (result?.type === 'single') assert.equal(result.track.url, 'https://www.youtube.com/watch?v=abcdefghijk');
 });
@@ -28,7 +28,7 @@ test('liked music track link resolves as an ordinary video', async () => {
   assert.deepEqual(classifyQuery('https://music.youtube.com/watch?v=abcdefghijk&list=LM'), {
     kind: 'video', value: 'https://www.youtube.com/watch?v=abcdefghijk',
   });
-  const result = await resolveQuery('https://music.youtube.com/watch?v=abcdefghijk&list=LM', 'Alice', metadata);
+  const result = await resolveQuery('https://music.youtube.com/watch?v=abcdefghijk&list=LM', 'Listener A', metadata);
   assert.equal(result?.type, 'single');
   assert.deepEqual(seen, ['video:https://www.youtube.com/watch?v=abcdefghijk']);
 });
@@ -40,14 +40,14 @@ test('liked music playlist without a video gives a useful error', () => {
 
 test('playlist limit is passed to yt-dlp and result is capped', async () => {
   seen.length = 0;
-  const result = await resolveQuery('https://www.youtube.com/playlist?list=PLxyz', 'Alice', metadata, 1);
+  const result = await resolveQuery('https://www.youtube.com/playlist?list=PLxyz', 'Listener A', metadata, 1);
   assert.equal(result?.type, 'playlist');
   if (result?.type === 'playlist') assert.equal(result.tracks.length, 1);
   assert.match(seen[0] ?? '', /^playlist:1:/);
 });
 
 test('text search returns one track', async () => {
-  const result = await resolveQuery('Test Song', 'Alice', metadata);
+  const result = await resolveQuery('Test Song', 'Listener A', metadata);
   assert.equal(result?.type, 'single');
 });
 
@@ -58,7 +58,7 @@ test('unsupported host and malformed video id fail before invoking yt-dlp', () =
 
 test('fast resolve on video url creates track immediately without calling metadata.video', async () => {
   seen.length = 0;
-  const result = await resolveQuery('https://www.youtube.com/watch?v=abcdefghijk', 'Alice', metadata, 1, { fast: true });
+  const result = await resolveQuery('https://www.youtube.com/watch?v=abcdefghijk', 'Listener A', metadata, 1, { fast: true });
   assert.equal(result?.type, 'single');
   if (result?.type === 'single') {
     assert.equal(result.track.videoId, 'abcdefghijk');
@@ -90,7 +90,7 @@ test('SoundCloud links are classified without tracking parameters', () => {
 });
 
 test('SoundCloud track resolves with a namespaced id and its own url', async () => {
-  const result = await resolveQuery('https://soundcloud.com/some-artist/some-track', 'Alice',
+  const result = await resolveQuery('https://soundcloud.com/some-artist/some-track', 'Listener A',
     { ...metadata, async video() { return soundcloudEntry; } }, 1, { fast: true });
   assert.equal(result?.type, 'single');
   if (result?.type === 'single') {
@@ -104,11 +104,11 @@ test('SoundCloud track resolves with a namespaced id and its own url', async () 
 test('SoundCloud set uses entry urls and a short link to one track becomes a single track', async () => {
   const set = { title: 'Mix', entries: [{ id: '1', title: 'One', url: 'https://soundcloud.com/a/one' },
     { id: '2', title: 'Two', url: 'https://soundcloud.com/a/two' }, { id: 'bad', title: 'Bad' }] };
-  const result = await resolveQuery('https://soundcloud.com/a/sets/mix', 'Alice',
+  const result = await resolveQuery('https://soundcloud.com/a/sets/mix', 'Listener A',
     { ...metadata, async playlist() { return set; } }, 25);
   assert.equal(result?.type, 'playlist');
   if (result?.type === 'playlist') assert.deepEqual(result.tracks.map(track => track.videoId), ['sc:1', 'sc:2']);
-  const single = await resolveQuery('https://on.soundcloud.com/AbC123', 'Alice',
+  const single = await resolveQuery('https://on.soundcloud.com/AbC123', 'Listener A',
     { ...metadata, async playlist() { return soundcloudEntry; } });
   assert.equal(single?.type, 'single');
 });
@@ -117,9 +117,9 @@ test('SoundCloud search is used only when requested', async () => {
   const queries: string[] = [];
   const client: MetadataClient = { ...metadata, async searchSoundCloud(query) { queries.push(query); return soundcloudEntry; } };
   seen.length = 0;
-  const result = await resolveQuery('lofi', 'Alice', client, 1, { source: 'soundcloud' });
+  const result = await resolveQuery('lofi', 'Listener A', client, 1, { source: 'soundcloud' });
   assert.equal(result?.type === 'single' && result.track.source, 'soundcloud');
   assert.deepEqual(queries, ['lofi']);
   assert.equal(seen.length, 0, 'YouTube search must not run');
-  await assert.rejects(resolveQuery('lofi', 'Alice', metadata, 1, { source: 'soundcloud' }), /недоступен/);
+  await assert.rejects(resolveQuery('lofi', 'Listener A', metadata, 1, { source: 'soundcloud' }), /недоступен/);
 });
