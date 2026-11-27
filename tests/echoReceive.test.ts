@@ -103,7 +103,7 @@ function receiverHarness(context: TestContext) {
     speaking.users.delete('listenerA'); speaking.emit('end', 'listenerA');
     await settle();
   };
-  const send = async (count: number, options: { output?: boolean; echoGain?: number; human?: boolean;
+  const send = async (count: number, options: { output?: boolean; echoGain?: number; human?: boolean; roomLevel?: number;
     delaySamples?: number; sound?: 'music' | 'cue' | 'tts' } = {}): Promise<void> => {
     const { output = true, echoGain = 0.35, human = false, delaySamples = 2192, sound = 'music' } = options;
     for (let tick = 0; tick < count; tick++, frame++) {
@@ -124,7 +124,8 @@ function receiverHarness(context: TestContext) {
       for (let i = 0; i < 320; i++) {
         const sample = frame * 320 + i;
         const reflected = (played[sample - delaySamples] ?? 0) * echoGain;
-        const value = Math.round(reflected + (human ? foreground(sample) : 0));
+        const room = (options.roomLevel ?? 0) * Math.sin(sample * 2 * Math.PI * 347 / 16_000);
+        const value = Math.round(reflected + room + (human ? foreground(sample) : 0));
         mic.writeInt16LE(Math.max(-32768, Math.min(32767, value)), i * 2);
       }
       const stream = streams.get('listenerA');
@@ -178,6 +179,21 @@ test(`${humanFrames * 20} ms human commands remain usable during playback with m
       for (let i = 0; i < turn.pcm.length; i += 2) energy += turn.pcm.readInt16LE(i) ** 2;
       assert.ok(Math.sqrt(energy / (turn.pcm.length / 2)) > 500, 'foreground speech must retain useful energy');
     }
+  } finally { await h.close(); }
+});
+
+for (const backgroundFrames of [45, 230]) test(`a wake finishes over music after ${backgroundFrames * 20} ms of steady microphone noise`, async context => {
+  const h = receiverHarness(context);
+  const room = { roomLevel: 2850, echoGain: 0.2 };
+  try {
+    h.open();
+    await h.send(backgroundFrames, room);
+    assert.equal(h.wakeChecks(), 0);
+    await h.send(20, { ...room, human: true });
+    await h.send(45, room);
+    assert.ok(h.voice.session.awaits('listenerA'), 'wake must complete while the mic and player are still streaming');
+    assert.equal(h.recognized.length, 1);
+    assert.ok(h.recognized[0]!.pcm.length <= 1200 * 32);
   } finally { await h.close(); }
 });
 

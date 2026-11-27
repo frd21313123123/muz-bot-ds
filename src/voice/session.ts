@@ -71,6 +71,7 @@ export interface SpeechCapture {
 type Phase = 'idle' | 'signalling' | 'awaiting' | 'capturing' | 'processing' | 'disabled';
 const WAKE_WINDOW_BYTES = 2 * 16_000 * 2; // Two seconds of 16 kHz mono PCM16.
 const STANDALONE_RECHECK_MS = 4_000;
+const STANDALONE_RETRY_GAP_MS = 1_000;
 // This lower candidate threshold only grants an exact-name transcription check.
 const STANDALONE_CANDIDATE_SCORE = 0.25;
 const MAX_ISOLATED_VOICE_MS = 1_200;
@@ -80,7 +81,7 @@ function shortVoiceBurst(pcm: Buffer): { start: number; end: number } | null {
   if (pcm.length < 120 * 32) return null;
   const frameBytes = 20 * 32;
   const powers: number[] = [];
-  let loudest = 0, quietest = Infinity, audibleFrames = 0;
+  let loudest = 0, quietest = Infinity;
   for (let offset = 0; offset + frameBytes <= pcm.length; offset += frameBytes) {
     let sum = 0, squares = 0;
     for (let i = offset; i < offset + frameBytes; i += 2) {
@@ -93,10 +94,12 @@ function shortVoiceBurst(pcm: Buffer): { start: number; end: number } | null {
     powers.push(power);
     loudest = Math.max(loudest, power);
     quietest = Math.min(quietest, power);
-    if (power >= 32 ** 2) audibleFrames++;
   }
-  if (audibleFrames < 4 || loudest < 4 * quietest) return null;
-  const floor = Math.max(32 ** 2, loudest * 0.04);
+  if (loudest < 4 * quietest) return null;
+  // Use the receiver's minimum audible RMS. A steady room tone can be well
+  // above it, so count only frames that also rise above this clip's background.
+  const floor = Math.max(12 ** 2, quietest * 2, loudest * 0.04);
+  if (powers.filter(value => value >= floor).length < 4) return null;
   const start = powers.findIndex(value => value >= floor) * frameBytes;
   let last = powers.length - 1;
   while (powers[last]! < floor) last--;
@@ -105,9 +108,9 @@ function shortVoiceBurst(pcm: Buffer): { start: number; end: number } | null {
 }
 
 function liftQuietWake(pcm: Buffer, rms: number, peak: number): Buffer {
-  // Give a quiet microphone up to 18 dB of gain, aiming for -22 dBFS RMS.
+  // Give a quiet microphone up to 30 dB of gain, aiming for -22 dBFS RMS.
   // Leave peak headroom and keep the original recording untouched.
-  const gain = Math.min(8, 2600 / rms, 29_400 / peak);
+  const gain = Math.min(32, 2600 / rms, 29_400 / peak);
   if (gain <= 1) return pcm;
   const adjusted = Buffer.allocUnsafe(pcm.length);
   for (let i = 0; i < pcm.length; i += 2) {
@@ -130,7 +133,7 @@ export class VoiceSession {
   private capturing = new Set<string>();
   private cueReady: Promise<void> | null = null;
   private recognizedMusic = false;
-  private standaloneChecks = new Map<string, number>();
+  private standaloneChecks = new Map<string, { at: number; credits: number }>();
 
   constructor(private readonly backend: VoiceBackend, private readonly host: VoiceHost,
     private readonly timings = { waitMs: 10_000, commandMs: 15_000, wakeMs: 4_000 }) {}
@@ -203,11 +206,16 @@ export class VoiceSession {
 
   private allowStandaloneCheck(userId: string): boolean {
     const now = performance.now();
-    if ((this.standaloneChecks.get(userId) ?? 0) > now) return false;
-    for (const [speaker, expires] of this.standaloneChecks) {
-      if (expires <= now) this.standaloneChecks.delete(speaker);
+    const last = this.standaloneChecks.get(userId);
+    // Allow one prompt repetition. Sustained model misses still get only one
+    // new transcription credit per four seconds on this microphone.
+    if (last && now - last.at < STANDALONE_RETRY_GAP_MS) return false;
+    const credits = last ? Math.min(2, last.credits + (now - last.at) / STANDALONE_RECHECK_MS) : 2;
+    if (credits < 1) return false;
+    for (const [speaker, check] of this.standaloneChecks) {
+      if (now - check.at >= 2 * STANDALONE_RECHECK_MS) this.standaloneChecks.delete(speaker);
     }
-    this.standaloneChecks.set(userId, now + STANDALONE_RECHECK_MS);
+    this.standaloneChecks.set(userId, { at: now, credits: credits - 1 });
     return true;
   }
 
@@ -307,7 +315,7 @@ export class VoiceSession {
             if (!valid()) return;
             let confidence = candidate.probability;
             if (!candidate.wake && shortWake && performance.now() - started <= STANDALONE_RECHECK_MS
-              && (this.standaloneChecks.get(userId) ?? 0) <= performance.now()) {
+              && this.allowStandaloneCheck(userId)) {
               const start = Math.max(0, shortWake.start - 100 * 32);
               const end = Math.min(speechPcm.length, shortWake.end + 80 * 32);
               // The detector right-aligns its input. Try again without the long
@@ -319,7 +327,7 @@ export class VoiceSession {
               }
               // A different voice/mic can score near zero on the first try.
               // Only an exact isolated name can open the speaker-bound turn.
-              standaloneCheck = this.allowStandaloneCheck(userId);
+              standaloneCheck = true;
             }
             report({ stage: 'recognition', kind: 'wake', audioMs: Math.round(prefix.length / 32),
               ms: Math.round(performance.now() - wakeStart), confidence,

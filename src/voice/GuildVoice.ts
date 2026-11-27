@@ -24,15 +24,6 @@ function frameRms(pcm: Buffer): number {
   return Math.sqrt(energy / (pcm.length / 2));
 }
 
-function voicedBytes(pcm: Buffer): number {
-  let bytes = 0;
-  for (let offset = 0; offset < pcm.length; offset += 20 * PCM_BYTES_PER_MS) {
-    const frame = pcm.subarray(offset, offset + 20 * PCM_BYTES_PER_MS);
-    if (frameRms(frame) > 12) bytes += frame.length;
-  }
-  return bytes;
-}
-
 export class GuildVoice {
   readonly session: VoiceSession;
   enabled = true;
@@ -411,6 +402,7 @@ export class GuildVoice {
     let chunks: Buffer[] = [];
     let bytes = 0;
     let quiet = 0, peak = 0, foundOnset = false, hasVoice = false;
+    let wakeBackground = 0;
     let voiceBytes = 0, candidateVoiceBytes = 0;
     let noise: number | undefined, lastRms = 0;
     let calibrateBytes = first || freshCommand ? 0 : PREROLL_BYTES;
@@ -423,6 +415,7 @@ export class GuildVoice {
       active?.signal.removeEventListener('abort', detach);
       active = null;
       chunks = []; bytes = 0; peak = 0; quiet = 0; foundOnset = false; hasVoice = false;
+      wakeBackground = 0;
       voiceBytes = 0; candidateVoiceBytes = 0;
       lead = []; leadBytes = 0;
     };
@@ -463,16 +456,9 @@ export class GuildVoice {
       next.signal.addEventListener('abort', detach, { once: true });
       setDeadline(next);
     };
-    const accept = ({ pcm, echoOnly, echoRelated = false }: EchoResult): void => {
-      if (!pcm.length) return;
-      if (echoOnly) {
-        this.noteInput(userId, 'подавлено эхо собственного воспроизведения.');
-        if (active && !hasVoice) finish(false);
-        candidateVoiceBytes = 0;
-        if (!active) { lead = []; leadBytes = 0; }
-      } else if (active && bytes === 0) this.noteInput(userId, 'бот получил звук.');
+    const acceptFrame = (pcm: Buffer, echoOnly: boolean, echoRelated: boolean): void => {
       const rms = lastRms = frameRms(pcm);
-      const voiced = echoOnly ? 0 : voicedBytes(pcm);
+      const voiced = !echoOnly && rms > 12 ? pcm.length : 0;
       if (calibrateBytes > 0) {
         calibrateBytes -= pcm.length;
         noise = rms;
@@ -483,7 +469,8 @@ export class GuildVoice {
         return;
       }
       const floor = noise ?? rms;
-      const rise = rms > Math.max(12, floor * 2.5);
+      const wake = this.session.phase === 'idle';
+      const rise = rms > Math.max(12, floor * (wake ? 1.6 : 2.5));
       // Track quieter frames quickly and a rising background slowly. Both
       // onset and endpoint are relative to this microphone's own levels.
       const frameMs = pcm.length / PCM_BYTES_PER_MS;
@@ -511,6 +498,7 @@ export class GuildVoice {
       if (active) {
         if (rise && !foundOnset) {
           foundOnset = true;
+          if (wake) wakeBackground = floor;
           if (bytes <= PREROLL_BYTES || peak < Math.max(24, floor * 2)) {
             if (bytes > leadBytes) setDeadline(active);
             chunks = [...lead]; bytes = leadBytes;
@@ -520,13 +508,32 @@ export class GuildVoice {
         voiceBytes += voiced;
         hasVoice ||= voiced > 0 && (!echoRelated || voiceBytes >= MIN_RELATED_VOICE_BYTES);
         peak = Math.max(peak, rms);
-        quiet = peak > 12 && rms < Math.max(6, peak * 0.3) ? quiet + pcm.length : 0;
+        // Playback leakage can keep an open mic above 30% of the voice peak.
+        // Compare with the floor before speech, so a sustained vowel cannot
+        // raise its own endpoint as the running noise estimate catches up.
+        const endpoint = Math.max(6, peak * 0.3, Math.min(peak * 0.7, wakeBackground * 1.25));
+        quiet = peak > 12 && rms < endpoint ? quiet + pcm.length : 0;
         if (bytes > active.maxMs * PCM_BYTES_PER_MS) finish(false);
         else if (quiet >= active.silenceMs * PCM_BYTES_PER_MS) finish(true);
       }
       lead.push(pcm); leadBytes += pcm.length;
       const preroll = candidateVoiceBytes ? COMMAND_PREROLL_BYTES : PREROLL_BYTES;
       while (leadBytes > preroll) leadBytes -= lead.shift()!.length;
+    };
+    const accept = ({ pcm, echoOnly, echoRelated = false }: EchoResult): void => {
+      if (!pcm.length) return;
+      if (echoOnly) {
+        this.noteInput(userId, 'подавлено эхо собственного воспроизведения.');
+        if (active && !hasVoice) finish(false);
+        candidateVoiceBytes = 0;
+        if (!active) { lead = []; leadBytes = 0; }
+      } else if (active && bytes === 0) this.noteInput(userId, 'бот получил звук.');
+      // Echo alignment needs 80 ms of context. Measure speech in Discord-sized
+      // frames so a short syllable is not averaged together with the music.
+      const frameBytes = 20 * PCM_BYTES_PER_MS;
+      for (let offset = 0; offset < pcm.length; offset += frameBytes) {
+        acceptFrame(pcm.subarray(offset, offset + frameBytes), echoOnly, echoRelated);
+      }
     };
     const data = (packet: Buffer): void => {
       try {

@@ -790,7 +790,7 @@ test('a quiet isolated name missed locally can wake its speaker, while short non
     await h.session.begin('listenerA')!.complete(burst);
     assert.equal(h.cues, 0); assert.deepEqual(h.actions, []);
     assert.equal(inputs.length, 1);
-    assert.equal(inputs[0]!.readInt16LE(3250), 8 * original.readInt16LE(3250));
+    assert.equal(inputs[0]!.readInt16LE(3250), 32 * original.readInt16LE(3250));
     assert.deepEqual(burst, original);
     text = 'бот';
     await h.session.begin('listenerA')!.complete(burst);
@@ -807,6 +807,24 @@ function isolatedBurst(): Buffer {
   for (let i = 1600; i < 4800; i++) pcm.writeInt16LE(Math.round(280 * Math.sin(i * 0.09)), i * 2);
   return pcm;
 }
+
+test('a very quiet but distinct name is amplified before both acoustic and text recognition', async () => {
+  const burst = isolatedBurst();
+  for (let i = 0; i < burst.length; i += 2) burst.writeInt16LE(Math.round(burst.readInt16LE(i) / 8), i);
+  const inputs: Buffer[] = [];
+  const h = harness({
+    detectWake: async pcm => { inputs.push(pcm); return { wake: false, probability: 0.5 }; },
+    transcribe: async pcm => { inputs.push(pcm); return 'бот'; },
+  });
+  try {
+    h.setName('бот');
+    await h.session.begin('alice')!.complete(burst);
+    assert.ok(h.session.awaits('alice'));
+    assert.equal(inputs.length, 2);
+    assert.ok(Math.abs(inputs[0]!.readInt16LE(3250)) >= 1000);
+    assert.deepEqual(inputs[0], inputs[1]);
+  } finally { h.session.disable(); }
+});
 
 test('the quiet tail can be shortened for the local detector while STT receives the complete utterance', async () => {
   const lengths: number[] = [];
@@ -870,6 +888,25 @@ test('an extremely low local score still verifies the first standalone name per 
     now += 4100;
     await h.session.begin('listenerA')!.complete(burst);
     assert.equal(calls, 3); assert.equal(h.cues, 2); assert.ok(h.session.awaits('listenerA'));
+  } finally { h.session.disable(); }
+});
+
+test('a repeated isolated name gets a second check after a second, with sustained misses still limited', async context => {
+  let now = 0, calls = 0, transcript = 'кот';
+  context.mock.method(performance, 'now', () => now);
+  const h = harness({ detectWake: async () => ({ wake: false, probability: .1 }),
+    transcribe: async () => { calls++; return transcript; } });
+  h.setName('бот');
+  const speak = () => h.session.begin('alice')!.complete(isolatedBurst());
+  try {
+    await speak();
+    now = 1000; await speak();
+    assert.equal(calls, 2); assert.equal(h.cues, 0);
+    transcript = 'бот';
+    now = 2000; await speak();
+    assert.equal(calls, 2); assert.equal(h.cues, 0);
+    now = 4000; await speak();
+    assert.equal(calls, 3); assert.ok(h.session.awaits('alice'));
   } finally { h.session.disable(); }
 });
 
