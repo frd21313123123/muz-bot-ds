@@ -46,7 +46,7 @@ function receiverHarness(context: TestContext) {
   context.mock.method(performance, 'now', () => now);
   const streams = new Map<string, PassThrough>();
   const speaking = Object.assign(new EventEmitter(), { users: new Map<string, number>() });
-  const states = new Map([['bot', { channelId: 'voice' }], ['alice', { channelId: 'voice' }]]);
+  const states = new Map([['bot', { channelId: 'voice' }], ['listenerA', { channelId: 'voice' }]]);
   const connection = {
     state: { status: VoiceConnectionStatus.Ready }, joinConfig: {},
     receiver: { speaking, subscribe: (id: string) => {
@@ -60,8 +60,8 @@ function receiverHarness(context: TestContext) {
   const client = {
     queues: new Map(), user: { id: 'bot', username: 'Бот' },
     guilds: { cache: new Map([['echo-receive', { voiceStates: { cache: states },
-      members: { me: { displayName: 'Бот' }, cache: new Map([['alice', { user: { bot: false } }]]) } }]]) },
-    users: { cache: new Map([['alice', { bot: false, username: 'Alice' }]]) },
+      members: { me: { displayName: 'Бот' }, cache: new Map([['listenerA', { user: { bot: false } }]]) } }]]) },
+    users: { cache: new Map([['listenerA', { bot: false, username: 'Listener A' }]]) },
     ytdlp: { related: async () => [] },
   } as unknown as MusicClient;
   const recognized: { command: boolean; pcm: Buffer }[] = [];
@@ -92,15 +92,15 @@ function receiverHarness(context: TestContext) {
   const played: number[] = [];
   let frame = 0;
   const open = (): PassThrough => {
-    speaking.users.set('alice', Date.now());
-    speaking.emit('start', 'alice');
-    const stream = streams.get('alice');
+    speaking.users.set('listenerA', Date.now());
+    speaking.emit('start', 'listenerA');
+    const stream = streams.get('listenerA');
     assert.ok(stream && !stream.destroyed, 'the eligible human must have a receiver');
     return stream;
   };
   const end = async (): Promise<void> => {
-    streams.get('alice')?.end();
-    speaking.users.delete('alice'); speaking.emit('end', 'alice');
+    streams.get('listenerA')?.end();
+    speaking.users.delete('listenerA'); speaking.emit('end', 'listenerA');
     await settle();
   };
   const send = async (count: number, options: { output?: boolean; echoGain?: number; human?: boolean;
@@ -127,7 +127,7 @@ function receiverHarness(context: TestContext) {
         const value = Math.round(reflected + (human ? foreground(sample) : 0));
         mic.writeInt16LE(Math.max(-32768, Math.min(32767, value)), i * 2);
       }
-      const stream = streams.get('alice');
+      const stream = streams.get('listenerA');
       if (stream && !stream.destroyed && !stream.writableEnded) stream.write(Buffer.from(microphone.encode(mic, 320)));
       else microphone.encode(mic, 320); // Keep the microphone encoder's history continuous.
       await settle();
@@ -166,7 +166,7 @@ test(`${humanFrames * 20} ms human commands remain usable during playback with m
     assert.equal(h.recognized.length, 0);
     await h.send(humanFrames, { echoGain, human: true });
     await h.send(30, { echoGain });
-    assert.equal(h.voice.session.awaits('alice'), true, 'human wake speech must survive ongoing playback');
+    assert.equal(h.voice.session.awaits('listenerA'), true, 'human wake speech must survive ongoing playback');
     await h.send(humanFrames, { echoGain, human: true });
     await h.send(50, { echoGain });
     await h.end();
@@ -201,7 +201,7 @@ for (const sound of ['music', 'cue', 'tts'] as const) test(`${sound} confirmatio
     await h.send(50, { output: false });
     await h.end();
     assert.deepEqual(h.recognized.map(turn => turn.command), [false], 'cue echo is not a command');
-    assert.equal(h.voice.session.awaits('alice'), true, 'the original wake remains valid after cue echo');
+    assert.equal(h.voice.session.awaits('listenerA'), true, 'the original wake remains valid after cue echo');
     h.open();
     await h.send(25, { output: false, echoGain: 0, human: true });
     await h.send(50, { output: false, echoGain: 0 });

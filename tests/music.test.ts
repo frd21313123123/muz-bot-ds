@@ -31,7 +31,7 @@ function harness(backendOverrides: Partial<MusicBackend> = {}, metadataOverrides
     },
     video: async (url) => { calls.push(`video:${url}`); return entries[0]!; }, ...metadataOverrides,
   };
-  return { calls, events, controller, resolve: (message: string) => resolveMusicRequest(message, 'Alice', backend, metadata, controller.signal, (event) => events.push(event)) };
+  return { calls, events, controller, resolve: (message: string) => resolveMusicRequest(message, 'Listener A', backend, metadata, controller.signal, (event) => events.push(event)) };
 }
 
 test('music extraction keeps title punctuation, conjunctions, artist and version', () => {
@@ -126,7 +126,7 @@ test('plain and version requests preserve search order without calling a selecto
   assert.deepEqual(plain.calls, ['search:Numb']);
   const live = harness();
   const track = await live.resolve('включи Numb live');
-  assert.equal(track?.videoId, 'aaaaaaaaaaa'); assert.equal(track?.requestedBy, 'Alice');
+  assert.equal(track?.videoId, 'aaaaaaaaaaa'); assert.equal(track?.requestedBy, 'Listener A');
   assert.deepEqual(live.calls, ['search:Numb live']);
   assert.equal(JSON.stringify(live.events).includes('Numb'), false);
 });

@@ -2,7 +2,7 @@
 setlocal
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
-title Wake-Word Spotter "BOT" (Alice Mode)
+title Wake-Word Spotter "BOT"
 
 set "PYTHON_EXE=%~dp0.runtime\voice\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" (

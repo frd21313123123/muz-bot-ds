@@ -136,7 +136,7 @@ def main():
     # Print clear dashboard header
     os.system('cls' if os.name == 'nt' else 'clear')
     print(CYAN + "=" * 74)
-    print(f"  🤖 НЕЙРОСЕТЕВОЙ МОНИТОР ВЕЙК-ВОРДА «{wake_word.upper()}» (Режим Алисы)")
+    print(f"  🤖 НЕЙРОСЕТЕВОЙ МОНИТОР ВЕЙК-ВОРДА «{wake_word.upper()}»")
     print("=" * 74 + RESET)
     print(f"  {WHITE}Модель:{RESET}     {model_dir.name} (INT8 ONNX)")
     print(f"  {WHITE}Микрофон:{RESET}   {device_name}")

@@ -31,11 +31,10 @@ export interface PlayerSnapshot {
 
 export interface PlayerApi {
   play(target: WebTarget, query: string, requestedBy: string,
-    options?: { source?: SearchSource; move?: boolean; fast?: boolean }): Promise<PlayResult>;
+    options?: { source?: SearchSource; move?: boolean }): Promise<PlayResult>;
   radio(target: WebTarget, station: RadioStation, requestedBy: string,
     options?: { move?: boolean }): Promise<{ station: string }>;
   act(target: WebTarget, action: PlayerAction, value?: number | boolean): Promise<ActResult>;
-  queue(target: WebTarget): QueueView | null;
   snapshot(): PlayerSnapshot;
 }
 
@@ -76,7 +75,7 @@ export class PlayerService implements PlayerApi {
   constructor(readonly client: MusicClient) {}
 
   async play(target: WebTarget, query: string, requestedBy: string,
-    options: { source?: SearchSource; move?: boolean; fast?: boolean } = {}): Promise<PlayResult> {
+    options: { source?: SearchSource; move?: boolean } = {}): Promise<PlayResult> {
     const trimmed = query.trim();
     if (!trimmed) throw new Error('Укажите название трека или ссылку.');
     if (trimmed.length > 500) throw new Error('Слишком длинный запрос.');
@@ -89,7 +88,7 @@ export class PlayerService implements PlayerApi {
     const created = !queue;
     if (!queue) {
       queue = new GuildQueue(target.guildId, this.client);
-      // A web/bridge play starts music, not Discord voice listening. Existing
+      // Playback from the panel starts music without Discord voice listening. Existing
       // queues keep whatever /join or /voice configured.
       await queue.setVoiceEnabled(false);
       this.client.queues.set(target.guildId, queue);
@@ -99,7 +98,7 @@ export class PlayerService implements PlayerApi {
       const result = await Promise.all([
         queue.join(channel),
         resolveQuery(trimmed, requestedBy, this.client.ytdlp, 1, {
-          fast: options.fast ?? false, signal: request.signal, source: options.source ?? 'youtube',
+          signal: request.signal, source: options.source ?? 'youtube',
         }),
       ]).then(([, resolved]) => resolved);
       if (queue.closed) throw new Error('Очередь остановлена.');
@@ -185,11 +184,6 @@ export class PlayerService implements PlayerApi {
       default:
         throw new Error('Неизвестное действие.');
     }
-  }
-
-  queue(target: WebTarget): QueueView | null {
-    const queue = this.client.queues.get(target.guildId);
-    return queue && !queue.closed ? queueView(queue) : null;
   }
 
   snapshot(): PlayerSnapshot {

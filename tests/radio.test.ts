@@ -14,7 +14,7 @@ import { commands } from '../src/commands.js';
 import { onInteraction } from '../src/events/interactionCreate.js';
 
 const station = radioStations[0]!;
-const song = toTrack({ id: 'aaaaaaaaaaa', title: 'Numb', duration: 180 }, 'Alice');
+const song = toTrack({ id: 'aaaaaaaaaaa', title: 'Numb', duration: 180 }, 'Listener A');
 const nextSong = toTrack({ id: 'bbbbbbbbbbb', title: 'Sonne', duration: 200 }, 'Bob');
 const tick = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 async function until(predicate: () => boolean): Promise<void> {
@@ -139,14 +139,14 @@ test('new radio requests supersede older ones; user departure and stop cancel on
   const h = harness(() => { const value = media(false); streams.push(value); return value; });
   try {
     await h.queue.addTrack(song);
-    const a = h.queue.playRadio(station, 'Alice', { userId: 'alice' });
+    const a = h.queue.playRadio(station, 'Listener A', { userId: 'listenerA' });
     const b = h.queue.playRadio(radioStations[1]!, 'Bob', { userId: 'bob' });
     assert.equal(await a, false); assert.equal(streams[0]!.stream.destroyed, true);
-    h.queue.cancelRadioRequest('alice');
+    h.queue.cancelRadioRequest('listenerA');
     streams[1]!.stream.write(Buffer.alloc(3840));
     assert.equal(await b, true);
-    const c = h.queue.playRadio(station, 'Alice', { userId: 'alice' });
-    h.queue.cancelRadioRequest('alice'); assert.equal(await c, false);
+    const c = h.queue.playRadio(station, 'Listener A', { userId: 'listenerA' });
+    h.queue.cancelRadioRequest('listenerA'); assert.equal(await c, false);
     const d = h.queue.playRadio(station, 'Bob');
     await h.queue.stop(); assert.equal(await d, false);
     assert.ok(streams.every(value => value.stream.destroyed));
@@ -159,7 +159,7 @@ test('aborted voice requests and changed presence never clear the queue or switc
     const controller = new AbortController(); let present = true;
     try {
       await h.queue.addTracks([song, nextSong]);
-      const pending = h.queue.playRadio(station, 'Alice', { signal: controller.signal, valid: () => present });
+      const pending = h.queue.playRadio(station, 'Listener A', { signal: controller.signal, valid: () => present });
       if (mode === 'abort') controller.abort(); else present = false;
       opening.stream.write(Buffer.alloc(3840));
       assert.equal(await pending, false); assert.equal(h.queue.currentTrack, song);
@@ -171,7 +171,7 @@ test('aborted voice requests and changed presence never clear the queue or switc
 test('pause destroys the live stream; resume opens a fresh broadcast without seeking', async () => {
   const h = harness();
   try {
-    await h.queue.playRadio(station, 'Alice');
+    await h.queue.playRadio(station, 'Listener A');
     assert.equal(h.queue.pause(), true); assert.equal(h.queue.isPaused, true);
     assert.equal(h.radio[0]!.stream.destroyed, true);
     assert.equal(h.queue.pause(), false);
@@ -186,7 +186,7 @@ test('music replaces radio immediately and skip ends radio without retrying it',
   for (const mode of ['music', 'skip']) {
     const h = harness();
     try {
-      await h.queue.playRadio(station, 'Alice');
+      await h.queue.playRadio(station, 'Listener A');
       if (mode === 'music') { await h.queue.addTrack(nextSong); assert.equal(h.queue.currentTrack, nextSong); }
       else { assert.equal(h.queue.skip(), true); await tick(); assert.equal(h.queue.currentTrack, null); }
       assert.equal(h.radio[0]!.stream.destroyed, true); assert.equal(h.radio.length, 1);
@@ -198,7 +198,7 @@ test('radio interruptions retry three times and fall back to queued music after 
   let attempts = 0;
   const h = harness(() => { attempts++; if (attempts > 1) throw new Error('offline'); return media(); });
   try {
-    await h.queue.playRadio(station, 'Alice');
+    await h.queue.playRadio(station, 'Listener A');
     h.queue.pending.add(nextSong); // Simulate a pending track while a stream fails.
     h.queue.player.stop(true);
     await until(() => h.queue.currentTrack === nextSong);
@@ -210,7 +210,7 @@ test('radio interruptions retry three times and fall back to queued music after 
 test('successful recovery keeps the live station and stop cancels a delayed reconnect', async () => {
   const h = harness(undefined, [5, 10, 20]);
   try {
-    await h.queue.playRadio(station, 'Alice');
+    await h.queue.playRadio(station, 'Listener A');
     h.queue.player.stop(true);
     await until(() => h.radio.length === 2 && h.queue.currentTrack?.source === 'radio');
     assert.equal(h.queue.isRadio, true);
@@ -241,9 +241,9 @@ test('/radio and /play station requests use the same queue, ephemeral replies an
     const channel = { id: 'voice', permissionsFor: () => new PermissionsBitField([
       PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.Speak,
     ]) } as unknown as VoiceBasedChannel;
-    const states = new Map([['alice', { channel }]]);
+    const states = new Map([['listenerA', { channel }]]);
     const interaction = { guildId: h.queue.guildId, guild: { members: { me: {} }, voiceStates: { cache: states } },
-      channelId: 'text', user: { id: 'alice', username: 'Alice' }, options: { getString: () => target },
+      channelId: 'text', user: { id: 'listenerA', username: 'Listener A' }, options: { getString: () => target },
       deferReply: async (payload: unknown) => { replies.push(payload); },
       editReply: async (payload: unknown) => { replies.push(payload); },
     } as unknown as ChatInputCommandInteraction;
@@ -255,7 +255,7 @@ test('/radio and /play station requests use the same queue, ephemeral replies an
       assert.deepEqual(replies[0], { flags: MessageFlags.Ephemeral });
       assert.equal(h.queue.currentTrack?.source, 'radio');
       assert.match(JSON.stringify(replies.at(-1)), /Ретро FM/);
-      states.set('alice', { channel: { ...channel, id: 'other' } as VoiceBasedChannel });
+      states.set('listenerA', { channel: { ...channel, id: 'other' } as VoiceBasedChannel });
       target = 'Европа Плюс';
       await command.execute(interaction, h.queue.client);
       assert.match(JSON.stringify(replies.at(-1)), /тот же голосовой канал/);
@@ -286,9 +286,9 @@ test('/radio verifies Connect/Speak permissions and rechecks membership after jo
     const channel = { id: 'voice', permissionsFor: () => new PermissionsBitField(mode === 'permissions' ? [] : [
       PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.Speak,
     ]) } as unknown as VoiceBasedChannel;
-    const states = new Map([['alice', { channel }]]);
+    const states = new Map([['listenerA', { channel }]]);
     const interaction = { guildId: h.queue.guildId, guild: { members: { me: {} }, voiceStates: { cache: states } },
-      channelId: 'text', user: { id: 'alice', username: 'Alice' }, options: { getString: () => 'Европа Плюс' },
+      channelId: 'text', user: { id: 'listenerA', username: 'Listener A' }, options: { getString: () => 'Европа Плюс' },
       deferReply: async () => {}, editReply: async (value: unknown) => { reply = value; },
     } as unknown as ChatInputCommandInteraction;
     h.queue.voiceChannel = channel;

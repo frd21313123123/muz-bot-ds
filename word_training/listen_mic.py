@@ -1,7 +1,7 @@
 """
 Live microphone wake-word listener (Keyword Spotter).
-Listens for the wake-word (e.g. «бот») in real-time from the microphone,
-just like smart assistants (Alice, Siri, Alexa), and emits a signal/event.
+Listens for the wake-word (e.g. «бот») in real-time from the microphone
+and emits a signal/event when it is detected.
 """
 
 import argparse

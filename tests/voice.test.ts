@@ -22,38 +22,38 @@ test('only activated STT input is archived, including compound requests and fail
   const short = Buffer.alloc(800 * 32);
   const command = Buffer.alloc(2000 * 32);
   try {
-    await h.session.begin('alice')!.complete(short);
+    await h.session.begin('listenerA')!.complete(short);
     assert.equal(archived.length, 0);
     wake = true;
     transcript = 'В разговоре упомянули Музу';
-    await h.session.begin('alice')!.complete(command);
+    await h.session.begin('listenerA')!.complete(command);
     assert.deepEqual(archived, []);
     transcript = 'Муза';
-    await h.session.begin('alice')!.complete(short);
+    await h.session.begin('listenerA')!.complete(short);
     assert.equal(archived.length, 0);
     assert.equal(h.session.begin('bob'), null);
     transcript = 'Следующий трек';
-    await h.session.begin('alice')!.complete(command);
+    await h.session.begin('listenerA')!.complete(command);
     assert.deepEqual(archived, [command]);
     transcript = 'Муза, следующий трек';
-    await h.session.begin('alice')!.complete(command);
+    await h.session.begin('listenerA')!.complete(command);
     assert.deepEqual(archived, [command, command]);
     transcript = 'Муза';
-    await h.session.begin('alice')!.complete(short);
+    await h.session.begin('listenerA')!.complete(short);
     transcript = '';
-    await h.session.begin('alice')!.complete(command);
+    await h.session.begin('listenerA')!.complete(command);
     assert.equal(archived.length, 3);
     h.setPresent(false);
-    assert.equal(h.session.begin('alice'), null);
+    assert.equal(h.session.begin('listenerA'), null);
   } finally { h.session.disable(); }
 });
 
 test('archive errors do not stop a voice command', async () => {
   const h = harness({}, { archiveAudio: () => { throw new Error('disk full'); } });
   try {
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     h.setText('Следующий трек');
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
   } finally { h.session.disable(); }
 });
@@ -71,8 +71,8 @@ test('extended phrase dictionary works through rules and voice sessions without 
           assert.deepEqual(ruleIntent(text), expected, text);
           assert.equal(playerControlRequest(text), true, text);
           assert.equal(extractMusicRequest(text, true), null, text);
-          h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-          h.setText(text); await h.session.begin('alice')!.complete(audio);
+          h.setText('Муза'); await h.session.begin('listenerA')!.complete(audio);
+          h.setText(text); await h.session.begin('listenerA')!.complete(audio);
         }
         for (const text of [`Не ${phrase}`, `${phrase}?`, `${phrase} и пауза`, `${phrase} завтра`]) {
           assert.deepEqual(ruleIntent(text), { action: 'unknown' }, text);
@@ -152,8 +152,8 @@ test('voice session classifies canonical conversational requests and executes co
     } }, { playMusic: async () => { assert.fail('Control must not search for music'); } });
     try {
       for (const phrase of phrases) {
-        h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-        h.setText(phrase); await h.session.begin('alice')!.complete(audio);
+        h.setText('Муза'); await h.session.begin('listenerA')!.complete(audio);
+        h.setText(phrase); await h.session.begin('listenerA')!.complete(audio);
       }
       assert.deepEqual(h.actions, phrases.map(() => ({ action })));
     } finally { h.session.disable(); }
@@ -245,14 +245,14 @@ test('the full form still requires the configured wake word before any control',
     h.setName('бот');
     for (const text of ['сделай тише', 'музыкальный', 'музыкальный вот', 'музыкальный кот, сделай тише',
       'музыкальный ботаник, сделай тише', 'мы обсуждали музыкального бота', 'он сказал музыкальный бот']) {
-      h.setText(text); await h.session.begin('alice')!.complete(audio);
+      h.setText(text); await h.session.begin('listenerA')!.complete(audio);
     }
     assert.equal(h.cues, 0); assert.deepEqual(h.actions, []);
     h.setText('Музыкальный бот!');
-    await h.session.begin('alice')!.complete(audio);
-    assert.ok(h.session.awaits('alice')); assert.equal(h.cues, 1);
+    await h.session.begin('listenerA')!.complete(audio);
+    assert.ok(h.session.awaits('listenerA')); assert.equal(h.cues, 1);
     assert.equal(h.session.begin('bob'), null);
-    h.setText('Сделай тише'); await h.session.begin('alice')!.complete(audio);
+    h.setText('Сделай тише'); await h.session.begin('listenerA')!.complete(audio);
     h.setText('Музыкальный бот, поставь на паузу'); await h.session.begin('bob')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'volume_down' }, { action: 'pause' }]); assert.equal(h.cues, 1);
     h.setName('Муза'); h.setText('Музыкальный бот'); await h.session.begin('bob')!.complete(audio);
@@ -267,8 +267,8 @@ test('every explicit mode command executes once without model routing or a YouTu
     const h = harness({ classify: async () => { assert.fail('Explicit modes must not depend on old model labels'); } },
       { playMusic: async () => { assert.fail('A mode must not enqueue a song'); } });
     try {
-      await h.session.begin('alice')!.complete(audio);
-      h.setText(phrase); const capture = h.session.begin('alice')!;
+      await h.session.begin('listenerA')!.complete(audio);
+      h.setText(phrase); const capture = h.session.begin('listenerA')!;
       await capture.complete(audio); await capture.complete(audio);
       assert.deepEqual(h.actions, [{ action }], phrase);
     } finally { h.session.disable(); }
@@ -285,8 +285,8 @@ test('unknown, negated, compound and incomplete modes cannot change state or sea
     const h = harness({ classify: async () => { assert.fail('Invalid modes must be rejected'); } },
       { playMusic: async () => { assert.fail('Invalid modes must not search'); } });
     try {
-      await h.session.begin('alice')!.complete(audio); h.setText(phrase);
-      await h.session.begin('alice')!.complete(audio);
+      await h.session.begin('listenerA')!.complete(audio); h.setText(phrase);
+      await h.session.begin('listenerA')!.complete(audio);
       assert.deepEqual(h.actions, [], phrase);
     } finally { h.session.disable(); }
   }
@@ -316,8 +316,8 @@ test('short next/pause aliases classify as controls before search, while explici
       assert.equal(text, 'Следующий трек'); return { action: 'skip', confidence: 0.99 };
     } }, { playMusic: async () => { assert.fail('A short control must never search'); } });
     try {
-      await h.session.begin('alice')!.complete(audio);
-      h.setText(phrase); const capture = h.session.begin('alice')!;
+      await h.session.begin('listenerA')!.complete(audio);
+      h.setText(phrase); const capture = h.session.begin('listenerA')!;
       await capture.complete(audio); await capture.complete(audio);
       assert.deepEqual(h.actions, [{ action: 'skip' }], phrase);
       assert.equal(h.ducked, false);
@@ -327,8 +327,8 @@ test('short next/pause aliases classify as controls before search, while explici
   const h = harness({ classify: async () => { assert.fail('An explicit title bypasses control classification'); } },
     { playMusic: async message => { assert.equal(message, 'Включи Next'); played++; return true; } });
   try {
-    await h.session.begin('alice')!.complete(audio);
-    h.setText('Включи Next'); await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
+    h.setText('Включи Next'); await h.session.begin('listenerA')!.complete(audio);
     assert.equal(played, 1); assert.equal(h.actions.length, 0);
   } finally { h.session.disable(); }
 });
@@ -338,8 +338,8 @@ test('bare artists close the listening window without searching or classifying',
   const h = harness({ classify: async () => { calls.push('classify'); return { action: 'skip', confidence: 0.999 }; } },
     { playMusic: async () => { calls.push('search'); return true; } });
   try {
-    await h.session.begin('alice')!.complete(audio);
-    h.setText('Монеточка'); await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
+    h.setText('Монеточка'); await h.session.begin('listenerA')!.complete(audio);
     assert.deepEqual(calls, []); assert.equal(h.actions.length, 0);
     assert.equal(h.session.phase, 'idle'); assert.equal(h.ducked, false);
   } finally { h.session.disable(); }
@@ -350,8 +350,8 @@ test('unknown short controls, negative and compound aliases never fall through t
     { playMusic: async () => { assert.fail('Must not search'); } });
   try {
     for (const phrase of ['Next', 'не следующее', 'next and pause', 'do not skip', 'переключи трек и пауза']) {
-      h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-      h.setText(phrase); await h.session.begin('alice')!.complete(audio);
+      h.setText('Муза'); await h.session.begin('listenerA')!.complete(audio);
+      h.setText(phrase); await h.session.begin('listenerA')!.complete(audio);
       assert.equal(h.actions.length, 0); assert.equal(h.ducked, false);
     }
   } finally { h.session.disable(); }
@@ -361,8 +361,8 @@ test('the corpus captures commands once, preserves raw/canonical text and distin
   const examples: TrainingExample[] = [];
   const h = harness({}, { training: row => examples.push(row) });
   try {
-    await h.session.begin('alice')!.complete(audio); assert.equal(examples.length, 0);
-    h.setText('Next'); const capture = h.session.begin('alice')!;
+    await h.session.begin('listenerA')!.complete(audio); assert.equal(examples.length, 0);
+    h.setText('Next'); const capture = h.session.begin('listenerA')!;
     await capture.complete(audio); await capture.complete(audio);
     assert.equal(examples.length, 1);
     assert.equal(examples[0]?.state.message, 'Next'); assert.equal(examples[0]?.state.canonical_message, 'Следующий трек');
@@ -373,8 +373,8 @@ test('the corpus captures commands once, preserves raw/canonical text and distin
   const cancelled = harness({ classify: async () => new Promise(resolve => { release = resolve; }) },
     { training: row => examples.push(row) });
   try {
-    await cancelled.session.begin('alice')!.complete(audio);
-    cancelled.setText('Next'); const processing = cancelled.session.begin('alice')!.complete(audio);
+    await cancelled.session.begin('listenerA')!.complete(audio);
+    cancelled.setText('Next'); const processing = cancelled.session.begin('listenerA')!.complete(audio);
     await Promise.resolve(); cancelled.session.cancel(); release({ action: 'skip', confidence: 1 }); await processing;
     assert.equal(examples.at(-1)?.outcome, 'cancelled'); assert.equal(cancelled.actions.length, 0);
   } finally { cancelled.session.disable(); }
@@ -393,8 +393,8 @@ test('music corpus retains search stages and records late cancellation without a
         return valid();
       } });
     try {
-      await h.session.begin('alice')!.complete(audio);
-      h.setText('Включи Numb'); const capture = h.session.begin('alice')!;
+      await h.session.begin('listenerA')!.complete(audio);
+      h.setText('Включи Numb'); const capture = h.session.begin('listenerA')!;
       const processing = capture.complete(audio); await started;
       if (cancel) h.session.disable();
       release(); await processing; await capture.complete(audio);
@@ -410,8 +410,8 @@ test('music corpus retains search stages and records late cancellation without a
 test('corpus callback failures do not change a successful command', async () => {
   const h = harness({}, { training: () => { throw new Error('write failed'); } });
   try {
-    await h.session.begin('alice')!.complete(audio);
-    h.setText('Next'); await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
+    h.setText('Next'); await h.session.begin('listenerA')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]); assert.equal(h.ducked, false);
   } finally { h.session.disable(); }
 });
@@ -434,13 +434,13 @@ test('music requests, compound commands, negations and low confidence cannot con
 test('activation ducks music, binds the speaker, executes once and restores gain', async () => {
   const h = harness();
   try {
-    const wake = h.session.begin('alice')!;
+    const wake = h.session.begin('listenerA')!;
     assert.equal(wake.silenceMs, 400);
     await wake.complete(audio);
     assert.equal(h.cues, 1); assert.equal(h.ducked, true); assert.equal(h.session.phase, 'awaiting');
     assert.equal(h.session.begin('bob'), null);
     h.setText('Следующий');
-    const command = h.session.begin('alice')!;
+    const command = h.session.begin('listenerA')!;
     assert.equal(command.silenceMs, 800);
     await command.complete(audio); await command.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
@@ -456,13 +456,13 @@ test('the activated speaker can start the command while the wake cue is still pl
     cue: () => new Promise<void>((resolve) => { releaseCue = resolve; cueStarted(); }),
   });
   try {
-    const wake = h.session.begin('alice')!;
+    const wake = h.session.begin('listenerA')!;
     const activated = wake.complete(Buffer.alloc(800 * 32));
     await started;
     assert.equal(h.session.phase, 'signalling');
     assert.equal(h.ducked, true, 'music is already ducked while the cue is playing');
     assert.equal(h.session.begin('bob'), null, 'other speakers cannot take over the cue');
-    const command = h.session.begin('alice')!;
+    const command = h.session.begin('listenerA')!;
     assert.equal(h.session.phase, 'capturing');
     releaseCue();
     await activated;
@@ -483,10 +483,10 @@ test('a failed cue cancels an early command even when its audio has already ende
     failCue = reject; notifyStarted();
   }) });
   try {
-    const activation = h.session.begin('alice')!.complete(audio);
+    const activation = h.session.begin('listenerA')!.complete(audio);
     await started;
     h.setText('Следующий');
-    const capture = h.session.begin('alice')!;
+    const capture = h.session.begin('listenerA')!;
     const processing = capture.complete(audio);
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.deepEqual(h.actions, []);
@@ -506,17 +506,17 @@ test('repeating the wake name re-arms the command window instead of searching fo
     playMusic: async () => { searches++; return false; },
   });
   try {
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.equal(cues, 1); assert.equal(h.session.phase, 'awaiting');
     h.setText('Муза');
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.equal(cues, 2, 'the cue tells the speaker the window is still open');
     assert.equal(h.session.phase, 'awaiting');
     assert.equal(h.ducked, true);
     assert.equal(searches, 0, 'the bot name must never become a music query');
     assert.deepEqual(h.actions, []);
     h.setText('Следующий');
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
     assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle');
   } finally { h.session.disable(); }
@@ -536,13 +536,13 @@ test('generic turn-on requests resume only a paused track and never canonicalize
     for (const text of ['Включи песню', 'Включи Metallica', 'Включи следующую музыку', 'Не включи', 'Включи и пауза', 'Включи музыку?']) {
       assert.equal(contextualCommand(text, true), text);
     }
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     h.setText('Продолжай');
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'resume' }]);
     paused = false;
-    h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-    h.setText('Включи музыку'); await h.session.begin('alice')!.complete(audio);
+    h.setText('Муза'); await h.session.begin('listenerA')!.complete(audio);
+    h.setText('Включи музыку'); await h.session.begin('listenerA')!.complete(audio);
     assert.equal(h.actions.length, 1);
     assert.equal(h.ducked, false);
   } finally { h.session.disable(); }
@@ -554,21 +554,21 @@ test('diagnostics distinguish model rejection and playback no-op without retaini
     paused: () => true, diagnostic: (event) => events.push(event), execute: async () => false,
   });
   try {
-    await h.session.begin('alice')!.complete(audio);
-    h.setText('Продолжай'); await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
+    h.setText('Продолжай'); await h.session.begin('listenerA')!.complete(audio);
     assert.ok(events.some((event) => event.stage === 'recognition' && event.canonicalized));
     assert.ok(events.some((event) => event.stage === 'decision' && event.action === 'resume'));
     assert.ok(events.some((event) => event.stage === 'execution' && event.changed === false));
     assert.equal(JSON.stringify(events).includes('Продолжай'), false);
-    assert.equal(JSON.stringify(events).includes('alice'), false);
+    assert.equal(JSON.stringify(events).includes('listenerA'), false);
   } finally { h.session.disable(); }
 
   const rejectedEvents: VoiceDiagnostic[] = [];
   const rejected = harness({ classify: async () => ({ action: 'private-content', confidence: 0.9 } as unknown as { action: 'skip'; confidence: number }) },
     { diagnostic: (event) => rejectedEvents.push(event) });
   try {
-    await rejected.session.begin('alice')!.complete(audio);
-    rejected.setText('Следующий'); await rejected.session.begin('alice')!.complete(audio);
+    await rejected.session.begin('listenerA')!.complete(audio);
+    rejected.setText('Следующий'); await rejected.session.begin('listenerA')!.complete(audio);
     assert.equal(rejected.actions.length, 0);
     assert.ok(rejectedEvents.some((event) => event.stage === 'decision' && event.action === 'unknown'));
     assert.equal(JSON.stringify(rejectedEvents).includes('private-content'), false);
@@ -578,11 +578,11 @@ test('diagnostics distinguish model rejection and playback no-op without retaini
 test('ten second timeout and maximum command duration release the session', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness();
-  await h.session.begin('alice')!.complete(audio);
+  await h.session.begin('listenerA')!.complete(audio);
   context.mock.timers.tick(9999); assert.equal(h.ducked, true);
   context.mock.timers.tick(1); assert.equal(h.ducked, false);
-  await h.session.begin('alice')!.complete(audio);
-  const command = h.session.begin('alice')!;
+  await h.session.begin('listenerA')!.complete(audio);
+  const command = h.session.begin('listenerA')!;
   context.mock.timers.tick(15_000);
   assert.equal(command.signal.aborted, true); assert.equal(h.ducked, false);
   await command.complete(audio); assert.equal(h.actions.length, 0);
@@ -593,11 +593,11 @@ test('leaving during classification or disabling prevents stale execution', asyn
   for (const cancel of ['leave', 'disable', 'reset'] as const) {
     let resolve!: (value: { action: 'skip'; confidence: number }) => void;
     const h = harness({ classify: () => new Promise((done) => { resolve = done; }) });
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     h.setText('Следующий');
-    const processing = h.session.begin('alice')!.complete(audio);
+    const processing = h.session.begin('listenerA')!.complete(audio);
     await Promise.resolve();
-    if (cancel === 'leave') { h.setPresent(false); h.session.cancelUser('alice'); }
+    if (cancel === 'leave') { h.setPresent(false); h.session.cancelUser('listenerA'); }
     else if (cancel === 'disable') h.session.disable(); else h.session.cancel();
     resolve({ action: 'skip', confidence: 0.99 });
     await processing;
@@ -608,30 +608,30 @@ test('leaving during classification or disabling prevents stale execution', asyn
 
 test('model and cue errors restore state; unsupported requests never call classifier', async () => {
   const cueError = harness({}, { cue: async () => { throw new Error('test'); } });
-  await cueError.session.begin('alice')!.complete(audio);
+  await cueError.session.begin('listenerA')!.complete(audio);
   assert.equal(cueError.session.phase, 'idle'); assert.equal(cueError.ducked, false);
   let calls = 0;
   const h = harness({ classify: async () => { calls++; throw new Error('test'); } });
-  await h.session.begin('alice')!.complete(audio);
+  await h.session.begin('listenerA')!.complete(audio);
   h.setText('Включи музыку');
-  await h.session.begin('alice')!.complete(audio);
+  await h.session.begin('listenerA')!.complete(audio);
   assert.equal(calls, 0); assert.equal(h.ducked, false);
-  h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-  h.setText('Следующий'); await h.session.begin('alice')!.complete(audio);
+  h.setText('Муза'); await h.session.begin('listenerA')!.complete(audio);
+  h.setText('Следующий'); await h.session.begin('listenerA')!.complete(audio);
   assert.equal(calls, 1); assert.equal(h.ducked, false);
   h.session.disable(); cueError.session.disable();
 });
 
 test('concurrent wake results cannot steal activation; renamed wake key takes effect', async () => {
   const h = harness();
-  const alice = h.session.begin('alice')!;
+  const listenerA = h.session.begin('listenerA')!;
   const bob = h.session.begin('bob')!;
-  await Promise.all([alice.complete(audio), bob.complete(audio)]);
+  await Promise.all([listenerA.complete(audio), bob.complete(audio)]);
   assert.equal(h.cues, 1); assert.equal(bob.signal.aborted, true);
   h.session.cancel(); h.setName('Джев');
-  await h.session.begin('alice')!.complete(audio);
+  await h.session.begin('listenerA')!.complete(audio);
   assert.equal(h.session.phase, 'idle');
-  h.setText('Джев'); await h.session.begin('alice')!.complete(audio);
+  h.setText('Джев'); await h.session.begin('listenerA')!.complete(audio);
   assert.equal(h.cues, 2); h.session.disable();
 });
 
@@ -639,13 +639,13 @@ test('a verified compound request claims the turn while another wake recognition
   const transcripts: ((text: string) => void)[] = [];
   const h = harness({ transcribe: () => new Promise(resolve => transcripts.push(resolve)) });
   try {
-    const alice = h.session.begin('alice')!;
+    const listenerA = h.session.begin('listenerA')!;
     const bob = h.session.begin('bob')!;
-    const a = alice.complete(audio), b = bob.complete(audio);
+    const a = listenerA.complete(audio), b = bob.complete(audio);
     transcripts[1]!('Муза, следующий трек');
     transcripts[0]!('Муза, следующий трек');
     await Promise.all([a, b]);
-    assert.equal(alice.signal.aborted, true);
+    assert.equal(listenerA.signal.aborted, true);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
     assert.equal(h.cues, 0); assert.equal(h.ducked, false);
     assert.equal(h.session.phase, 'idle');
@@ -659,10 +659,10 @@ test('a new wake utterance is captured while the previous one is being recognize
     signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
   }) });
   try {
-    const first = h.session.begin('alice')!;
-    assert.equal(h.session.begin('alice'), null, 'do not overlap audio captures');
+    const first = h.session.begin('listenerA')!;
+    assert.equal(h.session.begin('listenerA'), null, 'do not overlap audio captures');
     const firstResult = first.complete(audio);
-    const second = h.session.begin('alice');
+    const second = h.session.begin('listenerA');
     assert.ok(second, 'recognition must not block receiving the next utterance');
     const secondResult = second.complete(audio);
     pending[1]!('Муза'); await secondResult;
@@ -679,10 +679,10 @@ test('a second speaker can wake the bot when the first has filled the pending re
   try {
     const requests = [];
     for (let i = 0; i < 3; i++) {
-      const capture = h.session.begin('alice')!;
+      const capture = h.session.begin('listenerA')!;
       requests.push({ capture, result: capture.complete(audio) });
     }
-    const ongoing = h.session.begin('alice')!;
+    const ongoing = h.session.begin('listenerA')!;
     const friend = h.session.begin('bob');
     assert.ok(friend);
     assert.ok(requests[0]!.capture.signal.aborted, 'evict an old recognition from the same microphone');
@@ -693,7 +693,7 @@ test('a second speaker can wake the bot when the first has filled the pending re
     await Promise.all(requests.map(request => request.result));
     assert.equal(h.cues, 1);
     assert.ok(h.session.awaits('bob'));
-    assert.equal(h.session.begin('alice'), null);
+    assert.equal(h.session.begin('listenerA'), null);
   } finally { h.session.disable(); }
 });
 
@@ -703,11 +703,11 @@ test('leaving cancels every queued wake recognition from the same speaker', asyn
   const captures = [];
   const results = [];
   for (let i = 0; i < 4; i++) {
-    const capture = h.session.begin('alice')!;
+    const capture = h.session.begin('listenerA')!;
     captures.push(capture); results.push(capture.complete(audio));
   }
-  assert.equal(h.session.begin('alice'), null, 'bound pending audio');
-  h.session.cancelUser('alice');
+  assert.equal(h.session.begin('listenerA'), null, 'bound pending audio');
+  h.session.cancelUser('listenerA');
   for (const capture of captures) assert.equal(capture.signal.aborted, true);
   for (const resolve of pending) resolve('Муза');
   await Promise.all(results);
@@ -743,13 +743,13 @@ test('a short local wake hit opens the window only after one verified transcript
   });
   try {
     const shortAudio = Buffer.alloc(800 * 32);
-    await h.session.begin('alice')!.complete(shortAudio);
+    await h.session.begin('listenerA')!.complete(shortAudio);
     assert.deepEqual(transcriptions, [false]);
     assert.equal(h.cues, 1, 'cue tone played');
     assert.equal(h.ducked, true, 'audio ducked');
     assert.equal(h.session.phase, 'awaiting');
 
-    const commandCapture = h.session.begin('alice')!;
+    const commandCapture = h.session.begin('listenerA')!;
     await commandCapture.complete(shortAudio);
     assert.deepEqual(transcriptions, [false, true]);
     assert.deepEqual(h.actions, [{ action: 'pause' }]);
@@ -764,7 +764,7 @@ test('neural wake detector rejects non-wake audio locally without invoking cloud
   });
   try {
     const speechAudio = Buffer.alloc(1000 * 32);
-    await h.session.begin('alice')!.complete(speechAudio);
+    await h.session.begin('listenerA')!.complete(speechAudio);
     assert.equal(transcriptions, 0);
     assert.equal(h.cues, 0);
     assert.equal(h.ducked, false);
@@ -787,18 +787,18 @@ test('a quiet isolated name missed locally can wake its speaker, while short non
   });
   h.setName('бот');
   try {
-    await h.session.begin('alice')!.complete(burst);
+    await h.session.begin('listenerA')!.complete(burst);
     assert.equal(h.cues, 0); assert.deepEqual(h.actions, []);
     assert.equal(inputs.length, 1);
     assert.equal(inputs[0]!.readInt16LE(3250), 8 * original.readInt16LE(3250));
     assert.deepEqual(burst, original);
     text = 'бот';
-    await h.session.begin('alice')!.complete(burst);
+    await h.session.begin('listenerA')!.complete(burst);
     assert.equal(inputs.length, 1, 'an unsuccessful recheck is rate-limited for that microphone');
     await h.session.begin('bob')!.complete(burst);
     assert.equal(inputs.length, 2, 'a different speaker may still use their first recheck');
     assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
-    assert.equal(h.session.begin('alice'), null);
+    assert.equal(h.session.begin('listenerA'), null);
   } finally { h.session.disable(); }
 });
 
@@ -859,17 +859,17 @@ test('an extremely low local score still verifies the first standalone name per 
   const burst = isolatedBurst();
   try {
     h.setName('бот');
-    await h.session.begin('alice')!.complete(burst);
+    await h.session.begin('listenerA')!.complete(burst);
     assert.equal(calls, 1); assert.deepEqual(h.actions, []); assert.equal(h.cues, 0);
-    await h.session.begin('alice')!.complete(burst);
+    await h.session.begin('listenerA')!.complete(burst);
     assert.equal(calls, 1, 'a failing microphone is rate limited');
     text = 'бот';
     await h.session.begin('bob')!.complete(burst);
     assert.equal(calls, 2); assert.equal(h.cues, 1); assert.ok(h.session.awaits('bob'));
     h.session.cancel();
     now += 4100;
-    await h.session.begin('alice')!.complete(burst);
-    assert.equal(calls, 3); assert.equal(h.cues, 2); assert.ok(h.session.awaits('alice'));
+    await h.session.begin('listenerA')!.complete(burst);
+    assert.equal(calls, 3); assert.equal(h.cues, 2); assert.ok(h.session.awaits('listenerA'));
   } finally { h.session.disable(); }
 });
 
@@ -881,11 +881,11 @@ test('steady noise, long speech and a near-homophone cannot wake through the sho
   try {
     const tone = Buffer.alloc(1500 * 32);
     for (let i = 0; i < tone.length; i += 2) tone.writeInt16LE(i % 4 ? 200 : -200, i);
-    await h.session.begin('alice')!.complete(tone.subarray(0, 500 * 32));
+    await h.session.begin('listenerA')!.complete(tone.subarray(0, 500 * 32));
     tone.fill(0, 0, 120 * 32);
-    await h.session.begin('alice')!.complete(tone);
+    await h.session.begin('listenerA')!.complete(tone);
     assert.equal(transcriptions, 0);
-    await h.session.begin('alice')!.complete(tone.subarray(0, 500 * 32));
+    await h.session.begin('listenerA')!.complete(tone.subarray(0, 500 * 32));
     assert.equal(transcriptions, 1);
     assert.equal(h.cues, 0); assert.equal(h.ducked, false);
   } finally { h.session.disable(); }
@@ -915,7 +915,7 @@ test('false local hits of either duration are discarded before cues, acoustic co
     for (const [duration, transcript] of [[800, 'потом'], [2600, 'передай батон пожалуйста'],
       [2200, 'следующий трек'], [3000, 'Батончик, включи музыку'], [600, '']] as const) {
       h.setText(transcript);
-      await h.session.begin('alice')!.complete(Buffer.alloc(duration * 32));
+      await h.session.begin('listenerA')!.complete(Buffer.alloc(duration * 32));
       assert.equal(h.session.phase, 'idle', transcript);
       assert.equal(h.ducked, false, transcript);
     }
@@ -930,7 +930,7 @@ test('unavailable or incompatible wake detector falls back to STT and preserves 
     transcribe: async () => { calls++; return 'Муза'; },
   });
   try {
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.equal(calls, 1); assert.equal(h.cues, 1); assert.equal(h.session.phase, 'awaiting');
   } finally { h.session.disable(); }
 });
@@ -946,7 +946,7 @@ test('only the first two seconds reach the wake detector, and the full compound 
   });
   try {
     h.setName('Бот');
-    await h.session.begin('alice')!.complete(full);
+    await h.session.begin('listenerA')!.complete(full);
     assert.deepEqual(wakeInputs, [full.subarray(0, 2000 * 32)]);
     assert.deepEqual(sttInputs, [full]);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
@@ -971,14 +971,14 @@ test('silence, bare titles and conversation end the turn quietly and a new call 
   try {
     for (const phrase of ['', '2 + 2', 'сколько будет два плюс два', 'что делаешь', 'как дела',
       'я поговорю с ним завтра', 'сегодня отличный день', 'Монеточка', 'Radio Ga Ga']) {
-      h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-      h.setText(phrase); await h.session.begin('alice')!.complete(audio);
+      h.setText('Муза'); await h.session.begin('listenerA')!.complete(audio);
+      h.setText(phrase); await h.session.begin('listenerA')!.complete(audio);
       assert.equal(h.actions.length, 0);
       assert.equal(h.ducked, false); assert.equal(h.session.phase, 'idle', phrase);
     }
     assert.deepEqual(feedbackCalls, []); assert.deepEqual(searches, []);
-    h.setText('Муза'); await h.session.begin('alice')!.complete(audio);
-    h.setText('Следующий трек'); await h.session.begin('alice')!.complete(audio);
+    h.setText('Муза'); await h.session.begin('listenerA')!.complete(audio);
+    h.setText('Следующий трек'); await h.session.begin('listenerA')!.complete(audio);
     assert.deepEqual(h.actions, [{ action: 'skip' }]);
   } finally { h.session.disable(); }
 });
@@ -991,7 +991,7 @@ test('an exact multiword address works without a local model and leaves the song
   try {
     h.setName('Бот Ёнот');
     h.setText('Bot Enot, включи песню Radio Ga Ga (Live)!');
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.deepEqual(searches, ['включи песню Radio Ga Ga (Live)!']);
     assert.equal(h.session.phase, 'idle'); assert.equal(h.cues, 0);
   } finally { h.session.disable(); }
@@ -1001,9 +1001,9 @@ test('an incomplete player request gives one reply and releases the speaker', as
   const replies: string[] = [];
   const h = harness({}, { feedback: async key => { replies.push(key); } });
   try {
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     h.setText('Включи эту');
-    const command = h.session.begin('alice')!;
+    const command = h.session.begin('listenerA')!;
     await command.complete(audio); await command.complete(audio);
     assert.deepEqual(replies, ['unknown']); assert.deepEqual(h.actions, []);
     assert.equal(h.session.phase, 'idle'); assert.equal(h.ducked, false);
@@ -1025,7 +1025,7 @@ test('addressing the bot with a conversational fragment closes the turn without 
   try {
     h.setName('Бот');
     const longAudio = Buffer.alloc(2000 * 32);
-    await h.session.begin('alice')!.complete(longAudio);
+    await h.session.begin('listenerA')!.complete(longAudio);
     assert.equal(h.actions.length, 0);
     assert.deepEqual(feedbackCalls, []);
     assert.equal(h.session.phase, 'idle'); assert.equal(h.cues, 0);
@@ -1048,9 +1048,9 @@ test('the command detector executes a follow-up control without a second transcr
     },
   });
   try {
-    await h.session.begin('alice')!.complete(shortWake);
+    await h.session.begin('listenerA')!.complete(shortWake);
     assert.equal(h.session.phase, 'awaiting');
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.equal(commandDetected, true, 'command detector was invoked');
     assert.equal(cloudTranscribed, false, 'the command did not use STT');
     assert.deepEqual(h.actions, [{ action: 'pause' }]);
@@ -1079,9 +1079,9 @@ test('neural command detector falls back to cloud STT for arbitrary music search
     },
   });
   try {
-    await h.session.begin('alice')!.complete(shortWake);
+    await h.session.begin('listenerA')!.complete(shortWake);
     assert.equal(h.session.phase, 'awaiting');
-    await h.session.begin('alice')!.complete(audio);
+    await h.session.begin('listenerA')!.complete(audio);
     assert.equal(commandDetected, true, 'command detector was invoked');
     assert.equal(cloudTranscribed, true, 'cloud STT was invoked for song search');
     assert.equal(musicSearched, true, 'music search was triggered');
