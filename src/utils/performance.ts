@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 
 export type Metric = 'command.ack' | 'command.total' | 'metadata.wait' | 'metadata.work'
   | 'search' | 'audio.first' | 'audio.start' | 'audio.transition' | 'speech.wait'
-  | 'speech.recognize' | 'voice.action' | 'voice.total';
+  | 'speech.recognize' | 'voice.action' | 'voice.total' | 'voice.connect' | 'voice.start';
 const samples = new Map<Metric, number[]>();
 const counters = new Map<string, number>();
 const children = new Set<number>();

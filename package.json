@@ -23,7 +23,8 @@
     "test:groq": "npm run build && node dist/integration/groq.js",
     "test:performance": "npm run build && node dist/integration/performance.js",
     "test:voice:regression": "npm run build && node dist/integration/voice-regression.js",
-    "export:nli": "npm run build && node dist/src/export-nli.js"
+    "export:nli": "npm run build && node dist/src/export-nli.js",
+    "alice:bridge": "node scripts/alice-bridge.mjs"
   },
   "engines": {
     "node": ">=24.17.0"

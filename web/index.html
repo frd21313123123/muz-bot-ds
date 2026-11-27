@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>MUZ · пульт</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <section id="login-view" class="login" hidden>
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="logo"><span class="logo-mark">MUZ</span><span class="logo-sub">пульт</span></div>
+      <h1>Управление музыкой</h1>
+      <p class="muted">Введите пароль из <code>.env</code> (<code>WEB_ADMIN_PASSWORD</code>) или из <code>.runtime/web/admin-password.txt</code>.</p>
+      <label class="field">Пароль
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      </label>
+      <button class="primary wide" type="submit">Войти</button>
+      <p id="login-error" class="error" role="alert"></p>
+      <p class="muted small">Пульт работает локально. Для доступа с телефона задайте <code>WEB_HOST=0.0.0.0</code> и сильный пароль.</p>
+    </form>
+  </section>
+
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="logo"><span class="logo-mark">MUZ</span><span class="logo-sub">пульт</span></div>
+      <div class="botline">
+        <span class="avatar-wrap"><img id="bot-avatar" alt="" hidden><span id="bot-avatar-fallback" class="avatar-fallback">♪</span></span>
+        <span id="bot-name">Бот</span>
+        <span id="bot-state" class="pill">запускается</span>
+        <span id="skill-label" class="muted small"></span>
+      </div>
+      <button id="logout" class="ghost" type="button">Выйти</button>
+    </header>
+
+    <main class="layout">
+      <section class="card player">
+        <div class="card-head">
+          <h2>Плеер</h2>
+          <span id="player-status" class="pill">тишина</span>
+        </div>
+
+        <div class="target-row">
+          <label class="field">Сервер
+            <select id="guild-select"></select>
+          </label>
+          <label class="field">Голосовой канал
+            <select id="channel-select"></select>
+          </label>
+        </div>
+        <p id="target-hint" class="hint" hidden></p>
+
+        <div class="now">
+          <div class="cover-wrap">
+            <img id="cover" alt="" hidden>
+            <span id="cover-placeholder" class="cover-placeholder">♪</span>
+          </div>
+          <div class="now-text">
+            <p id="track-title" class="track-title">Ничего не играет</p>
+            <p id="track-meta" class="muted">Выберите канал и включите трек</p>
+            <div class="progress"><div id="progress-fill"></div></div>
+            <div class="time-row"><span id="elapsed">0:00</span><span id="duration">—</span></div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button id="btn-pause" class="round" type="button" title="Пауза" aria-label="Пауза">⏸</button>
+          <button id="btn-skip" class="round" type="button" title="Следующий трек" aria-label="Следующий трек">⏭</button>
+          <button id="btn-stop" class="round danger" type="button" title="Остановить" aria-label="Остановить">⏹</button>
+          <button id="btn-autoplay" class="chip" type="button" title="Бесконечный режим">♾ Бесконечно</button>
+          <button id="btn-loop" class="chip" type="button" title="Повтор текущего трека">🔂 Повтор</button>
+          <button id="btn-clear" class="chip" type="button" title="Очистить очередь">Очистить</button>
+        </div>
+
+        <div class="volume-row">
+          <span aria-hidden="true">🔊</span>
+          <input id="volume" type="range" min="1" max="150" value="50" aria-label="Громкость">
+          <output id="volume-value" for="volume">50%</output>
+        </div>
+
+        <form id="play-form" class="play-row">
+          <input id="query" type="text" maxlength="500" placeholder="Трек, ссылка или исполнитель" autocomplete="off">
+          <select id="source" aria-label="Источник">
+            <option value="youtube">YouTube Music</option>
+            <option value="soundcloud">SoundCloud</option>
+          </select>
+          <button class="primary" type="submit">Включить</button>
+        </form>
+
+        <div class="radio-row">
+          <select id="radio" aria-label="Радиостанция">
+            <option value="">Радио…</option>
+          </select>
+          <button id="btn-radio" class="ghost" type="button">Эфир</button>
+        </div>
+      </section>
+
+      <aside class="card speakers">
+        <div class="card-head">
+          <h2>Колонки</h2>
+          <button id="btn-add-speaker" class="primary small" type="button">+ Подключить</button>
+        </div>
+        <p class="muted small">Колонка — это Яндекс Станция или телефон с Алисой. Код привязывает её к выбранному голосовому каналу.</p>
+        <div id="speakers-empty" class="empty">Пока ни одна колонка не подключена.</div>
+        <ul id="speaker-list" class="speaker-list"></ul>
+      </aside>
+
+      <section class="card queue">
+        <div class="card-head">
+          <h2>Очередь</h2>
+          <span id="queue-count" class="pill">0</span>
+        </div>
+        <p id="queue-empty" class="empty">Очередь пуста.</p>
+        <ol id="queue-list" class="queue-list"></ol>
+      </section>
+
+      <section class="card log">
+        <div class="card-head">
+          <h2>Журнал</h2>
+          <span class="muted small">последние команды</span>
+        </div>
+        <ul id="log-list" class="log-list"></ul>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button id="modal-close" class="icon" type="button" aria-label="Закрыть">×</button>
+      <h2 id="modal-title">Подключить колонку</h2>
+
+      <div id="modal-form">
+        <label class="field">Название
+          <input id="speaker-name" type="text" maxlength="64" value="Колонка" autocomplete="off">
+        </label>
+        <label class="field">Сервер
+          <select id="modal-guild"></select>
+        </label>
+        <label class="field">Голосовой канал
+          <select id="modal-channel"></select>
+        </label>
+        <button id="btn-create-code" class="primary wide" type="button">Создать код</button>
+        <p class="muted small">Код действует 10 минут и привязывает одну колонку к выбранному каналу.</p>
+      </div>
+
+      <div id="modal-code" hidden>
+        <p class="muted">Скажите Алисе:</p>
+        <p class="code-phrase">«Запусти навык <span id="skill-name">Муза</span>»</p>
+        <p class="code-phrase">«Подключи колонку <strong id="pair-code">000000</strong>»</p>
+        <p class="muted small">Для локального моста: <code id="pair-endpoint"></code> с кодом и названием. Если пульт открыт на <code>localhost</code>, станции нужен IP этой машины в локальной сети.</p>
+        <div class="modal-actions">
+          <button id="btn-copy-code" class="ghost" type="button">Скопировать код</button>
+          <button id="btn-new-code" class="ghost" type="button">Новый код</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

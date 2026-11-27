@@ -22,6 +22,21 @@ const waitFor = async (predicate: () => boolean): Promise<void> => {
   }
 };
 
+test('the expected initial bot join preserves a pending search, departure and moves cancel it', async () => {
+  const queue = new GuildQueue('guild', { queues: new Map(), user: { id: 'bot' } } as unknown as MusicClient);
+  queue.voiceChannel = { id: 'voice' } as VoiceBasedChannel;
+  try {
+    const first = queue.beginMetadataRequest('first'), second = queue.beginMetadataRequest('second');
+    queue.onVoiceChannelChange('bot', null, 'voice');
+    assert.equal(first.signal.aborted, false);
+    queue.onVoiceChannelChange('first', 'voice', null);
+    assert.equal(first.signal.aborted, true);
+    assert.equal(second.signal.aborted, false);
+    queue.onVoiceChannelChange('bot', 'voice', 'other');
+    assert.equal(second.signal.aborted, true);
+  } finally { await queue.stop(); }
+});
+
 test('a temporary audio stall resumes the same resource and EOF still advances promptly', async () => {
   const streams: PassThrough[] = [];
   const client = { queues: new Map(), ytdlp: { related: async () => [] } } as unknown as MusicClient;
@@ -764,6 +779,9 @@ test('background metadata hydration updates track title, duration, and thumbnail
     };
     await queue.addTrack(fastTrack);
     assert.equal(queue.currentTrack?.videoId, 'fastvideo111');
+    assert.equal(queue.currentTrack?.title, 'Загрузка…');
+    Reflect.set(Reflect.get(queue.player, 'behaviors'), 'noSubscriber', NoSubscriberBehavior.Play);
+    raw.write(Buffer.alloc(3840 * 5));
     await waitFor(() => queue.currentTrack?.title === 'Hydrated Title');
     assert.equal(queue.currentTrack?.duration, '3:05');
     assert.equal(queue.currentTrack?.thumbnail, 'https://img.youtube.com/vi/fastvideo111/maxresdefault.jpg');

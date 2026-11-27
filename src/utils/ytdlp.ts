@@ -222,11 +222,11 @@ export class YtdlpClient {
     if (!query.trim()) return [];
     if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('Invalid search limit');
 
-    const cacheKey = `${query.trim().toLowerCase()}:${limit}`;
+    const cacheKey = `youtube:${query.trim().toLowerCase()}`;
     this.pruneCaches();
     const cached = this.searchCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < 15 * 60_000) {
-      countMetric('cache.hit'); return cached.entries.map(compactVideoInfo);
+      countMetric('cache.hit'); return cached.entries.slice(0, limit).map(compactVideoInfo);
     }
 
     // Main YouTube Music search includes official music videos as well as audio
@@ -242,7 +242,7 @@ export class YtdlpClient {
       if (!entry?.id || !/^[\w-]{11}$/.test(entry.id) || !entry.title?.trim() || seen.has(entry.id)) return false;
       seen.add(entry.id);
       return true;
-    }).slice(0, limit).map(compactVideoInfo);
+    }).slice(0, 10).map(compactVideoInfo);
 
     if (candidates.length) {
       this.searchCache.set(cacheKey, { entries: candidates.map(compactVideoInfo), timestamp: Date.now() });
@@ -251,7 +251,7 @@ export class YtdlpClient {
         if (first) this.searchCache.delete(first);
       }
     }
-    return candidates;
+    return candidates.slice(0, limit);
   }
 
   async searchSoundCloud(query: string, input?: MetadataInput): Promise<VideoInfo | null> {

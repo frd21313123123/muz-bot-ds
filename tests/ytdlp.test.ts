@@ -49,9 +49,9 @@ test('main Music search preserves service order, removes invalid entries and ret
   await assert.rejects(client.searchCandidates('Numb', 11));
   const controller = new AbortController(); controller.abort();
   await assert.rejects(client.searchCandidates('Numb', 5, controller.signal));
-  assert.equal(client.calls.length, 2);
+  assert.equal(client.calls.length, 1);
   await client.searchCandidates('  Кино & live #1  ', 3);
-  assert.equal(client.calls[2]?.payload.query, 'Кино & live #1');
+  assert.equal(client.calls[1]?.payload.query, 'Кино & live #1');
 });
 
 test('song search never blocks on ordinary YouTube video metadata', async () => {

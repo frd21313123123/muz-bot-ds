@@ -80,6 +80,8 @@ export function configureMusicEncoder(resource: AudioResource, channelBitrate = 
     memory.inPCM = new Uint16Array(memory.inPCM.buffer, memory.inPCMPointer, memory.inPCMLength / 2);
     // prism-media clamps to 16 kbps, but Discord also supports 8 kbps channels.
     codec.setBitrate(bitrate);
+    // OPUS_SET_COMPLEXITY_REQUEST. Leave CPU time for Discord's 20 ms dispatch timer.
+    codec.encoderCTL(4010, 5);
     return;
   }
   encoder.setBitrate(bitrate);

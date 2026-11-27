@@ -1,5 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { pipeline, Transform, type Readable } from 'node:stream';
+import { PassThrough, pipeline, Transform, Readable } from 'node:stream';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 import { StreamType } from '@discordjs/voice';
 import type { YtdlpClient } from './ytdlp.js';
@@ -62,12 +63,13 @@ export function bufferMusicPcm(input: Readable): Readable {
     pending = []; bytes = 0;
   };
   const output = new Transform({
+    readableHighWaterMark: 2 * 48_000 * 2 * 2, // two seconds of PCM once the producer gets ahead
     transform(chunk: Buffer, _encoding, done) {
       if (!chunk.length) { done(); return; }
       if (started) { done(null, chunk); return; }
       if (bytes + chunk.length >= STARTUP_PCM_BYTES) {
-        release();
-        done(null, chunk);
+        if (bytes) { pending.push(chunk); bytes += chunk.length; release(); done(); }
+        else { started = true; done(null, chunk); }
         return;
       }
       if (!timer) timer = setTimeout(release, STARTUP_WAIT_MS);
@@ -80,6 +82,23 @@ export function bufferMusicPcm(input: Readable): Readable {
   // pipeline forwards source errors and tears down the upstream pipe if the
   // consumer cancels before the startup buffer has been released.
   pipeline(input, output, () => {});
+  return output;
+}
+
+// prism-media encodes an entire input chunk synchronously. FFmpeg and the
+// startup buffer can deliver many frames at once. Keep the larger upstream
+// reservoir, but let Discord's 20 ms dispatch timer run between small batches.
+export function pcmForEncoding(input: Readable): Readable {
+  const batchBytes = 2 * 960 * 2 * 2; // two 20 ms stereo s16 frames
+  const output = new PassThrough({ highWaterMark: batchBytes });
+  pipeline(input, async function* (source: AsyncIterable<Buffer>) {
+    for await (const chunk of source) {
+      for (let offset = 0; offset < chunk.length; offset += batchBytes) {
+        yield chunk.subarray(offset, offset + batchBytes);
+        await nextTurn();
+      }
+    }
+  }, output, () => {});
   return output;
 }
 
@@ -132,32 +151,97 @@ export async function waitForAudio(media: ManagedAudioStream, signal: AbortSigna
   signal.throwIfAborted();
 }
 
-export function createYtdlpStream(ytdlp: YtdlpClient, url: string, options: MusicPlaybackOptions = {}): ManagedAudioStream {
+// Keep complete public YouTube Opus downloads briefly for replays and speed changes.
+// Up to three 4 MiB entries and one in-flight capture per bot, all compressed.
+class TrackAudioCache {
+  private readonly tracks = new Map<string, { chunks: Buffer[]; until: number }>();
+  private capturing = false;
+
+  read(url: string): Readable | undefined {
+    const entry = this.tracks.get(url);
+    if (!entry) return;
+    this.tracks.delete(url);
+    if (entry.until < Date.now()) return;
+    this.tracks.set(url, entry);
+    return Readable.from(entry.chunks, { objectMode: false });
+  }
+
+  capture(url: string, child: ChildProcess): void {
+    if (this.capturing || !child.stdout) return;
+    this.capturing = true;
+    const stdout = child.stdout;
+    let bytes = 0;
+    const chunks: Buffer[] = [];
+    const collect = (chunk: Buffer): void => {
+      bytes += chunk.length;
+      if (bytes <= 4 * 1024 * 1024) chunks.push(chunk);
+      else { chunks.length = 0; stdout.off('data', collect); }
+    };
+    stdout.on('data', collect);
+    child.once('close', code => {
+      this.capturing = false;
+      stdout.off('data', collect);
+      if (code !== 0 || !stdout.readableEnded || !chunks.length) return;
+      if (this.tracks.size >= 3) this.tracks.delete(this.tracks.keys().next().value!);
+      this.tracks.set(url, { chunks, until: Date.now() + 15 * 60_000 });
+    });
+  }
+}
+const audioCaches = new WeakMap<YtdlpClient, TrackAudioCache>();
+
+export function createYtdlpStream(ytdlp: YtdlpClient, url: string, options: MusicPlaybackOptions = {}, isLive = false): ManagedAudioStream {
   const started = performance.now();
   const audioArgs = musicPcmArguments(options);
   const ffmpeg = requireFfmpeg();
-  const downloader = ytdlp.spawn([
-    '-f', 'bestaudio/best', '-o', '-', '--no-playlist', url,
-  ]);
+  const outputArgs = ['-o', '-', '--no-playlist', url];
+  const download = () => ytdlp.spawn(['-f', 'bestaudio/best', ...outputArgs]);
+  // Standard YouTube songs usually have a direct Opus stream (itag 251).
+  // Skip enumerating HLS/DASH manifests when we can play that stream.
+  const direct = !isLive && /^https:\/\/www\.youtube\.com\/watch\?v=[\w-]{11}$/.test(url);
+  let source: ChildProcess | Readable;
+  if (direct) {
+    const cache = audioCaches.get(ytdlp) ?? new TrackAudioCache();
+    audioCaches.set(ytdlp, cache);
+    const hit = cache.read(url);
+    if (hit) source = hit;
+    else {
+      // This client provides the direct HTTPS Opus format. Enumerating the
+      // other clients here can spend seconds on formats we will never select.
+      source = ytdlp.spawn(['--extractor-args', 'youtube:player_client=visionos;skip=hls,dash',
+        '-f', '251[protocol=https]', ...outputArgs]);
+      cache.capture(url, source);
+    }
+  } else source = download();
   const transcoder = spawn(ffmpeg, [
     '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
     ...audioArgs,
   ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 
   trackProcess(transcoder);
-  const media = createProcessStream(downloader, transcoder, StreamType.Raw);
+  const media = createProcessStream(source, transcoder, StreamType.Raw, direct ? download : undefined);
   observeFirstAudio(media.stream, started);
   return media;
 }
 
-export function createProcessStream(downloader: ChildProcess, transcoder: ChildProcess, type = StreamType.OggOpus): ManagedAudioStream {
-  if (!downloader.stdout || !downloader.stderr || !transcoder.stdin || !transcoder.stdout || !transcoder.stderr) {
-    void terminateProcess(downloader);
+export function createProcessStream(downloader: ChildProcess | Readable, transcoder: ChildProcess, type = StreamType.OggOpus,
+  fallback?: () => ChildProcess): ManagedAudioStream {
+  const stopDownload = (): void => {
+    if (downloader instanceof Readable) downloader.destroy();
+    else { downloader.stdout?.unpipe(); void terminateProcess(downloader); }
+  };
+  if ((!(downloader instanceof Readable) && (!downloader.stdout || !downloader.stderr))
+    || !transcoder.stdin || !transcoder.stdout || !transcoder.stderr) {
+    stopDownload();
     void terminateProcess(transcoder);
     throw new Error('Не удалось создать аудиопоток.');
   }
   const output = type === StreamType.Raw ? bufferMusicPcm(transcoder.stdout) : transcoder.stdout;
-  downloader.stdout.pipe(transcoder.stdin);
+  // Download compressed bytes ahead of playback. The first chunk passes immediately.
+  // Let yt-dlp finish a typical YouTube song and release its Python heap
+  // while FFmpeg consumes the compressed bytes at playback speed.
+  const readAhead = fallback && !(downloader instanceof Readable) ? 4 : 1;
+  const input = new PassThrough({ highWaterMark: readAhead * 1024 * 1024 });
+  input.pipe(transcoder.stdin);
   transcoder.stdin.on('error', () => {});
 
   let closed = false;
@@ -166,14 +250,12 @@ export function createProcessStream(downloader: ChildProcess, transcoder: ChildP
   const capture = (child: ChildProcess, append: (chunk: string) => void): void => {
     child.stderr?.on('data', (chunk: Buffer) => append(chunk.toString().slice(0, 500)));
   };
-  capture(downloader, (chunk) => { ytError = (ytError + chunk).slice(-1000); });
   capture(transcoder, (chunk) => { ffError = (ffError + chunk).slice(-1000); });
 
   const destroy = (): void => {
     if (closed) return;
     closed = true;
-    downloader.stdout?.unpipe();
-    void terminateProcess(downloader);
+    stopDownload(); input.destroy();
     transcoder.stdin?.destroy();
     void terminateProcess(transcoder);
     output.destroy();
@@ -182,16 +264,35 @@ export function createProcessStream(downloader: ChildProcess, transcoder: ChildP
     if (closed) return;
     closed = true;
     output.destroy(new Error(message));
-    downloader.stdout?.unpipe();
-    void terminateProcess(downloader);
+    stopDownload(); input.destroy();
     transcoder.stdin?.destroy();
     void terminateProcess(transcoder);
   };
-  downloader.on('error', (error) => fail(`yt-dlp: ${error.message}`));
   transcoder.on('error', (error) => fail(`FFmpeg: ${error.message}`));
-  downloader.on('close', (code) => {
-    if (code !== 0) fail(`yt-dlp завершился с кодом ${code}: ${ytError.trim()}`);
-  });
+  const pipeDownload = (child: ChildProcess): void => {
+    let received = false;
+    child.once('error', error => fail(`yt-dlp: ${error.message}`));
+    capture(child, chunk => { ytError = (ytError + chunk).slice(-1000); });
+    if (!child.stdout) { fail('Не удалось открыть выход yt-dlp.'); return; }
+    child.stdout.once('data', () => { received = true; });
+    // Keep FFmpeg's input open until we know whether another format is needed.
+    child.stdout.pipe(input, { end: false });
+    child.once('close', code => {
+      if (closed) return;
+      if (!received && fallback) {
+        const retry = fallback;
+        fallback = undefined;
+        ytError = '';
+        try { downloader = retry(); pipeDownload(downloader); }
+        catch (error) { fail(`yt-dlp: ${String(error)}`); }
+        return;
+      }
+      if (code === 0) { input.end(); return; }
+      fail(`yt-dlp завершился с кодом ${code}: ${ytError.trim()}`);
+    });
+  };
+  if (downloader instanceof Readable) downloader.pipe(input);
+  else pipeDownload(downloader);
   transcoder.on('close', (code) => {
     if (code !== 0) fail(`FFmpeg завершился с кодом ${code}: ${ffError.trim()}`);
   });

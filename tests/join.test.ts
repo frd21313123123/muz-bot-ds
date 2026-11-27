@@ -14,7 +14,7 @@ const fixture = (t: TestContext) => {
   const deafened: boolean[] = [];
   const connection = {
     state: { status: VoiceConnectionStatus.Ready }, receiver: { speaking }, joinConfig: {},
-    rejoin: ({ selfDeaf }: { selfDeaf: boolean }) => { deafened.push(selfDeaf); return true; },
+    rejoin: ({ selfDeaf }: { selfDeaf: boolean }) => { connection.joinConfig.selfDeaf = selfDeaf; deafened.push(selfDeaf); return true; },
     destroy: () => { connection.state.status = VoiceConnectionStatus.Destroyed; },
   } as unknown as VoiceConnection;
   const channel = { id: 'voice', permissionsFor: () => new PermissionsBitField([
@@ -22,7 +22,7 @@ const fixture = (t: TestContext) => {
   ]) } as unknown as VoiceBasedChannel;
   const voiceStates = new Map([['user', { channel }]]);
   const guild = { members: { me: {} }, voiceStates: { cache: voiceStates } };
-  const runtime = Object.assign(new EventEmitter(), { ready: true, start: async () => true });
+  const runtime = Object.assign(new EventEmitter(), { prepared: true, ready: true, start: async () => true });
   const client = { queues: new Map(), guilds: { cache: new Map([['guild-join', guild]]) },
     voiceRuntime: runtime, voiceSettings: { get: () => 'Бот' }, ytdlp: {},
   } as unknown as MusicClient;
@@ -56,8 +56,54 @@ test('/join connects without music, enables one listener and replies privately',
     assert.match(JSON.stringify(f.replies.at(-1)), /Бот/);
     await f.execute();
     assert.equal(f.connect.mock.callCount(), 1);
+    assert.deepEqual(f.deafened, [false]);
     assert.equal(f.speaking.listenerCount('start'), 1);
   } finally { await f.cleanup(); }
+});
+
+test('/join connects during a cold model load and waits for readiness before enabling the listener', async t => {
+  const f = fixture(t);
+  let finishLoad!: (ready: boolean) => void;
+  const load = new Promise<boolean>(resolve => { finishLoad = resolve; });
+  f.runtime.start = () => load;
+  try {
+    const join = f.execute();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(f.connect.mock.callCount(), 1);
+    assert.equal(f.speaking.listenerCount('start'), 0);
+    finishLoad(true);
+    await join;
+    assert.equal(f.speaking.listenerCount('start'), 1);
+  } finally { finishLoad(false); await f.cleanup(); }
+});
+
+test('/join releases an unused connection if the prepared worker fails to start', async t => {
+  const f = fixture(t);
+  f.runtime.start = async () => false;
+  try {
+    await f.execute();
+    assert.equal(f.client.queues.size, 0);
+    assert.equal(f.speaking.listenerCount('start'), 0);
+    assert.match(JSON.stringify(f.replies.at(-1)), /недоступен/);
+  } finally { await f.cleanup(); }
+});
+
+test('one user leaving during a shared /join does not disconnect the other user', async t => {
+  const f = fixture(t);
+  let finishLoad!: (ready: boolean) => void;
+  const load = new Promise<boolean>(resolve => { finishLoad = resolve; });
+  f.runtime.start = () => load;
+  f.voiceStates.set('second', { channel: f.channel });
+  const second = { ...f.interaction, user: { id: 'second' } } as ChatInputCommandInteraction;
+  try {
+    const joins = [f.execute(), command.execute(second, f.client)];
+    await new Promise<void>(resolve => setImmediate(resolve));
+    f.voiceStates.delete('user');
+    finishLoad(true);
+    await Promise.all(joins);
+    assert.equal(f.client.queues.get('guild-join')?.voice?.enabled, true);
+    assert.equal(f.connect.mock.callCount(), 1);
+  } finally { finishLoad(false); await f.cleanup(); }
 });
 
 test('/join reenables listening while preserving a current resource and pending tracks', async t => {
@@ -91,7 +137,7 @@ test('/join refuses missing guild/channel, missing permissions, unavailable mode
       if (reason === 'guild') Object.assign(f.interaction, { guildId: null });
       if (reason === 'channel') f.voiceStates.clear();
       if (reason === 'permissions') Object.assign(f.channel, { permissionsFor: () => new PermissionsBitField() });
-      if (reason === 'models') f.runtime.start = async () => false;
+      if (reason === 'models') f.runtime.prepared = false;
       if (reason === 'other-channel') {
         const queue = new GuildQueue('guild-join', f.client);
         queue.voiceChannel = { id: 'elsewhere' } as VoiceBasedChannel;

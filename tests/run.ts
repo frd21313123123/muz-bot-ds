@@ -21,3 +21,4 @@ import './tts.test.js';
 import './training.test.js';
 import './drive.test.js';
 import './radio.test.js';
+import './web.test.js';

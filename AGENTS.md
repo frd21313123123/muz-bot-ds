@@ -21,6 +21,8 @@ Run `npm run deploy` after changing slash-command definitions. Set `GUILD_ID` fo
 - `src/utils/stream.ts` owns yt-dlp → FFmpeg child processes and their cleanup. Keep certificate verification enabled. FFmpeg must provide `libopus`.
 - SoundCloud tracks are `source: 'soundcloud'` with `videoId: 'sc:<id>'`; they reuse the same yt-dlp → FFmpeg path (`classifyQuery`/`resolveQuery` in `src/utils/resolve.ts`, `searchSoundCloud`/`toSoundCloudTrack` in `ytdlp.ts`). YouTube Music recommendations ignore them.
 - `GuildQueue` owns per-guild voice and player state; `TrackQueue` orders manual tracks before autoplay tracks; `PlayerMessage` updates the public player.
+- `src/web/` contains the local control panel, its JSON API, Yandex Dialogs webhook and the speaker bridge. It is enabled by default on `127.0.0.1:8787`; static UI files live in `web/` (not `dist/`). Keep admin replies and channel messages out of this path: the panel only controls the existing queue.
+- `alice/` contains an optional BusyBox MCP bridge for the separate Yandex Station project. It is not loaded by the bot and must not add runtime dependencies.
 - Keep `opusscript` for Windows without Visual Studio. Do not add a native `@discordjs/opus` requirement.
 - `src/voice/decoder.ts` decodes incoming speech with a private opusscript WASM instance. Never move decoders onto the shared opusscript heap: its growth would detach the music encoders' PCM views.
 - In `loudnessFilter`, `aeval` (NaN cleanup) runs after downsampling loudnorm's 192 kHz output to 48 kHz; keep that order for CPU.

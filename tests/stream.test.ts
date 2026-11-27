@@ -8,7 +8,8 @@ import test from 'node:test';
 import { AudioPlayerStatus, StreamType, VoiceConnectionStatus, type VoiceConnection } from '@discordjs/voice';
 import type { MusicClient } from '../src/types.js';
 import { GuildQueue } from '../src/utils/GuildQueue.js';
-import { bufferMusicPcm, createProcessStream, waitForAudio } from '../src/utils/stream.js';
+import { bufferMusicPcm, createProcessStream, createYtdlpStream, pcmForEncoding, requireFfmpeg, waitForAudio } from '../src/utils/stream.js';
+import type { YtdlpClient } from '../src/utils/ytdlp.js';
 import { terminateProcess } from '../src/utils/processes.js';
 
 test('PCM startup releases immediately for a fast stream or short EOF, and bounds the wait after the first byte', async context => {
@@ -72,6 +73,21 @@ test('a prefetched PCM stream stops reading the producer until a player consumes
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.ok(produced < 100, 'prefetch must not drain a whole song into memory');
   assert.equal((await buffer(output)).length, 100 * block.length);
+});
+
+test('PCM bursts reach the encoder in bounded batches with time for dispatch between batches', async () => {
+  const data = Buffer.from(Array.from({ length: 3840 * 35 + 2 }, (_, i) => i % 251));
+  const output = pcmForEncoding(Readable.from([data]));
+  const chunks: Buffer[] = [];
+  let yielded = false;
+  output.on('data', (chunk: Buffer) => {
+    if (!chunks.length) setImmediate(() => { yielded = true; });
+    chunks.push(chunk);
+  });
+  await once(output, 'end');
+  assert.ok(yielded);
+  assert.ok(chunks.every(chunk => chunk.length <= 7680));
+  assert.deepEqual(Buffer.concat(chunks), data);
 });
 
 test('a short startup gap in music is buffered before the real player emits Opus packets', async () => {
@@ -163,4 +179,46 @@ test('nonzero source exit reports an error and closes the sink', async () => {
   });
   assert.match(error.message, /yt-dlp.*7.*test failure/);
   await sinkClosed;
+});
+
+test('a missing direct audio format falls back once before any bytes reach FFmpeg', async () => {
+  const source = spawn(process.execPath, ['-e', 'process.exit(1)']);
+  const sink = spawn(process.execPath, ['-e', 'process.stdin.pipe(process.stdout)']);
+  let retries = 0;
+  const media = createProcessStream(source, sink, StreamType.Raw, () => {
+    retries++;
+    return spawn(process.execPath, ['-e', 'process.stdout.write("fallback audio")']);
+  });
+  try {
+    assert.equal((await buffer(media.stream)).toString(), 'fallback audio');
+    assert.equal(retries, 1);
+  } finally { media.destroy(); }
+});
+
+test('a failed download that already emitted audio never restarts the track', async () => {
+  const source = spawn(process.execPath, ['-e', 'process.stdout.write("partial");process.exitCode=1']);
+  const sink = spawn(process.execPath, ['-e', 'process.stdin.pipe(process.stdout)']);
+  let retries = 0;
+  const media = createProcessStream(source, sink, StreamType.Raw, () => { retries++; return source; });
+  try {
+    await assert.rejects(buffer(media.stream), /yt-dlp/);
+    assert.equal(retries, 0);
+  } finally { media.destroy(); }
+});
+
+test('replaying a complete YouTube download reuses compressed audio and applies the current speed', async () => {
+  let downloads = 0;
+  const client = { spawn() {
+    downloads++;
+    return spawn(requireFfmpeg(), ['-v', 'error', '-f', 'lavfi', '-i', 'sine=d=1', '-c:a', 'libopus', '-f', 'webm', 'pipe:1']);
+  } } as unknown as YtdlpClient;
+  const url = 'https://www.youtube.com/watch?v=aaaaaaaaaaa';
+  for (const speed of [1, 2]) {
+    const media = createYtdlpStream(client, url, { speed });
+    try {
+      const pcm = await buffer(media.stream);
+      assert.ok(Math.abs(pcm.length / 192000 - 1 / speed) < 0.05);
+    } finally { media.destroy(); }
+  }
+  assert.equal(downloads, 1);
 });

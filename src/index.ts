@@ -10,6 +10,7 @@ import { LocalTts } from './voice/tts.js';
 import { VoiceTrainingLog } from './voice/training.js';
 import { VoiceDriveArchive } from './voice/drive.js';
 import { startPerformanceMonitor } from './utils/performance.js';
+import { startControlServer, type ControlServer } from './web/server.js';
 
 async function main(): Promise<void> {
   const stopPerformanceMonitor = startPerformanceMonitor();
@@ -46,22 +47,25 @@ async function main(): Promise<void> {
   const tts = new LocalTts();
   client.voiceTts = tts;
   console.log(await tts.load() ? `[TTS] ${tts.voice} готов.` : '[TTS] Озвучивание выключено; выполните npm run setup:tts.');
-  console.log(`[Voice] Профиль ${client.voiceRuntime.profile}; STT ${client.voiceRuntime.sttProvider}; обработчик запустится при подключении к голосовому каналу.`);
+  const prewarm = process.env.VOICE_PREWARM === '1' && client.voiceRuntime.profile === 'light'
+    && client.voiceRuntime.sttProvider === 'groq';
+  console.log(`[Voice] Профиль ${client.voiceRuntime.profile}; STT ${client.voiceRuntime.sttProvider}.`);
   client.voiceRuntime.on('available', () => console.log(`[Voice] Whisper ${client.voiceRuntime!.sttModelName ?? '?'} (wake: ${client.voiceRuntime!.wakeModelName ?? '?'}, device: ${client.voiceRuntime!.inferenceDevice ?? '?'}) + ${client.voiceRuntime!.modelName ?? '?'} готовы.`));
   client.voiceRuntime.on('unavailable', () => console.error('[Voice] Обработчик остановлен; прослушивание временно выключено. Музыка продолжает работать.'));
+  let controlServer: ControlServer | null = null;
+  try { controlServer = await startControlServer(client); }
+  catch (error) { console.error('[Web] Не удалось запустить пульт:', error); }
   client.once(Events.ClientReady, () => {
     console.log('[Bot] Ready');
     console.log(`✅ Бот запущен как ${client.user?.tag}`);
     client.user?.setActivity('/play');
+    if (prewarm && client.voiceRuntime?.prepared) {
+      void client.voiceRuntime.acquire(client).catch(error => console.error('[Voice] Не удался прогрев:', error));
+    }
   });
   client.on(Events.InteractionCreate, (interaction) => void onInteraction(interaction, client));
   client.on(Events.VoiceStateUpdate, (oldState, newState) => {
-    if (oldState.channelId !== newState.channelId) {
-      client.queues.get(oldState.guild.id)?.cancelRadioRequest(oldState.id === client.user?.id ? undefined : oldState.id);
-      client.queues.get(oldState.guild.id)?.cancelMetadataRequests(oldState.id === client.user?.id ? undefined : oldState.id);
-      const voice = client.queues.get(oldState.guild.id)?.voice;
-      if (oldState.id === client.user?.id) voice?.reset(); else voice?.cancelUser(oldState.id);
-    }
+    client.queues.get(oldState.guild.id)?.onVoiceChannelChange(oldState.id, oldState.channelId, newState.channelId);
   });
   client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
     if (newMember.id === client.user?.id && oldMember.displayName !== newMember.displayName) {
@@ -69,6 +73,7 @@ async function main(): Promise<void> {
     }
   });
   const shutdown = async (): Promise<void> => {
+    await controlServer?.close();
     await Promise.allSettled([...client.queues.values()].map((queue) => queue.stop()));
     stopPerformanceMonitor();
     await client.voiceRuntime?.close();

@@ -243,13 +243,17 @@ export class GuildVoice {
   }
 
   setEnabled(enabled: boolean): void {
+    const connection = this.connection ?? this.queue.connection;
+    if (enabled && this.enabled && this.runtime.ready && this.connection === connection
+      && connection?.joinConfig.selfDeaf === false) return;
     this.listeningRequested = enabled;
     this.enabled = enabled && this.runtime.ready;
-    const connection = this.connection ?? this.queue.connection;
     this.suspend();
     if (this.enabled) this.session.enable(); else this.session.disable();
     if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
-      connection.rejoin({ ...connection.joinConfig, selfDeaf: !this.enabled });
+      if (connection.joinConfig.selfDeaf !== !this.enabled) {
+        connection.rejoin({ ...connection.joinConfig, selfDeaf: !this.enabled });
+      }
       this.attach(connection);
     }
   }

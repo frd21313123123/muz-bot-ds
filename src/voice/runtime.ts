@@ -107,9 +107,8 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
     this.recoveryTimer = null;
     if (this.ready) { this.scheduleUnload(); return true; }
     if (this.starting) return this.starting;
-    this.starting = this.launch();
-    try {
-      const started = await this.starting;
+    const startedAt = performance.now();
+    this.starting = this.launch().then(started => {
       if (!started && this.prepared && this.sttProvider === 'groq' && this.profile === 'light' && !this.options.command && !this.stopped) {
         if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
         this.recoveryTimer = null;
@@ -117,7 +116,11 @@ export class VoiceRuntime extends EventEmitter implements VoiceBackend {
         this.ready = true; this.emit('available'); return true;
       }
       return started;
-    } finally { this.starting = null; this.scheduleUnload(); }
+    }).finally(() => {
+      if (this.ready) recordMetric('voice.start', performance.now() - startedAt);
+      this.starting = null; this.scheduleUnload();
+    });
+    return this.starting;
   }
 
   private async launch(): Promise<boolean> {

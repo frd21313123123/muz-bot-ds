@@ -5,7 +5,7 @@ import {
 } from '@discordjs/voice';
 import type { Message, VoiceBasedChannel } from 'discord.js';
 import type { MusicClient, Track, RadioTrack } from '../types.js';
-import { createRadioStream, createYtdlpStream, waitForAudio, type ManagedAudioStream } from './stream.js';
+import { createRadioStream, createYtdlpStream, pcmForEncoding, waitForAudio, type ManagedAudioStream } from './stream.js';
 import { radioStations, radioTrack, type RadioStation } from './radio.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TrackQueue } from './TrackQueue.js';
@@ -70,7 +70,7 @@ export class GuildQueue {
   private pauseRequested = false;
   private activeResource = null as ReturnType<typeof createAudioResource> | null;
   private advancePending = false;
-  private readonly mediaFactory: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream;
+  private readonly mediaFactory: (url: string, options: MusicPlaybackOptions, isLive?: boolean) => ManagedAudioStream;
   private voiceDucking = false;
   private cueState: { interrupt(): void } | null = null;
   private speakingVoiceAudioUntil = 0;
@@ -108,11 +108,21 @@ export class GuildQueue {
     }
   }
 
+  onVoiceChannelChange(userId: string, previous: string | null, next: string | null): void {
+    if (previous === next) return;
+    const bot = userId === this.client.user?.id;
+    // The bot's initial join acknowledges the very connection /play is waiting for.
+    if (bot && previous === null && next === this.voiceChannel?.id) return;
+    this.cancelRadioRequest(bot ? undefined : userId);
+    this.cancelMetadataRequests(bot ? undefined : userId);
+    if (bot) this.voice?.reset(); else this.voice?.cancelUser(userId);
+  }
+
   constructor(readonly guildId: string, readonly client: MusicClient,
-    mediaFactory?: (url: string, options: MusicPlaybackOptions) => ManagedAudioStream,
+    mediaFactory?: (url: string, options: MusicPlaybackOptions, isLive?: boolean) => ManagedAudioStream,
     private readonly radioOptions: { factory?: (url: string) => ManagedAudioStream;
       startupTimeoutMs?: number; retryDelays?: readonly number[] } = {}) {
-    this.mediaFactory = mediaFactory ?? ((url, options) => createYtdlpStream(client.ytdlp, url, options));
+    this.mediaFactory = mediaFactory ?? ((url, options, isLive) => createYtdlpStream(client.ytdlp, url, options, isLive));
     this.radioFactory = radioOptions.factory ?? createRadioStream;
     this.playerMessage = new PlayerMessage(client, this);
     this.player.on(AudioPlayerStatus.Idle, (oldState) => {
@@ -131,6 +141,10 @@ export class GuildQueue {
         if (this.playbackStartedAt) {
           recordMetric('audio.start', performance.now() - this.playbackStartedAt);
           this.playbackStartedAt = 0;
+          const track = this.currentTrack;
+          if (track && track.source !== 'radio' && (track.duration === '?' || track.title === 'Загрузка…')) {
+            void this.hydrateTrackMetadata(track, this.playbackEpoch);
+          }
         }
         if (this.transitionStartedAt) {
           recordMetric('audio.transition', performance.now() - this.transitionStartedAt);
@@ -357,7 +371,7 @@ export class GuildQueue {
       try {
         media = nextTrack.source === 'radio'
           ? this.radioFactory(nextTrack.streamUrl)
-          : this.mediaFactory(nextTrack.url, { speed, startSeconds: 0 });
+          : this.mediaFactory(nextTrack.url, { speed, startSeconds: 0 }, nextTrack.isLive);
         // Cancellation immediately releases child processes, not just the waiter.
         const candidate = media;
         const abort = (): void => candidate.destroy();
@@ -442,10 +456,11 @@ export class GuildQueue {
     this.cancelRecommendations();
     this.playbackStartedAt = performance.now();
     const media = preparedMedia ?? (track.source === 'radio' ? this.radioFactory(track.streamUrl)
-      : this.mediaFactory(track.url, { speed, startSeconds }));
+      : this.mediaFactory(track.url, { speed, startSeconds }, track.isLive));
     let resource;
     try {
-      resource = createAudioResource(media.stream, { inputType: media.type, inlineVolume: true });
+      const input = media.type === StreamType.Raw ? pcmForEncoding(media.stream) : media.stream;
+      resource = createAudioResource(input, { inputType: media.type, inlineVolume: true });
       configureMusicEncoder(resource, this.voiceChannel?.bitrate);
     } catch (error) {
       media.destroy();
@@ -471,9 +486,6 @@ export class GuildQueue {
     oldStream?.destroy();
     void this.playerMessage.update();
     console.log(`[Queue:${this.guildId}] ▶ ${track.title} [${track.source === 'radio' ? track.stationId : track.videoId}] • ${track.isLive ? 'live' : track.duration}`);
-    if (track.source !== 'radio' && (track.duration === '?' || track.title === 'Загрузка…')) {
-      void this.hydrateTrackMetadata(track, this.playbackEpoch);
-    }
   }
 
   private rememberTrack(videoId: string): void {
@@ -677,19 +689,21 @@ export class GuildQueue {
     else void this.advance();
   }
 
-  async join(channel: VoiceBasedChannel): Promise<void> {
+  async join(channel: VoiceBasedChannel, { explicitListen = false } = {}): Promise<void> {
     if (this.closed) throw new Error('Очередь уже остановлена.');
     if (this.connection && this.voiceChannel?.id === channel.id
       && this.connection.state.status === VoiceConnectionStatus.Ready) return;
     if (this.joining) return this.joining;
-    this.joining = this.connect(channel);
+    const started = performance.now();
+    this.joining = this.connect(channel, explicitListen);
     try {
       await this.joining;
+      recordMetric('voice.connect', performance.now() - started);
       if (!this.closed && !this.currentTrack && !this.tracks.length) this.startIdleTimer();
     } finally { this.joining = null; }
   }
 
-  private async connect(channel: VoiceBasedChannel): Promise<void> {
+  private async connect(channel: VoiceBasedChannel, explicitListen: boolean): Promise<void> {
     this.voice?.suspend();
     this.connection?.destroy();
     this.connection = null;
@@ -699,16 +713,22 @@ export class GuildQueue {
       const connection = joinVoiceChannel({
         channelId: channel.id, guildId: channel.guild.id,
         adapterCreator: channel.guild.voiceAdapterCreator,
-        selfDeaf: !(this.voice ? this.voice.enabled : this.client.voiceRuntime?.ready),
+        selfDeaf: !explicitListen && (!this.voiceWanted
+          || !(this.voice ? this.voice.enabled : this.client.voiceRuntime?.ready)),
       });
       try {
         await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
         if (this.closed) { connection.destroy(); throw new Error('Очередь остановлена.'); }
         this.connection = connection;
         connection.subscribe(this.player);
-        if (!this.voice && this.client.voiceRuntime?.ready) this.voice = new GuildVoice(this, this.client.voiceRuntime);
-        this.voice?.attach(connection);
-        if (this.voiceWanted && this.client.voiceRuntime) void this.setVoiceEnabled(true).catch(() => {});
+        if (!explicitListen && !this.voice && this.voiceWanted && this.client.voiceRuntime?.ready) {
+          this.voice = new GuildVoice(this, this.client.voiceRuntime);
+        }
+        // /join enables the receiver after rechecking the requesting member.
+        if (!explicitListen) {
+          this.voice?.attach(connection);
+          if (this.voiceWanted && this.client.voiceRuntime) void this.setVoiceEnabled(true).catch(() => {});
+        }
         connection.on('stateChange', (oldState, newState) => {
           if (this.closed || this.connection !== connection) return;
           if (newState.status === VoiceConnectionStatus.Ready && oldState.status !== VoiceConnectionStatus.Ready) this.voice?.attach(connection);

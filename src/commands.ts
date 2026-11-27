@@ -110,6 +110,8 @@ async function requireController(interaction: ChatInputCommandInteraction, queue
   return true;
 }
 
+// A new queue can have several /join requests sharing one voice handshake.
+const pendingListenJoins = new WeakMap<GuildQueue, number>();
 const join: Command = {
   data: new SlashCommandBuilder().setName('join').setDescription('🎙 Войти в ваш голосовой канал и слушать команды'),
   async execute(interaction, client) {
@@ -122,10 +124,11 @@ const join: Command = {
     if (!permissions?.has(PermissionsBitField.Flags.Connect) || !permissions.has(PermissionsBitField.Flags.Speak)) {
       return interaction.editReply('❌ Нет прав на подключение и речь в этом канале.');
     }
-    if (!client.voiceRuntime || !await client.voiceRuntime.start()) {
+    const runtime = client.voiceRuntime;
+    if (!runtime?.prepared) {
       return interaction.editReply('❌ Голосовой обработчик недоступен. Проверьте .env, выполните npm run setup:voice и повторите /join.');
     }
-    // Startup and member fetching may take time; use the latest channel state.
+    // Fetching permissions can take time; use the latest channel state.
     if (memberVoiceChannel(interaction)?.id !== channel.id) {
       return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /join.');
     }
@@ -133,30 +136,39 @@ const join: Command = {
     if (queue?.voiceChannel && queue.voiceChannel.id !== channel.id) {
       return interaction.editReply('❌ Бот уже работает в другом голосовом канале.');
     }
-    const created = !queue;
     if (!queue) {
       queue = new GuildQueue(interaction.guildId, client);
       client.queues.set(interaction.guildId, queue);
+      pendingListenJoins.set(queue, 0);
     }
+    const pending = pendingListenJoins.get(queue);
+    if (pending !== undefined) pendingListenJoins.set(queue, pending + 1);
     try {
-      await queue.join(channel);
+      const [ready] = await Promise.all([runtime.start(), queue.join(channel, { explicitListen: true })]);
       if (memberVoiceChannel(interaction)?.id !== channel.id) {
-        if (created) await queue.stop();
         return interaction.editReply('❌ Вы вышли из голосового канала или сменили его. Повторите /join.');
       }
+      if (!ready || queue.closed) {
+        return interaction.editReply('❌ Голосовой обработчик недоступен. Проверьте .env, выполните npm run setup:voice и повторите /join.');
+      }
       if (!await queue.setVoiceEnabled(true)) {
-        if (created) await queue.stop();
         return interaction.editReply('❌ Не удалось включить прослушивание. Проверьте /voice status и повторите /join.');
       }
+      pendingListenJoins.delete(queue);
       queue.setPlayerChannel(interaction.channelId);
       return interaction.editReply({
         content: `🎙 Прослушивание включено. Назовите **${escapeMarkdown(queue.wakeName)}**, после двойного сигнала произнесите одну команду, например «включи Numb».`,
         allowedMentions: { parse: [] },
       });
     } catch (error) {
-      if (created) await queue.stop().catch(() => {});
       console.error('[join]', error);
       return interaction.editReply('❌ Не удалось подключиться или включить прослушивание. Повторите /join.');
+    } finally {
+      const count = pendingListenJoins.get(queue);
+      if (count === 1) {
+        pendingListenJoins.delete(queue);
+        if (!queue.closed && !queue.currentTrack && !queue.tracks.length && !queue.hasMetadataRequests) await queue.stop();
+      } else if (count !== undefined) pendingListenJoins.set(queue, count - 1);
     }
   },
 };
