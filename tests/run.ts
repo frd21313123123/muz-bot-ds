@@ -20,6 +20,7 @@ import './decoder.test.js';
 import './echo.test.js';
 import './echoSafety.test.js';
 import './echoReceive.test.js';
+import './echoAudio.test.js';
 import './tts.test.js';
 import './training.test.js';
 import './drive.test.js';
